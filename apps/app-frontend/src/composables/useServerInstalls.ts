@@ -36,6 +36,19 @@ export function activeInstallFor(serverId: string): ActiveServerInstall | null {
 	return activeInstalls[serverId] ?? null
 }
 
+export function beginActiveServerInstall(serverId: string): ActiveServerInstall {
+	if (activeInstalls[serverId]) {
+		throw new Error('This server already has an install running')
+	}
+	const install: ActiveServerInstall = { progress: null, log: [] }
+	activeInstalls[serverId] = install
+	return activeInstalls[serverId]!
+}
+
+export function finishActiveServerInstall(serverId: string, install: ActiveServerInstall): void {
+	if (activeInstalls[serverId] === install) activeInstalls[serverId] = undefined
+}
+
 export function serverSetupStatus(server: ServerInfoData): ServerSetupStatus | null {
 	if (activeInstalls[server.id]) return 'installing'
 	if (server.installState === 'incomplete') return 'interrupted'

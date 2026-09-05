@@ -9,6 +9,7 @@ import { serverEventListener, servers } from '@/helpers/servers'
 import type { DownloadManager } from '@/providers/download-manager'
 
 import { createServerDownloadBridge, type ServerDownloadBridge } from './server-download-bridge'
+import { beginActiveServerInstall, finishActiveServerInstall } from './useServerInstalls'
 
 export interface ServerInstallInputs {
 	gameVersion: string
@@ -114,6 +115,7 @@ export async function runServerInstall(options: RunServerInstallOptions): Promis
 		}
 	})
 
+	const activeInstall = beginActiveServerInstall(serverId)
 	try {
 		await strategy.install(serverId, inputs)
 		bridge?.complete(true)
@@ -127,5 +129,6 @@ export async function runServerInstall(options: RunServerInstallOptions): Promis
 		throw error
 	} finally {
 		unlisten()
+		finishActiveServerInstall(serverId, activeInstall)
 	}
 }
