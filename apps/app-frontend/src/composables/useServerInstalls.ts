@@ -77,11 +77,7 @@ export async function startModpackServerInstall(
 	options: InstallModpackOptions,
 	downloadManager?: import('@/providers/download-manager').DownloadManager | null,
 ): Promise<void> {
-	if (activeInstalls[serverId]) {
-		throw new Error('This server already has an install running')
-	}
-	const entry: ActiveServerInstall = { progress: null, log: [] }
-	activeInstalls[serverId] = entry
+	const entry = beginActiveServerInstall(serverId)
 
 	// [SERVER-DOWNLOAD-BRIDGE] Create a synthetic job that mirrors this server
 	// install in the global Downloads page.  The job_id uses a `server-` prefix
@@ -153,7 +149,7 @@ export async function startModpackServerInstall(
 		// [SERVER-DOWNLOAD-BRIDGE] Mark the synthetic job as succeeded or failed
 		// so it transitions out of the active tab and into history.
 		bridge?.complete(installSucceeded, entry.progress ?? undefined)
-		activeInstalls[serverId] = undefined
+		finishActiveServerInstall(serverId, entry)
 		void refreshServerList()
 	}
 }
