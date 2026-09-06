@@ -830,6 +830,7 @@ fn main() {
         .plugin(api::planet_minecraft::init())
         .plugin(api::settings::init())
         .plugin(api::storage::init())
+        .plugin(api::system_accent::init())
         .plugin(api::seed_map::init())
         .plugin(api::schematic_preview::init())
         .plugin(api::shortcuts::init())
