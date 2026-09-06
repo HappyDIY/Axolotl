@@ -314,6 +314,12 @@
   "console.command.server-not-running-placeholder": {
     "defaultMessage": "Server is not running"
   },
+  "console.command-completions.no-results": {
+    "defaultMessage": "No matching completions"
+  },
+  "console.command-completions.search": {
+    "defaultMessage": "Search command completions"
+  },
   "console.crash.export-context": {
     "defaultMessage": "Export crash context"
   },
