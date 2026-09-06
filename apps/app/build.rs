@@ -764,6 +764,8 @@ fn main() {
                         "servers_install_modpack",
                         "servers_start",
                         "servers_send_command",
+                        "servers_send_console_input",
+                        "servers_resize_console",
                         "servers_stop",
                         "servers_kill",
                         "servers_kill_port_process",

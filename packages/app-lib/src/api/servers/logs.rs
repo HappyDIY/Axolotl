@@ -1,5 +1,6 @@
 //! Console output buffering and streaming for servers.
 
+use base64::Engine;
 use std::path::PathBuf;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
@@ -9,6 +10,8 @@ use crate::api::servers::lifecycle::is_server_running;
 use crate::event::emit::emit_server;
 use crate::event::{ExitReason, ServerPayloadType};
 use crate::state::{clear_log_buffer, push_log_line};
+
+const MAX_PTY_LINE_BYTES: usize = 256 * 1024;
 
 pub async fn get_log_buffer(server_id: &str) -> Result<Vec<String>> {
     Ok(crate::state::get_log_buffer(server_id))
@@ -31,48 +34,120 @@ pub(super) async fn stream_server_output(
         match buf_reader.read_line(&mut line).await {
             Ok(0) | Err(_) => break,
             Ok(_) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                let cleaned = strip_ansi(trimmed);
-                if cleaned.is_empty() {
-                    continue;
-                }
-                // The server also echoes its log4j output (timestamped lines) to
-                // stdout/stderr in a console format that duplicates every line
-                // already delivered losslessly by `tail_server_log_file` from
-                // `logs/latest.log`. Drop those here so the file tail stays the
-                // single source of truth; only non-logged process output
-                // (bootstrap, patcher progress, JVM warnings) is streamed.
-                if is_timestamped_log_line(&cleaned) {
-                    continue;
-                }
-                // The server echoes entered commands to its own log (e.g.
-                // "> time set 0"), which the file tailer already streams. Skip
-                // those here so they are not duplicated by the stdout pipe.
-                if cleaned.starts_with("> ") {
-                    continue;
-                }
-                push_log_line(&server_id, cleaned.clone());
-                emit_server(
+                process_server_output_line(
                     &server_id,
-                    ServerPayloadType::Log { line: cleaned },
+                    line.trim_end_matches(['\r', '\n']),
+                    &mut jna_hint_emitted,
                 )
-                .await
-                .ok();
-                if !jna_hint_emitted && is_jna_macos_assertion(trimmed) {
-                    jna_hint_emitted = true;
-                    for hint in JNA_CRASH_HINT_LINES {
-                        push_log_line(&server_id, hint.to_string());
-                        emit_server(
-                            &server_id,
-                            ServerPayloadType::Log {
-                                line: hint.to_string(),
-                            },
-                        )
-                        .await
-                        .ok();
+                .await;
+            }
+        }
+    }
+}
+
+pub(super) async fn stream_server_pty_output(
+    server_id: String,
+    mut reader: Box<dyn std::io::Read + Send>,
+) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = vec![0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if sender.blocking_send(buffer[..read].to_vec()).is_err() {
+                        break;
                     }
                 }
             }
+        }
+    });
+
+    let mut pending_line = Vec::new();
+    let mut jna_hint_emitted = false;
+    while let Some(bytes) = receiver.recv().await {
+        emit_server(
+            &server_id,
+            ServerPayloadType::ConsoleOutput {
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+        )
+        .await
+        .ok();
+
+        for line in take_complete_pty_lines(&mut pending_line, &bytes) {
+            let text = String::from_utf8_lossy(&line);
+            process_server_output_line(
+                &server_id,
+                text.trim_end_matches(['\r', '\n']),
+                &mut jna_hint_emitted,
+            )
+            .await;
+        }
+    }
+    if !pending_line.is_empty() {
+        process_server_output_line(
+            &server_id,
+            &String::from_utf8_lossy(&pending_line),
+            &mut jna_hint_emitted,
+        )
+        .await;
+    }
+}
+
+fn take_complete_pty_lines(
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Vec<Vec<u8>> {
+    pending.extend_from_slice(bytes);
+    let Some(last_newline) = pending.iter().rposition(|byte| *byte == b'\n')
+    else {
+        if pending.len() > MAX_PTY_LINE_BYTES {
+            pending.clear();
+        }
+        return Vec::new();
+    };
+
+    let remainder = pending.split_off(last_newline + 1);
+    let completed = std::mem::replace(pending, remainder);
+    let mut lines = Vec::new();
+    for line in completed.split_inclusive(|byte| *byte == b'\n') {
+        if line.len() <= MAX_PTY_LINE_BYTES {
+            lines.push(line.to_vec());
+        }
+    }
+    lines
+}
+
+async fn process_server_output_line(
+    server_id: &str,
+    raw_line: &str,
+    jna_hint_emitted: &mut bool,
+) {
+    let cleaned = strip_ansi(raw_line);
+    if cleaned.is_empty()
+        || is_timestamped_log_line(&cleaned)
+        || cleaned.starts_with("> ")
+    {
+        return;
+    }
+    push_log_line(server_id, cleaned.clone());
+    emit_server(server_id, ServerPayloadType::Log { line: cleaned })
+        .await
+        .ok();
+    if !*jna_hint_emitted && is_jna_macos_assertion(raw_line) {
+        *jna_hint_emitted = true;
+        for hint in JNA_CRASH_HINT_LINES {
+            push_log_line(server_id, hint.to_string());
+            emit_server(
+                server_id,
+                ServerPayloadType::Log {
+                    line: hint.to_string(),
+                },
+            )
+            .await
+            .ok();
         }
     }
 }
@@ -245,6 +320,32 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}]0;Server console\u{1b}\\done"), "done");
         assert_eq!(strip_ansi("plain text stays"), "plain text stays");
         assert_eq!(strip_ansi("h\u{e9}llo \u{1b}[31mred"), "h\u{e9}llo red");
+    }
+
+    #[test]
+    fn splits_pty_output_without_losing_partial_or_raw_bytes() {
+        let mut pending = Vec::new();
+        assert_eq!(
+            take_complete_pty_lines(&mut pending, b"first\r\nsec"),
+            vec![b"first\r\n".to_vec()]
+        );
+        assert_eq!(pending, b"sec");
+        assert_eq!(
+            take_complete_pty_lines(&mut pending, b"ond\nthird\n"),
+            vec![b"second\n".to_vec(), b"third\n".to_vec()]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn bounds_unterminated_pty_output() {
+        let mut pending = vec![b'x'; MAX_PTY_LINE_BYTES];
+        assert!(take_complete_pty_lines(&mut pending, b"x").is_empty());
+        assert!(pending.is_empty());
+
+        let oversized = vec![b'x'; MAX_PTY_LINE_BYTES + 1];
+        assert!(take_complete_pty_lines(&mut pending, &oversized).is_empty());
+        assert!(pending.is_empty());
     }
 
     #[test]

@@ -306,6 +306,9 @@ pub enum ServerPayloadType {
     Log {
         line: String,
     },
+    ConsoleOutput {
+        data: String,
+    },
     DownloadProgress {
         downloaded: u64,
         #[serde(skip_serializing_if = "Option::is_none")]

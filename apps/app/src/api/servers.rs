@@ -18,6 +18,8 @@ pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
             servers_install_modpack,
             servers_start,
             servers_send_command,
+            servers_send_console_input,
+            servers_resize_console,
             servers_stop,
             servers_kill,
             servers_kill_port_process,
@@ -164,6 +166,23 @@ pub async fn servers_send_command(
     command: &str,
 ) -> Result<()> {
     Ok(servers::send_command(server_id, command).await?)
+}
+
+#[tauri::command]
+pub async fn servers_send_console_input(
+    server_id: &str,
+    data: &str,
+) -> Result<()> {
+    Ok(servers::send_console_input(server_id, data).await?)
+}
+
+#[tauri::command]
+pub async fn servers_resize_console(
+    server_id: &str,
+    cols: u16,
+    rows: u16,
+) -> Result<()> {
+    Ok(servers::resize_console(server_id, cols, rows).await?)
 }
 
 #[tauri::command]
