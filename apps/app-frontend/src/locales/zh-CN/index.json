@@ -407,6 +407,15 @@
   "app.appearance-settings.accent-color.purple": {
     "message": "紫色"
   },
+  "app.appearance-settings.accent-color.system": {
+    "message": "跟随系统"
+  },
+  "app.appearance-settings.accent-color.system-unsupported": {
+    "message": "系统不支持"
+  },
+  "app.appearance-settings.accent-color.system-unsupported-label": {
+    "message": "跟随系统：系统不支持"
+  },
   "app.appearance-settings.accent-color.title": {
     "message": "强调色"
   },

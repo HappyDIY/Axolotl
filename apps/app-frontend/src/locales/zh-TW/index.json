@@ -380,6 +380,15 @@
   "app.appearance-settings.accent-color.purple": {
     "message": "紫色"
   },
+  "app.appearance-settings.accent-color.system": {
+    "message": "跟隨系統"
+  },
+  "app.appearance-settings.accent-color.system-unsupported": {
+    "message": "系統不支援"
+  },
+  "app.appearance-settings.accent-color.system-unsupported-label": {
+    "message": "跟隨系統：系統不支援"
+  },
   "app.appearance-settings.accent-color.title": {
     "message": "強調色"
   },
