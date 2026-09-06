@@ -148,6 +148,7 @@ const pointerSelecting = ref(false)
 let terminal: Terminal | null = null
 let resizeObserver: ResizeObserver | null = null
 let pendingWrites: Uint8Array[] = []
+let inputWriteQueue = Promise.resolve()
 const encoder = new TextEncoder()
 const TERMINAL_ROWS = 12
 const INITIAL_CANDIDATE_TERMINAL_ROWS = 512
@@ -523,12 +524,14 @@ function handleCompositionEnd(event: CompositionEvent) {
 	}
 }
 
-async function sendText(text: string) {
-	try {
-		await props.sendInput(encoder.encode(text))
-	} catch {
-		// A stop can race the final keystroke; the next server start remounts the input.
-	}
+function sendText(text: string) {
+	const data = encoder.encode(text)
+	inputWriteQueue = inputWriteQueue
+		.then(() => props.sendInput(data))
+		.catch(() => {
+			// A stop can race the final keystroke; keep the queue usable for the next write.
+		})
+	return inputWriteQueue
 }
 
 function selectCandidate(target: JLineCandidate) {
