@@ -40,6 +40,7 @@ export type ServerExitReason = 'eula'
 
 export type ServerEventPayload =
 	| { event: 'log'; line: string }
+	| { event: 'console_output'; data: string }
 	| { event: 'download_progress'; downloaded: number; total?: number }
 	| { event: 'started' }
 	| { event: 'stopped'; crashed: boolean; reason?: ServerExitReason }
@@ -108,6 +109,13 @@ export const servers = {
 	) => invoke<void>(command('servers_start'), { serverId, ...options }),
 	sendCommand: (serverId: string, commandText: string) =>
 		invoke<void>(command('servers_send_command'), { serverId, command: commandText }),
+	sendConsoleInput: (serverId: string, data: Uint8Array) =>
+		invoke<void>(command('servers_send_console_input'), {
+			serverId,
+			data: bytesToBase64(data),
+		}),
+	resizeConsole: (serverId: string, cols: number, rows: number) =>
+		invoke<void>(command('servers_resize_console'), { serverId, cols, rows }),
 	stop: (serverId: string) => invoke<void>(command('servers_stop'), { serverId }),
 	kill: (serverId: string) => invoke<void>(command('servers_kill'), { serverId }),
 	killPortProcess: (port: number) => invoke<void>(command('servers_kill_port_process'), { port }),
@@ -116,6 +124,16 @@ export const servers = {
 	getLogBuffer: (serverId: string) =>
 		invoke<string[]>(command('servers_get_log_buffer'), { serverId }),
 	clearLog: (serverId: string) => invoke<void>(command('servers_clear_log'), { serverId }),
+}
+
+export function base64ToBytes(data: string): Uint8Array {
+	return Uint8Array.from(atob(data), (character) => character.charCodeAt(0))
+}
+
+function bytesToBase64(data: Uint8Array): string {
+	let binary = ''
+	for (const byte of data) binary += String.fromCharCode(byte)
+	return btoa(binary)
 }
 
 export async function serverEventListener(

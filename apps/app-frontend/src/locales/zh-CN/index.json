@@ -6113,6 +6113,9 @@
   "app.servers.console.command-echo": {
     "message": "> {command}"
   },
+  "app.servers.console.forge-command-placeholder": {
+    "message": "发送命令，支持 Tab 补全"
+  },
   "app.servers.console.not-running": {
     "message": "服务器未运行"
   },
