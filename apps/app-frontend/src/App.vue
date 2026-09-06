@@ -94,6 +94,7 @@ import NavButton from '@/components/ui/NavButton.vue'
 import NavRail from '@/components/ui/NavRail.vue'
 import OnboardingOverlay from '@/components/ui/onboarding/OnboardingOverlay.vue'
 import QuickInstanceSwitcher from '@/components/ui/QuickInstanceSwitcher.vue'
+import RemoteAnnouncements from '@/components/ui/RemoteAnnouncements.vue'
 import SplashScreen from '@/components/ui/SplashScreen.vue'
 import WindowControls from '@/components/ui/WindowControls.vue'
 import { useCheckDisableMouseover } from '@/composables/macCssFix.js'
@@ -105,6 +106,7 @@ import { trackEvent } from '@/helpers/analytics'
 import { check_reachable } from '@/helpers/auth.js'
 import { get_user, get_version } from '@/helpers/cache.js'
 import { configureCurseForgeManualDownloadWatcher } from '@/helpers/curseforge'
+import { DIRECT_LINKS_SYNCED_EVENT, syncConfiguredDirectLinks } from '@/helpers/direct-link-sync'
 import { getMissingContentScannerSettings } from '@/helpers/downloads-scanner'
 import { classifyDroppedItem } from '@/helpers/drop'
 import {
@@ -114,7 +116,7 @@ import {
 	warning_listener,
 } from '@/helpers/events.js'
 import { install_create_modpack_instance, install_get_modpack_preview } from '@/helpers/install'
-import { get as getInstance, run } from '@/helpers/instance'
+import { type DirectLinkSyncReport, get as getInstance, run } from '@/helpers/instance'
 import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
@@ -139,8 +141,6 @@ import {
 	exportErrorLogs,
 	getOS,
 	getUpdateSize,
-	installAptUpdate,
-	isAptLinux,
 	isDev,
 	isElevated,
 	isNetworkMetered,
@@ -321,7 +321,6 @@ const onboardingReplay = ref(false)
 const nativeDecorations = ref(false)
 
 const os = ref('')
-const aptLinux = ref(false)
 const isDevEnvironment = ref(false)
 
 /**
@@ -499,10 +498,62 @@ onMounted(async () => {
 	unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
 	document.querySelector('body').addEventListener('click', handleClick)
 	document.querySelector('body').addEventListener('auxclick', handleAuxClick)
+	window.addEventListener(DIRECT_LINKS_SYNCED_EVENT, handleDirectLinkSyncReport)
 
 	checkUpdates()
 	void warnIfRunningElevated()
+	startDirectLinkSync()
 })
+
+let directLinkSync: (() => Promise<void>) | undefined
+let stopDirectLinkSync: (() => void) | undefined
+let directLinkSyncErrorSignature = ''
+
+function handleDirectLinkSyncReport(event: Event) {
+	if (!(event instanceof CustomEvent)) return
+	const report = event.detail as DirectLinkSyncReport
+	if (!Array.isArray(report?.errors)) return
+
+	const details = report.errors.join('\n')
+	if (!details) {
+		directLinkSyncErrorSignature = ''
+		return
+	}
+	if (details === directLinkSyncErrorSignature) return
+
+	directLinkSyncErrorSignature = details
+	addNotification({
+		title: formatMessage(messages.directLinkSyncIssuesTitle),
+		text: details,
+		type: 'warning',
+	})
+}
+
+function startDirectLinkSync() {
+	const readRoots = () => {
+		try {
+			const parsed = JSON.parse(localStorage.getItem('axolotl-minecraft-directories') ?? '[]')
+			return Array.isArray(parsed)
+				? parsed.filter((value): value is string => typeof value === 'string' && value.trim())
+				: []
+		} catch {
+			return []
+		}
+	}
+	const sync = () => syncConfiguredDirectLinks(readRoots()).catch(handleError)
+	const handleWindowFocus = () => {
+		void sync()
+	}
+
+	directLinkSync = sync
+	window.addEventListener('focus', handleWindowFocus)
+	void sync()
+	stopDirectLinkSync = () => {
+		window.removeEventListener('focus', handleWindowFocus)
+		if (directLinkSync === sync) directLinkSync = undefined
+		if (stopDirectLinkSync) stopDirectLinkSync = undefined
+	}
+}
 
 onUnmounted(async () => {
 	window.removeEventListener('keydown', handleGlobalKeydown, true)
@@ -510,7 +561,9 @@ onUnmounted(async () => {
 	unlistenLightweightModeError?.()
 	document.querySelector('body').removeEventListener('click', handleClick)
 	document.querySelector('body').removeEventListener('auxclick', handleAuxClick)
+	window.removeEventListener(DIRECT_LINKS_SYNCED_EVENT, handleDirectLinkSyncReport)
 	clearDelayedUpdatePopup()
+	stopDirectLinkSync?.()
 	await unlistenUpdateDownload?.()
 	downloadManager.dispose()
 })
@@ -610,6 +663,10 @@ const messages = defineMessages({
 	updateInstalledToastText: {
 		id: 'app.update.complete-toast.text',
 		defaultMessage: 'Click here to view the changelog.',
+	},
+	directLinkSyncIssuesTitle: {
+		id: 'app.direct-link-sync.issues-title',
+		defaultMessage: 'External Minecraft instances need attention',
 	},
 	authUnreachableHeader: {
 		id: 'app.auth-servers.unreachable.header',
@@ -1023,7 +1080,6 @@ async function setupApp() {
 	if (defaultPageRoute && defaultPageRoute !== '/') await router.push(defaultPageRoute)
 
 	os.value = await getOS()
-	aptLinux.value = await isAptLinux().catch(() => false)
 	const dev = await isDev()
 	isDevEnvironment.value = dev
 	pendingUpdateAnnouncementVersion.value = pending_update_toast_for_version
@@ -1239,6 +1295,10 @@ provide(
 		(await minecraftCrashModal.value?.handleLaunchError(launchError, payload)) ?? false,
 )
 provide('previewMinecraftCrashModal', () => minecraftCrashModal.value?.showPreview())
+const remoteAnnouncementPreview = ref<InstanceType<typeof RemoteAnnouncements>>()
+provide('previewRemoteAnnouncement', (type: 'modal' | 'notification', withAction = false) => {
+	remoteAnnouncementPreview.value?.preview(type, withAction)
+})
 provide('previewPrivacyConsentModal', previewPrivacyConsentModal)
 provide('previewUpdateAnnouncement', (version = null) => {
 	const previewVersion = version ?? pendingUpdateAnnouncementVersion.value
@@ -1391,7 +1451,10 @@ router.afterEach((to, from, failure) => {
 		fromPath: from.path,
 		failed: failure,
 	})
-	if (!failure && stateInitialized.value) syncDiscordActivity(to)
+	if (!failure) {
+		void directLinkSync?.()
+		if (stateInitialized.value) syncDiscordActivity(to)
+	}
 	setTimeout(() => {
 		if (!suspensePending && stateInitialized.value) {
 			if (initialLoadToken) {
@@ -1814,18 +1877,9 @@ const updatePopupMessages = defineMessages({
 		id: 'app.update-popup.body.download-complete',
 		defaultMessage: `Axolotl Launcher v{version} has finished downloading. Reload to update now, or automatically when you close Axolotl Launcher.`,
 	},
-	linuxBody: {
-		id: 'app.update-popup.body.linux',
-		defaultMessage:
-			'Axolotl Launcher v{version} is available. Use your package manager to update for the latest features and fixes!',
-	},
 	reload: {
 		id: 'app.update-popup.reload',
 		defaultMessage: 'Reload to update',
-	},
-	aptUpdate: {
-		id: 'app.update-popup.apt-update',
-		defaultMessage: 'Update',
 	},
 	download: {
 		id: 'app.update-popup.download',
@@ -1887,28 +1941,7 @@ function showDelayedUpdatePopup() {
 		return
 	}
 
-	if (aptLinux.value && !finishedDownloading.value) {
-		// Debian and derivatives: the update installs through the package
-		// manager with a single pkexec prompt, so there is no download size.
-		addPopupNotification({
-			title: formatMessage(updatePopupMessages.updateAvailable),
-			text: formatMessage(updatePopupMessages.linuxBody, { version: update.version }),
-			type: 'info',
-			autoCloseMs: null,
-			buttons: [
-				{
-					label: formatMessage(updatePopupMessages.aptUpdate),
-					action: () => downloadAvailableAppUpdate(),
-					color: 'brand',
-				},
-				{
-					label: formatMessage(updatePopupMessages.changelog),
-					action: () => openAppUpdateChangelog(),
-					keepOpen: true,
-				},
-			],
-		})
-	} else if (metered.value && !finishedDownloading.value) {
+	if (metered.value && !finishedDownloading.value) {
 		addPopupNotification({
 			title: formatMessage(updatePopupMessages.updateAvailable),
 			text: formatMessage(updatePopupMessages.meteredBody, { version: update.version }),
@@ -2012,20 +2045,6 @@ async function performUpdateCheck() {
 	console.log(`Update ${update.version} is available.`)
 
 	metered.value = await isNetworkMetered()
-	if (aptLinux.value) {
-		// Debian and derivatives update through apt; the pkexec prompt is the
-		// single authorization for the whole repo setup + package install.
-		console.log('apt-managed system; updating through apt')
-		if (!metered.value) {
-			console.log('Starting apt update')
-			downloadUpdate(update)
-		} else {
-			console.log(`Metered connection detected, not auto-updating via apt.`)
-			markAppUpdateActionable(update.version)
-			scheduleDelayedUpdatePopup()
-		}
-		return 'available'
-	}
 
 	if (!metered.value) {
 		console.log('Starting download of update')
@@ -2068,9 +2087,6 @@ async function downloadUpdate(versionToDownload) {
 		return
 	}
 
-	if (aptLinux.value) {
-		return installAptUpdateForVersion(versionToDownload)
-	}
 	if (downloading.value || appUpdateDownload.progress.value !== 0) {
 		console.error(`Update ${versionToDownload.version} already downloading`)
 		return
@@ -2110,44 +2126,8 @@ async function downloadUpdate(versionToDownload) {
 	}
 }
 
-// Debian and derivatives update through apt with a single pkexec prompt.
-// The package is installed directly, so there is no separate download step.
-async function installAptUpdateForVersion(versionToDownload) {
-	if (downloading.value) {
-		console.error(`Update ${versionToDownload.version} already installing`)
-		return
-	}
-
-	console.log(`Installing update ${versionToDownload.version} via apt`)
-	downloading.value = true
-	try {
-		await backupAppDbForUpdate(versionToDownload.version)
-		await installAptUpdate(versionToDownload.version)
-		downloading.value = false
-		finishedDownloading.value = true
-		console.log('Finished installing via apt!')
-		markAppUpdateActionable(versionToDownload.version, 'downloaded')
-		scheduleDelayedUpdatePopup()
-	} catch (error) {
-		downloading.value = false
-		handleError(error)
-	}
-}
-
 async function installUpdate() {
 	restarting.value = true
-
-	if (aptLinux.value) {
-		// The apt package was already installed by pkexec; just relaunch into
-		// the new version.
-		try {
-			await restartApp()
-		} catch (e) {
-			restarting.value = false
-			handleError(e)
-		}
-		return
-	}
 
 	try {
 		await backupAppDbForUpdate(availableUpdate.value?.version)
@@ -2581,6 +2561,18 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 	<JavaDownloadConfirmationModal ref="javaDownloadConfirmationModal" />
 	<PrivacyConsentModal ref="privacyConsentModal" @saved="handlePrivacyConsentSaved" />
 	<CommunityAnnouncementModal ref="communityAnnouncementModal" />
+	<RemoteAnnouncements
+		:ready="
+			stateInitialized && !privacyConsentPending && !showOnboarding && !updateAnnouncementShowing
+		"
+	/>
+	<RemoteAnnouncements
+		ref="remoteAnnouncementPreview"
+		preview-only
+		:ready="
+			stateInitialized && !privacyConsentPending && !showOnboarding && !updateAnnouncementShowing
+		"
+	/>
 	<SurveyAnnouncementModal ref="surveyModal" />
 	<UpdateAnnouncementModal ref="updateAnnouncementModal" @closed="handleUpdateAnnouncementClosed" />
 	<NewModal

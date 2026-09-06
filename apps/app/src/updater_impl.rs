@@ -1,5 +1,7 @@
 use crate::api::Result;
-use serde::Serialize;
+use futures::StreamExt;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use tauri::http::HeaderValue;
 use tauri::http::header::ACCEPT;
@@ -8,18 +10,14 @@ use tauri_plugin_http::reqwest;
 use tauri_plugin_http::reqwest::ClientBuilder;
 use tauri_plugin_updater::{Error, Update, UpdaterExt};
 use theseus::{
-    LoadingBarType, emit_loading, init_loading, launcher_user_agent, settings,
+    LoadingBarType, emit_loading, init_loading, launcher_user_agent,
 };
 use tokio::time::Instant;
 use url::Url;
 
 const UPDATE_SERVER_LATEST_URL: &str = "https://update.axlmc.org/latest";
-
-// Debian and derivatives update via the apt package manager. The whole
-// operation (repo setup script plus package install) runs as a single
-// `pkexec` invocation so the polkit authorization prompt appears only once.
-const AXOLOTL_APT_SETUP_URL: &str = "https://ppa.axlmc.org/setup.sh";
-const AXOLOTL_APT_PACKAGE: &str = "axolotl-launcher";
+const UPDATE_SERVER_API: &str = "https://update.axlmc.org/api/versions";
+const UPDATE_SERVER_BASE: &str = "https://update.axlmc.org/";
 
 // The updater plugin builds `Update` with no request timeout, so a stalled
 // connection would hang the download forever. Bound the whole download.
@@ -43,6 +41,118 @@ pub struct UpdateMetadata {
 
 #[derive(Default)]
 pub struct PendingUpdateData(pub Mutex<Option<(Arc<Update>, Vec<u8>)>>);
+
+// ── Update Server API types ─────────────────────────────────────
+
+#[derive(Deserialize)]
+struct VersionsResponse {
+    versions: Vec<VersionEntry>,
+}
+
+#[derive(Deserialize)]
+struct VersionEntry {
+    version: String,
+    artifacts: Vec<ArtifactEntry>,
+}
+
+#[derive(Deserialize)]
+struct ArtifactEntry {
+    kind: String,
+    #[serde(default)]
+    variant: Option<String>,
+    platform: String,
+    architecture: String,
+    relative_path: String,
+    #[serde(default)]
+    sha256: Option<String>,
+    #[serde(default)]
+    size: u64,
+}
+
+/// The .deb asset for an apt-managed Linux update, from the Update Server
+/// catalog (`/api/versions`). The deb has no minisign signature, so its
+/// integrity is verified with the catalog's sha256 and size instead.
+struct AptDebAsset {
+    url: Url,
+    sha256: String,
+    size: u64,
+}
+
+fn apt_deb_arch() -> Result<&'static str> {
+    match std::env::consts::ARCH {
+        "x86_64" => Ok("amd64"),
+        "aarch64" => Ok("arm64"),
+        arch => Err(theseus::Error::from(theseus::ErrorKind::OtherError(
+            format!("Unsupported architecture for apt updates: {arch}"),
+        ))
+        .into()),
+    }
+}
+
+async fn fetch_apt_deb_asset(version: &str) -> Result<AptDebAsset> {
+    let response = ClientBuilder::new()
+        .user_agent(launcher_user_agent())
+        .timeout(UPDATE_DOWNLOAD_TIMEOUT)
+        .build()?
+        .get(UPDATE_SERVER_API)
+        .send()
+        .await?;
+
+    if !response.status().is_success() {
+        return Err(Error::Network(format!(
+            "Failed to fetch update catalog: {}",
+            response.status()
+        ))
+        .into());
+    }
+
+    let catalog: VersionsResponse = response.json().await?;
+    let release = catalog
+        .versions
+        .iter()
+        .find(|entry| entry.version == version)
+        .ok_or_else(|| {
+            theseus::Error::from(theseus::ErrorKind::OtherError(format!(
+                "Update catalog has no entry for version {version}"
+            )))
+        })?;
+
+    let arch = std::env::consts::ARCH;
+    let artifact = release
+        .artifacts
+        .iter()
+        .find(|entry| {
+            entry.kind == "installer"
+                && entry.variant.as_deref() == Some("deb")
+                && entry.platform == "linux"
+                && entry.architecture == arch
+        })
+        .ok_or_else(|| {
+            theseus::Error::from(theseus::ErrorKind::OtherError(format!(
+                "Update catalog has no deb artifact for {version} on {arch}"
+            )))
+        })?;
+
+    let sha256 = artifact.sha256.clone().ok_or_else(|| {
+        theseus::Error::from(theseus::ErrorKind::OtherError(format!(
+            "Update catalog has no sha256 for the deb artifact of {version}"
+        )))
+    })?;
+
+    let url =
+        Url::parse(&format!("{UPDATE_SERVER_BASE}{}", artifact.relative_path))
+            .map_err(|error| {
+                theseus::Error::from(theseus::ErrorKind::OtherError(
+                    error.to_string(),
+                ))
+            })?;
+
+    Ok(AptDebAsset {
+        url,
+        sha256,
+        size: artifact.size,
+    })
+}
 
 // ── Updater plugin helpers ───────────────────────────────────────
 
@@ -135,6 +245,14 @@ async fn check_with_updater<R: Runtime>(
         return Ok(None);
     };
     update.timeout = Some(UPDATE_DOWNLOAD_TIMEOUT);
+
+    // On Debian and derivatives the plugin's minisign signature check cannot
+    // validate the unsigned .deb, so point the download at the deb from the
+    // Update Server catalog instead of the AppImage artifact. Its integrity
+    // is verified with the catalog's sha256/size during the download.
+    if is_apt_linux() {
+        update.download_url = fetch_apt_deb_asset(&update.version).await?.url;
+    }
 
     let published_at = update
         .raw_json
@@ -238,25 +356,108 @@ pub async fn enqueue_update_for_installation<R: Runtime>(
     .await?;
 
     let download_start = Instant::now();
-    let update_data = update
-        .download(
-            |chunk_size, total_size| {
-                let Some(total_size) = total_size else {
-                    return;
-                };
+    let update_data = if is_apt_linux() {
+        // The .deb carries no minisign signature, so the plugin's signed
+        // download cannot be used. Fetch the catalog entry and verify the
+        // downloaded bytes against its sha256 and size instead.
+        let asset = fetch_apt_deb_asset(&update.version).await?;
+
+        let mut headers = update.headers.clone();
+        if !headers.contains_key(ACCEPT) {
+            headers.insert(
+                ACCEPT,
+                HeaderValue::from_static("application/octet-stream"),
+            );
+        }
+
+        let mut request =
+            ClientBuilder::new().user_agent(launcher_user_agent());
+        if let Some(timeout) = update.timeout {
+            request = request.timeout(timeout);
+        }
+        if let Some(ref proxy) = update.proxy {
+            let proxy = reqwest::Proxy::all(proxy.as_str())?;
+            request = request.proxy(proxy);
+        }
+        let response = request
+            .build()?
+            .get(update.download_url.clone())
+            .headers(headers)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(Error::Network(format!(
+                "Download request failed with status: {}",
+                response.status()
+            ))
+            .into());
+        }
+
+        let total_size = response.content_length().unwrap_or(asset.size);
+        let mut buffer = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            buffer.extend_from_slice(&chunk);
+            if total_size > 0 {
                 if let Err(e) = emit_loading(
                     &progress,
-                    chunk_size as f64 / total_size as f64,
+                    buffer.len() as f64 / total_size as f64,
                     None,
                 ) {
                     tracing::error!(
                         "Failed to update download progress bar: {e}"
                     );
                 }
-            },
-            || {},
-        )
-        .await?;
+            }
+        }
+
+        if buffer.len() as u64 != asset.size {
+            return Err(theseus::Error::from(theseus::ErrorKind::OtherError(
+                format!(
+                    "Downloaded deb size mismatch: expected {}, got {}",
+                    asset.size,
+                    buffer.len()
+                ),
+            ))
+            .into());
+        }
+
+        let digest = Sha256::digest(&buffer);
+        let digest_hex = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        if digest_hex != asset.sha256 {
+            return Err(theseus::Error::from(theseus::ErrorKind::OtherError(
+                "Downloaded deb sha256 mismatch".to_string(),
+            ))
+            .into());
+        }
+
+        buffer
+    } else {
+        update
+            .download(
+                |chunk_size, total_size| {
+                    let Some(total_size) = total_size else {
+                        return;
+                    };
+                    if let Err(e) = emit_loading(
+                        &progress,
+                        chunk_size as f64 / total_size as f64,
+                        None,
+                    ) {
+                        tracing::error!(
+                            "Failed to update download progress bar: {e}"
+                        );
+                    }
+                },
+                || {},
+            )
+            .await?
+    };
     let download_duration = download_start.elapsed();
     tracing::info!("Downloaded update in {download_duration:?}");
 
@@ -297,11 +498,10 @@ pub fn is_apt_linux() -> bool {
     }
 }
 
-/// Update Axolotl on Debian and its derivatives through apt, prompting for
-/// root once via `pkexec`. Runs the repo setup script and the package
-/// install in a single privileged shell so only one authorization is asked.
-#[tauri::command]
-pub async fn install_apt_update(version: String) -> Result<()> {
+/// Install the downloaded .deb on Debian and its derivatives, prompting for
+/// root once via `pkexec`. The package is installed from the absolute path
+/// of a temporary file, which is removed afterwards.
+pub async fn install_apt_package(version: &str, data: &[u8]) -> Result<()> {
     if !is_apt_linux() {
         return Err(theseus::Error::from(theseus::ErrorKind::OtherError(
             "apt updates are only supported on Debian-based Linux systems with pkexec"
@@ -310,18 +510,23 @@ pub async fn install_apt_update(version: String) -> Result<()> {
         .into());
     }
 
-    // Everything runs as root under one pkexec prompt; no `sudo` needed inside.
-    let script = format!(
-        "curl -fsSL {AXOLOTL_APT_SETUP_URL} | bash && \
-         apt-get update && \
-         apt-get install -y {AXOLOTL_APT_PACKAGE}"
-    );
+    let arch = apt_deb_arch()?;
+    let deb_path = std::env::temp_dir()
+        .join(format!("Axolotl.Launcher_{version}_{arch}.deb"));
+    std::fs::write(&deb_path, data).map_err(|io| {
+        theseus::Error::from(theseus::ErrorKind::OtherError(format!(
+            "Failed to write the downloaded deb: {io}"
+        )))
+    })?;
+    let _deb_cleanup = TempDebFile(deb_path.clone());
 
+    let install_path = deb_path.clone();
     let output = tokio::task::spawn_blocking(move || {
         std::process::Command::new("pkexec")
-            .arg("sh")
-            .arg("-c")
-            .arg(&script)
+            .arg("apt")
+            .arg("install")
+            .arg("-y")
+            .arg(&install_path)
             .output()
     })
     .await
@@ -339,16 +544,31 @@ pub async fn install_apt_update(version: String) -> Result<()> {
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(theseus::Error::from(theseus::ErrorKind::OtherError(
-            format!("apt update failed: {}", stderr.trim()),
+            format!("apt install failed: {}", stderr.trim()),
         ))
         .into());
     }
 
-    // Persist the post-update announcement trigger so the new release notes
-    // show after the app restarts into the freshly installed version.
-    let mut current = settings::get().await?;
-    current.pending_update_toast_for_version = Some(version);
-    settings::set(current).await?;
-
     Ok(())
+}
+
+/// Removes a temporary Debian package when installation finishes or fails.
+///
+/// The installer awaits a blocking task and has several fallible operations
+/// after creating the file. Keeping cleanup in `Drop` makes every return path
+/// (including task and process-launch errors) remove the package.
+struct TempDebFile(std::path::PathBuf);
+
+impl Drop for TempDebFile {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_file(&self.0) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    path = %self.0.display(),
+                    error = %error,
+                    "Failed to remove temporary deb file"
+                );
+            }
+        }
+    }
 }

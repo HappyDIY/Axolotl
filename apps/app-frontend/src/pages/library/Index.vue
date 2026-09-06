@@ -12,6 +12,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { NewInstanceImage } from '@/assets/icons'
 import { useNetworkStatus } from '@/composables/useNetworkStatus'
+import { DIRECT_LINKS_SYNCED_EVENT } from '@/helpers/direct-link-sync'
 import { instance_listener } from '@/helpers/events.js'
 import { list } from '@/helpers/instance'
 import { useBreadcrumbs } from '@/store/breadcrumbs.js'
@@ -41,13 +42,20 @@ breadcrumbs.setRootContext({ name: formatMessage(messages.library), link: route.
 
 const instances = shallowRef(await list().catch(handleError))
 
+const refreshInstances = async () => {
+	instances.value = await list().catch(handleError)
+}
+
+window.addEventListener(DIRECT_LINKS_SYNCED_EVENT, refreshInstances)
+
 const { offline } = useNetworkStatus()
 
 const unlistenInstance = await instance_listener(async () => {
-	instances.value = await list().catch(handleError)
+	await refreshInstances()
 })
 onUnmounted(() => {
 	unlistenInstance()
+	window.removeEventListener(DIRECT_LINKS_SYNCED_EVENT, refreshInstances)
 })
 </script>
 

@@ -120,7 +120,11 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
 			'app.appearance-settings.close-behavior.title',
 			'Choose how to close Axolotl Launcher',
 		),
-		keywords: ['close', 'tray', 'lightweight'],
+		keywords: [
+			message('app.appearance-settings.close-behavior.close', 'Close directly'),
+			message('app.appearance-settings.close-behavior.lightweight', 'Hide to tray'),
+			message('app.appearance-settings.lightweight-mode.title', 'Lightweight mode'),
+		],
 	},
 	{
 		id: 'launch-minimize-launcher',
@@ -328,7 +332,13 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
 		id: 'storage-app-directory',
 		categoryId: 'storage-backups',
 		targetId: 'settings-target-storage-app-directory',
-		label: message('app.settings.resources.app-directory', 'App directory'),
+		label: message('app.settings.resources.axolotl-data-directory', 'Axolotl data directory'),
+	},
+	{
+		id: 'storage-minecraft-directories',
+		categoryId: 'storage-backups',
+		targetId: 'settings-target-storage-minecraft-directories',
+		label: message('app.settings.resources.minecraft-directories', 'Minecraft directories'),
 	},
 	{
 		id: 'storage-cache',
