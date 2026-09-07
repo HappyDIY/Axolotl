@@ -23,6 +23,7 @@ pub mod servers;
 pub mod settings;
 pub mod shortcuts;
 pub mod storage;
+pub mod system_accent;
 pub mod tags;
 pub mod telemetry;
 pub mod terracotta;

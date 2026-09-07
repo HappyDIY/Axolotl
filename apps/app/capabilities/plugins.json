@@ -167,6 +167,7 @@
 		"ai:default",
 		"translation:default",
 		"storage:default",
+		"system-accent:default",
 		"utils:default",
 		"worlds:default",
 		"drop:default",
