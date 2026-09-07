@@ -407,6 +407,15 @@
   "app.appearance-settings.accent-color.purple": {
     "message": "Purple"
   },
+  "app.appearance-settings.accent-color.system": {
+    "message": "Follow system"
+  },
+  "app.appearance-settings.accent-color.system-unsupported": {
+    "message": "System unsupported"
+  },
+  "app.appearance-settings.accent-color.system-unsupported-label": {
+    "message": "Follow system: System unsupported"
+  },
   "app.appearance-settings.accent-color.title": {
     "message": "Accent color"
   },

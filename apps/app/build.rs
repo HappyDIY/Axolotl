@@ -85,8 +85,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/seed_map/cubiomes_bridge.c");
     println!("cargo:rerun-if-changed=src/seed_map/cubiomes_bridge.h");
     println!("cargo:rerun-if-changed=vendor/cubiomes");
-    #[cfg(not(target_os = "windows"))]
-    println!("cargo:rustc-link-lib=m");
+    // Build scripts run for the host, so use Cargo's target metadata rather
+    // than `cfg(target_os = ...)` when deciding whether libm is needed.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        println!("cargo:rustc-link-lib=m");
+    }
 
     // Sadly, there is no better way to do it right now
     // You could try parsing source code here and detecting #[tauri::command]
@@ -637,6 +640,14 @@ fn main() {
                 "storage",
                 InlinedPlugin::new()
                     .commands(&["storage_scan_start", "storage_open_paths"])
+                    .default_permission(
+                        DefaultPermissionRule::AllowAllCommands,
+                    ),
+            )
+            .plugin(
+                "system-accent",
+                InlinedPlugin::new()
+                    .commands(&["system_accent_color"])
                     .default_permission(
                         DefaultPermissionRule::AllowAllCommands,
                     ),

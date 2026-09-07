@@ -775,6 +775,7 @@ pub enum AccentColor {
     Green,
     Blue,
     Purple,
+    System,
     Custom(String),
 }
 
@@ -786,6 +787,7 @@ impl AccentColor {
             AccentColor::Green => "green",
             AccentColor::Blue => "blue",
             AccentColor::Purple => "purple",
+            AccentColor::System => "system",
             AccentColor::Custom(value) => {
                 if Self::is_valid_custom(value) {
                     value
@@ -802,6 +804,7 @@ impl AccentColor {
             "green" => AccentColor::Green,
             "blue" => AccentColor::Blue,
             "purple" => AccentColor::Purple,
+            "system" => AccentColor::System,
             other => match Self::parse_custom(other) {
                 Some(custom) => custom,
                 None => AccentColor::Pink,
@@ -956,6 +959,7 @@ mod tests {
         assert_eq!(AccentColor::from_string("green"), AccentColor::Green);
         assert_eq!(AccentColor::from_string("blue"), AccentColor::Blue);
         assert_eq!(AccentColor::from_string("purple"), AccentColor::Purple);
+        assert_eq!(AccentColor::from_string("system"), AccentColor::System);
     }
 
     #[test]
@@ -988,6 +992,10 @@ mod tests {
             "\"blue\""
         );
         assert_eq!(
+            serde_json::to_string(&AccentColor::System).unwrap(),
+            "\"system\""
+        );
+        assert_eq!(
             serde_json::to_string(&custom).unwrap(),
             "\"custom:#db2777\""
         );
@@ -1007,6 +1015,8 @@ mod tests {
         assert_eq!(color, AccentColor::Custom("custom:#1bd96a".to_owned()));
         let preset: AccentColor = serde_json::from_str("\"purple\"").unwrap();
         assert_eq!(preset, AccentColor::Purple);
+        let system: AccentColor = serde_json::from_str("\"system\"").unwrap();
+        assert_eq!(system, AccentColor::System);
     }
 
     #[test]

@@ -385,6 +385,7 @@ const closeRequestInProgress = ref(false)
 let allowWindowClose = false
 let unlistenCloseRequested: (() => void) | undefined
 let unlistenLightweightModeError: (() => void) | undefined
+let unlistenSystemAccentColor: (() => void) | undefined
 const minecraftCrashModal = ref()
 const javaDownloadConfirmationModal = ref()
 const pendingUpdateAnnouncementVersion = ref(null)
@@ -559,6 +560,7 @@ onUnmounted(async () => {
 	window.removeEventListener('keydown', handleGlobalKeydown, true)
 	unlistenCloseRequested?.()
 	unlistenLightweightModeError?.()
+	unlistenSystemAccentColor?.()
 	document.querySelector('body').removeEventListener('click', handleClick)
 	document.querySelector('body').removeEventListener('auxclick', handleAuxClick)
 	window.removeEventListener(DIRECT_LINKS_SYNCED_EVENT, handleDirectLinkSyncReport)
@@ -1092,6 +1094,7 @@ async function setupApp() {
 	if (os.value !== 'MacOS') await getCurrentWindow().setDecorations(native_decorations)
 
 	themeStore.setThemeState(theme)
+	await initializeSystemAccentColor()
 	themeStore.setAccentColor(accent_color)
 	themeStore.collapsedNavigation = collapsed_navigation
 	themeStore.advancedRendering = advanced_rendering
@@ -1177,6 +1180,32 @@ async function setupApp() {
 		generateSkinPreviews(skins, capes)
 	} catch (error) {
 		console.warn('Failed to generate skin previews in app setup.', error)
+	}
+}
+
+type SystemAccentColorPayload = {
+	hex: string
+	r: number
+	g: number
+	b: number
+}
+
+async function initializeSystemAccentColor() {
+	try {
+		unlistenSystemAccentColor = await listen<SystemAccentColorPayload>(
+			'system-accent-color-changed',
+			({ payload }) => themeStore.setSystemAccentColor(payload.hex),
+		)
+	} catch (error) {
+		console.warn('Failed to listen for system accent color changes', error)
+	}
+
+	try {
+		const color = await invoke<SystemAccentColorPayload>('plugin:system-accent|system_accent_color')
+		themeStore.setSystemAccentColor(color.hex)
+	} catch (error) {
+		themeStore.setSystemAccentUnavailable()
+		console.warn('Failed to read the system accent color', error)
 	}
 }
 

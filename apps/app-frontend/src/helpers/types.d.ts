@@ -196,7 +196,7 @@ type AppSettings = {
 	max_concurrent_writes: number
 
 	theme: 'dark' | 'light' | 'oled' | 'system'
-	accent_color: 'pink' | 'orange' | 'green' | 'blue' | 'purple' | `custom:#${string}`
+	accent_color: 'pink' | 'orange' | 'green' | 'blue' | 'purple' | 'system' | `custom:#${string}`
 	default_page: 'Home' | 'DiscoverContent' | 'Library'
 	collapsed_navigation: boolean
 	advanced_rendering: boolean
