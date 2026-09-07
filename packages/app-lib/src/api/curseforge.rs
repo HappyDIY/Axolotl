@@ -30,7 +30,7 @@ use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,6 +53,7 @@ pub(crate) const QUILTED_FABRIC_API_CURSEFORGE_PROJECT_ID: u32 = 634179;
 const CURSEFORGE_LOADER_QUILT: u32 = 5;
 const MAX_DEPENDENCY_DEPTH: usize = 32;
 const DEPENDENCY_PLAN_TTL: Duration = Duration::from_secs(10 * 60);
+const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
 static UNAUTHORIZED: AtomicBool = AtomicBool::new(false);
 static CATEGORY_CACHE: LazyLock<RwLock<Option<Vec<CurseForgeCategory>>>> =
@@ -4945,7 +4946,12 @@ fn extract_modpack_overrides(
     let mut archive = zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
     let manifest = read_modpack_manifest(&mut archive)?;
     let prefix = format!("{}/", manifest.overrides.trim_matches('/'));
-    let mut files_written = 0_u32;
+    struct OverrideTask {
+        index: usize,
+        target: PathBuf,
+    }
+
+    let mut tasks_by_target = HashMap::<PathBuf, OverrideTask>::new();
     let mut total_size = 0_u64;
     for index in 0..archive.len() {
         crate::api::pack::archive_util::check_cancellation(cancellation)?;
@@ -4966,31 +4972,83 @@ fn extract_modpack_overrides(
             .into());
         }
         let target = instance_path.join(safe_path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let mut output = std::fs::File::create(&target)?;
-        let written = crate::api::pack::archive_util::copy_with_cancellation(
-            &mut entry,
-            &mut output,
-            cancellation,
-            &target,
-        )?;
-        if written != entry.size() {
-            return Err(ErrorKind::InputError(
-                "CurseForge modpack override was truncated during extraction"
-                    .to_string(),
-            )
-            .into());
-        }
-        files_written = files_written.checked_add(1).ok_or_else(|| {
-            ErrorKind::InputError(
-                "CurseForge modpack contains too many override files"
-                    .to_string(),
-            )
-        })?;
+        // Preserve archive order semantics for duplicate targets: the last
+        // entry wins, while unique targets can be extracted independently.
+        tasks_by_target.insert(target.clone(), OverrideTask { index, target });
     }
-    Ok(files_written)
+    drop(archive);
+    let tasks = tasks_by_target.into_values().collect::<Vec<_>>();
+    if tasks.is_empty() {
+        return Ok(0);
+    }
+    let worker_count = OVERRIDE_EXTRACTION_CONCURRENCY.min(tasks.len());
+    let queue = Arc::new(Mutex::new(VecDeque::from(tasks)));
+    std::thread::scope(|scope| {
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let queue = Arc::clone(&queue);
+            workers.push(scope.spawn(move || -> crate::Result<u32> {
+                let file = std::fs::File::open(archive_path).map_err(|error| {
+                    io::IOError::with_path(error, archive_path)
+                })?;
+                let mut archive = zip::ZipArchive::new(file).map_err(archive_error)?;
+                let mut files_written = 0_u32;
+                loop {
+                    check_cancellation(cancellation)?;
+                    let Some(task) = queue.lock().unwrap().pop_front() else {
+                        break;
+                    };
+                    let mut entry = archive
+                        .by_index(task.index)
+                        .map_err(archive_error)?;
+                    if let Some(parent) = task.target.parent() {
+                        std::fs::create_dir_all(parent).map_err(|error| {
+                            io::IOError::with_path(error, parent)
+                        })?;
+                    }
+                    let mut output = std::fs::File::create(&task.target)
+                        .map_err(|error| io::IOError::with_path(error, &task.target))?;
+                    let written = crate::api::pack::archive_util::copy_with_cancellation(
+                        &mut entry,
+                        &mut output,
+                        cancellation,
+                        &task.target,
+                    )?;
+                    if written != entry.size() {
+                        return Err(ErrorKind::InputError(
+                            "CurseForge modpack override was truncated during extraction"
+                                .to_string(),
+                        )
+                        .into());
+                    }
+                    files_written = files_written.checked_add(1).ok_or_else(|| {
+                        ErrorKind::InputError(
+                            "CurseForge modpack contains too many override files"
+                                .to_string(),
+                        )
+                    })?;
+                }
+                Ok(files_written)
+            }));
+        }
+        let mut files_written = 0_u32;
+        for worker in workers {
+            let count = worker.join().map_err(|_| {
+                ErrorKind::OtherError(
+                    "CurseForge override extraction worker panicked"
+                        .to_string(),
+                )
+            })??;
+            files_written =
+                files_written.checked_add(count).ok_or_else(|| {
+                    ErrorKind::InputError(
+                        "CurseForge modpack contains too many override files"
+                            .to_string(),
+                    )
+                })?;
+        }
+        Ok(files_written)
+    })
 }
 
 fn read_modpack_manifest<R: Read + Seek>(
