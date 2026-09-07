@@ -625,13 +625,21 @@ const statusMessages = defineMessages({
 	canceled: { id: 'app.downloads.status.canceled', defaultMessage: 'Canceled' },
 	completed: { id: 'app.downloads.item-status.completed', defaultMessage: 'Completed' },
 	skipped: { id: 'app.downloads.item-status.skipped', defaultMessage: 'Skipped' },
+	worker_started: { id: 'app.downloads.item-status.worker-started', defaultMessage: 'Starting' },
 	downloading: { id: 'app.downloads.item-status.downloading', defaultMessage: 'Downloading' },
+	connecting: { id: 'app.downloads.item-status.connecting', defaultMessage: 'Connecting' },
 	waiting_for_resource: {
 		id: 'app.downloads.item-status.waiting-for-resource',
 		defaultMessage: 'Waiting for download resources',
 	},
 	verifying: { id: 'app.downloads.item-status.verifying', defaultMessage: 'Verifying' },
 	writing: { id: 'app.downloads.item-status.writing', defaultMessage: 'Writing' },
+	metadata: { id: 'app.downloads.item-status.metadata', defaultMessage: 'Loading metadata' },
+	waiting_for_database: {
+		id: 'app.downloads.item-status.waiting-for-database',
+		defaultMessage: 'Waiting for database',
+	},
+	finalizing: { id: 'app.downloads.item-status.finalizing', defaultMessage: 'Finalizing' },
 })
 
 const phaseMessages = defineMessages({
@@ -939,8 +947,13 @@ function progressText(job: InstallJobSnapshot) {
 	const finalStage = job.items.find(
 		(item) =>
 			item.status === 'waiting_for_resource' ||
+			item.status === 'worker_started' ||
+			item.status === 'connecting' ||
 			item.status === 'writing' ||
-			item.status === 'verifying',
+			item.status === 'verifying' ||
+			item.status === 'metadata' ||
+			item.status === 'waiting_for_database' ||
+			item.status === 'finalizing',
 	)
 	if (finalStage) return statusLabel(finalStage.status)
 	const progress = effectiveInstallProgress(job)

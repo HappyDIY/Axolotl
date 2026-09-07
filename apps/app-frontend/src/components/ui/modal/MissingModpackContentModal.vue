@@ -343,8 +343,16 @@ const messages = defineMessages({
 
 const statusMessages = defineMessages({
 	failed: { id: 'app.downloads.item-status.failed', defaultMessage: 'Failed' },
+	worker_started: { id: 'app.downloads.item-status.worker-started', defaultMessage: 'Starting' },
+	connecting: { id: 'app.downloads.item-status.connecting', defaultMessage: 'Connecting' },
 	verifying: { id: 'app.downloads.item-status.verifying', defaultMessage: 'Verifying' },
 	writing: { id: 'app.downloads.item-status.writing', defaultMessage: 'Writing' },
+	finalizing: { id: 'app.downloads.item-status.finalizing', defaultMessage: 'Finalizing' },
+	metadata: { id: 'app.downloads.item-status.metadata', defaultMessage: 'Loading metadata' },
+	waiting_for_database: {
+		id: 'app.downloads.item-status.waiting-for-database',
+		defaultMessage: 'Waiting for database',
+	},
 	completed: { id: 'app.downloads.item-status.completed', defaultMessage: 'Completed' },
 	downloading: { id: 'app.downloads.item-status.downloading', defaultMessage: 'Downloading' },
 	waiting_for_resource: {
@@ -574,7 +582,14 @@ function statusLabel(status: MissingFile['status']) {
 function statusColor(status: MissingFile['status']): 'green' | 'red' | 'orange' | 'blue' | 'gray' {
 	if (status === 'completed') return 'green'
 	if (status === 'failed') return 'red'
-	if (status === 'verifying' || status === 'writing') return 'orange'
+	if (
+		status === 'verifying' ||
+		status === 'writing' ||
+		status === 'finalizing' ||
+		status === 'metadata' ||
+		status === 'waiting_for_database'
+	)
+		return 'orange'
 	return 'blue'
 }
 

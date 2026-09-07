@@ -1652,10 +1652,15 @@ impl InstallJobProvider {
 #[serde(rename_all = "snake_case")]
 pub enum DownloadItemStatus {
     Queued,
+    WorkerStarted,
     WaitingForResource,
+    Connecting,
     Downloading,
     Verifying,
     Writing,
+    Metadata,
+    WaitingForDatabase,
+    Finalizing,
     WaitingForUser,
     Completed,
     Skipped,
@@ -2678,10 +2683,15 @@ impl InstallJobState {
                         if matches!(
                             item.status,
                             DownloadItemStatus::Queued
+                                | DownloadItemStatus::WorkerStarted
                                 | DownloadItemStatus::WaitingForResource
+                                | DownloadItemStatus::Connecting
                                 | DownloadItemStatus::Downloading
                                 | DownloadItemStatus::Verifying
                                 | DownloadItemStatus::Writing
+                                | DownloadItemStatus::Metadata
+                                | DownloadItemStatus::WaitingForDatabase
+                                | DownloadItemStatus::Finalizing
                         ) {
                             item.status = DownloadItemStatus::Canceled;
                         }

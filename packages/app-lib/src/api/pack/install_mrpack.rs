@@ -8,9 +8,9 @@ use crate::install::model::{
     InstallPauseReason, MissingModpackContentState, MissingModpackFileState,
 };
 use crate::install::{
-    InstallErrorContext, InstallJobEventKind, InstallPhaseDetails,
-    InstallPhaseId, InstallProgress, InstallProgressReporter,
-    InstallProgressSecondary,
+    DownloadItemStatus, InstallErrorContext, InstallJobEventKind,
+    InstallPhaseDetails, InstallPhaseId, InstallProgress,
+    InstallProgressReporter, InstallProgressSecondary,
 };
 use crate::pack::install_from::{
     EnvType, PackFile, PackFileHash, set_instance_information,
@@ -1132,6 +1132,14 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         .build();
                 let result: crate::Result<()> = async {
 
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::WorkerStarted,
+                    )
+                    .await?;
+
                 if skipped_missing_content_paths.contains(&project_path) {
                     content_context
                         .mark_file_settled(
@@ -1225,6 +1233,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     Some((download, _)) => Some(download.acquire().await?),
                     None => None,
                 };
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Connecting,
+                    )
+                    .await?;
                 let download = match download_to_path(
                     DownloadRequest::new(primary_url, ResourceClass::Modpack)
                         .with_candidate_urls(
@@ -1254,10 +1269,24 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Finalizing,
+                    )
+                    .await?;
                 let finalize_permit = match native_pipeline.as_ref() {
                     Some((_, finalize)) => Some(finalize.acquire().await?),
                     None => None,
                 };
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Metadata,
+                    )
+                    .await?;
                 let path = target_path;
                 let sha1 = if let Some(hash) =
                     project.hashes.get(&PackFileHash::Sha1)
@@ -1283,6 +1312,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .and_then(|infos| infos.get(&sha1))
                     .cloned();
                 {
+                    content_context
+                        .reporter
+                        .record_download_stage(
+                            project_path.clone(),
+                            DownloadItemStatus::WaitingForDatabase,
+                        )
+                        .await?;
                     let _permit = state.install_db_semaphore.acquire().await?;
                     if let Some(project_type) =
                     ProjectType::get_from_parent_folder(project.path.as_str())
