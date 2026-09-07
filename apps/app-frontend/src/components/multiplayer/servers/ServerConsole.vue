@@ -9,6 +9,7 @@ import {
 } from '@modrinth/ui'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
+import { ServerConsoleBuffer } from '@/composables/server-console-buffer'
 import {
 	hydrateLog,
 	type ServerView,
@@ -46,10 +47,12 @@ let consumedLines = 0
 // duplicating the earliest startup lines.
 let hydrating = false
 let unsubscribeConsoleOutput: (() => void) | null = null
-const pendingConsoleOutput: Uint8Array[] = []
+const PENDING_CONSOLE_OUTPUT_CAPACITY = 64 * 1024
+let pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
 
 function flushConsoleOutput() {
-	for (const data of pendingConsoleOutput.splice(0)) jlineInput.value?.write(data)
+	for (const data of pendingConsoleOutput.values()) jlineInput.value?.write(data)
+	pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
 }
 
 watch(
@@ -151,7 +154,7 @@ watch(
 	() => props.server.running,
 	async (running, previousRunning) => {
 		if (!running) {
-			pendingConsoleOutput.length = 0
+			pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
 			return
 		}
 		if (previousRunning) return

@@ -326,12 +326,12 @@ mod tests {
     fn splits_pty_output_without_losing_partial_or_raw_bytes() {
         let mut pending = Vec::new();
         assert_eq!(
-            take_complete_pty_lines(&mut pending, b"first\r\nsec"),
+            take_complete_pty_lines(&mut pending, b"first\r\nsecond"),
             vec![b"first\r\n".to_vec()]
         );
-        assert_eq!(pending, b"sec");
+        assert_eq!(pending, b"second");
         assert_eq!(
-            take_complete_pty_lines(&mut pending, b"ond\nthird\n"),
+            take_complete_pty_lines(&mut pending, b"\nthird\n"),
             vec![b"second\n".to_vec(), b"third\n".to_vec()]
         );
         assert!(pending.is_empty());
