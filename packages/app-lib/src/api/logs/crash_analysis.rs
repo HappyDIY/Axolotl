@@ -6,6 +6,7 @@ use std::time::{Duration, SystemTime};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(windows)]
 use tokio::process::Command;
 
 use super::{CensoredString, resolve_instance_path};

@@ -4955,7 +4955,7 @@ fn extract_modpack_overrides(
     let mut total_size = 0_u64;
     for index in 0..archive.len() {
         crate::api::pack::archive_util::check_cancellation(cancellation)?;
-        let mut entry = archive.by_index(index).map_err(modpack_zip_error)?;
+        let entry = archive.by_index(index).map_err(modpack_zip_error)?;
         let entry_name =
             crate::pack::detect::decode_zip_entry_name(entry.name_raw());
         if entry.is_dir() || !entry_name.starts_with(&prefix) {

@@ -37,6 +37,7 @@ pub async fn get_mod_full_path(
 mod tests {
     use super::*;
     use crate::state::CreateDirectLinkInstance;
+    use std::path::Path;
     use std::sync::Arc;
     use tempfile::TempDir;
 
