@@ -252,19 +252,42 @@
 						full-width
 						:progress="jobPercent(job)"
 						:max="100"
+						:color="progressColor(job)"
 						:label="progressText(job)"
-						:waiting="job.status === 'queued' || !hasDeterminateProgress(job)"
+						:waiting="!isFinished(job) && (job.status === 'queued' || !hasDeterminateProgress(job))"
 						show-progress
-					/>
+					>
+						<template #progress-icon>
+							<CheckCircleIcon
+								v-if="isMainTrackComplete(job)"
+								class="size-5 text-green"
+								aria-hidden="true"
+							/>
+							<SpinnerIcon v-else class="size-5 animate-spin" aria-hidden="true" />
+						</template>
+					</ProgressBar>
 					<div v-if="job.parallel" class="mt-2">
 						<ProgressBar
 							full-width
 							:progress="parallelPercent(job)"
 							:max="100"
+							:color="parallelProgressColor(job)"
 							:label="parallelProgressText(job)"
-							:waiting="job.status === 'queued' || !hasDeterminateParallelProgress(job)"
+							:waiting="
+								!isFinished(job) &&
+								(job.status === 'queued' || !hasDeterminateParallelProgress(job))
+							"
 							show-progress
-						/>
+						>
+							<template #progress-icon>
+								<CheckCircleIcon
+									v-if="isParallelTrackComplete(job)"
+									class="size-5 text-green"
+									aria-hidden="true"
+								/>
+								<SpinnerIcon v-else class="size-5 animate-spin" aria-hidden="true" />
+							</template>
+						</ProgressBar>
 					</div>
 				</div>
 
@@ -402,6 +425,7 @@ import {
 	PlusIcon,
 	RefreshCwIcon,
 	SearchIcon,
+	SpinnerIcon,
 	TrashIcon,
 	XIcon,
 } from '@modrinth/assets'
@@ -890,7 +914,7 @@ function showProgress(job: InstallJobSnapshot) {
 }
 
 function jobPercent(job: InstallJobSnapshot) {
-	if (job.status === 'succeeded') return 100
+	if (isMainTrackComplete(job)) return 100
 	if (job.status === 'waiting_for_user') {
 		const total = totalRequiredFiles(job)
 		if (!total) return 0
@@ -912,9 +936,36 @@ function hasDeterminateProgress(job: InstallJobSnapshot) {
 }
 
 function parallelPercent(job: InstallJobSnapshot) {
+	if (isParallelTrackComplete(job)) return 100
 	const progress = effectiveParallelProgress(job)
 	if (!hasDeterminateInstallProgress(progress)) return 0
 	return Math.min(100, Math.max(0, (progress.current / progress.total) * 100))
+}
+
+function isFinished(job: InstallJobSnapshot) {
+	return job.status === 'succeeded'
+}
+
+function isMainTrackComplete(job: InstallJobSnapshot) {
+	if (isFinished(job)) return true
+	const progress = effectiveInstallProgress(job)
+	if (job.phase === 'downloading_content' && progress?.total === 0) return true
+	return hasDeterminateInstallProgress(progress) && progress.current >= progress.total
+}
+
+function isParallelTrackComplete(job: InstallJobSnapshot) {
+	if (isFinished(job)) return true
+	const progress = effectiveParallelProgress(job)
+	if (progress?.total === 0) return true
+	return hasDeterminateInstallProgress(progress) && progress.current >= progress.total
+}
+
+function progressColor(job: InstallJobSnapshot) {
+	return isMainTrackComplete(job) ? 'green' : 'brand'
+}
+
+function parallelProgressColor(job: InstallJobSnapshot) {
+	return isParallelTrackComplete(job) ? 'green' : 'brand'
 }
 
 function hasDeterminateParallelProgress(job: InstallJobSnapshot) {
