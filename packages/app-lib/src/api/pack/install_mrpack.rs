@@ -99,26 +99,20 @@ struct ExtractedOverride {
     hash: String,
 }
 
-fn override_extraction_batches(
+fn override_extraction_groups(
     specs: Vec<OverrideExtractionSpec>,
 ) -> Vec<Vec<OverrideExtractionSpec>> {
-    let mut batches = Vec::new();
-    let mut batch = Vec::new();
-    let mut targets = HashSet::new();
+    let mut groups = Vec::new();
+    let mut positions = HashMap::<PathBuf, usize>::new();
     for spec in specs {
-        if batch.len() >= OVERRIDE_EXTRACTION_CONCURRENCY
-            || targets.contains(&spec.target_path)
-        {
-            batches.push(std::mem::take(&mut batch));
-            targets.clear();
+        if let Some(&index) = positions.get(&spec.target_path) {
+            groups[index].push(spec);
+        } else {
+            positions.insert(spec.target_path.clone(), groups.len());
+            groups.push(vec![spec]);
         }
-        targets.insert(spec.target_path.clone());
-        batch.push(spec);
     }
-    if !batch.is_empty() {
-        batches.push(batch);
-    }
-    batches
+    groups
 }
 
 impl ParallelMinecraftInstall {
@@ -1563,10 +1557,9 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     let extracted_override_bytes = Arc::new(AtomicU64::new(0));
     let reported_override_bucket = Arc::new(AtomicU64::new(0));
     let override_progress_delta = (override_total_bytes / 200).max(256 * 1024);
-    let mut extracted_overrides = Vec::with_capacity(override_specs.len());
-    for batch in override_extraction_batches(override_specs) {
-        let mut extracted_batch = futures::stream::iter(batch)
-            .map(|spec| {
+    let mut extracted_overrides =
+        futures::stream::iter(override_extraction_groups(override_specs))
+            .map(|group| {
                 let file = file.clone();
                 let reporter = reporter.clone();
                 let project_id = project_id.clone();
@@ -1578,79 +1571,86 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 let reported_override_bucket =
                     Arc::clone(&reported_override_bucket);
                 async move {
-                    let override_context =
-                        InstallErrorContext::new("extract modpack override")
-                            .maybe_project_id(project_id.clone())
-                            .maybe_version_id(version_id.clone())
-                            .source_path(source_path.clone())
-                            .entry_path(spec.entry_name.clone())
-                            .target_path(spec.target_path.display().to_string())
-                            .build();
-                    reporter
-                        .set_transient_context(override_context.clone())
-                        .await?;
-                    let mut reader = MrpackZipReader::new(&file).await?;
-                    let mut report_progress = |bytes_read: u64| -> Pin<
-                        Box<dyn Future<Output = crate::Result<()>> + Send>,
-                    > {
-                        let current = extracted_override_bytes
-                            .fetch_add(bytes_read, Ordering::Relaxed)
-                            + bytes_read;
-                        let bucket = current / override_progress_delta;
-                        let previous = reported_override_bucket
-                            .fetch_max(bucket, Ordering::Relaxed);
-                        if current < override_total_bytes && bucket <= previous
-                        {
-                            return Box::pin(async { Ok(()) });
-                        }
-                        let reporter = reporter.clone();
-                        let details = modpack_details.clone();
-                        Box::pin(async move {
-                            reporter
-                                .update(
-                                    InstallPhaseId::ExtractingOverrides,
-                                    Some(InstallProgress {
-                                        current: current
-                                            .min(override_total_bytes),
-                                        total: override_total_bytes,
-                                        secondary: None,
-                                    }),
-                                    details,
-                                )
-                                .await
-                        })
-                    };
-                    let progress = (override_total_bytes > 0).then_some(
-                        &mut report_progress as &mut ExtractProgressFn<'_>,
-                    );
-                    let extract_result = reader
-                        .extract_override_entry(
-                            &spec,
-                            &state.io_semaphore,
-                            progress,
+                    let mut extracted_group = Vec::with_capacity(group.len());
+                    for spec in group {
+                        let override_context = InstallErrorContext::new(
+                            "extract modpack override",
                         )
-                        .await;
-                    let (size, hash) = reporter
-                        .preserve_failure_context(
-                            override_context,
-                            extract_result,
-                        )
-                        .await?;
-                    Ok::<_, crate::Error>(ExtractedOverride {
-                        spec,
-                        size,
-                        hash,
-                    })
+                        .maybe_project_id(project_id.clone())
+                        .maybe_version_id(version_id.clone())
+                        .source_path(source_path.clone())
+                        .entry_path(spec.entry_name.clone())
+                        .target_path(spec.target_path.display().to_string())
+                        .build();
+                        reporter
+                            .set_transient_context(override_context.clone())
+                            .await?;
+                        let mut reader = MrpackZipReader::new(&file).await?;
+                        let mut report_progress = |bytes_read: u64| -> Pin<
+                            Box<dyn Future<Output = crate::Result<()>> + Send>,
+                        > {
+                            let current = extracted_override_bytes
+                                .fetch_add(bytes_read, Ordering::Relaxed)
+                                + bytes_read;
+                            let bucket = current / override_progress_delta;
+                            let previous = reported_override_bucket
+                                .fetch_max(bucket, Ordering::Relaxed);
+                            if current < override_total_bytes
+                                && bucket <= previous
+                            {
+                                return Box::pin(async { Ok(()) });
+                            }
+                            let reporter = reporter.clone();
+                            let details = modpack_details.clone();
+                            Box::pin(async move {
+                                reporter
+                                    .update(
+                                        InstallPhaseId::ExtractingOverrides,
+                                        Some(InstallProgress {
+                                            current: current
+                                                .min(override_total_bytes),
+                                            total: override_total_bytes,
+                                            secondary: None,
+                                        }),
+                                        details,
+                                    )
+                                    .await
+                            })
+                        };
+                        let progress = (override_total_bytes > 0).then_some(
+                            &mut report_progress as &mut ExtractProgressFn<'_>,
+                        );
+                        let extract_result = reader
+                            .extract_override_entry(
+                                &spec,
+                                &state.io_semaphore,
+                                progress,
+                            )
+                            .await;
+                        let (size, hash) = reporter
+                            .preserve_failure_context(
+                                override_context,
+                                extract_result,
+                            )
+                            .await?;
+                        extracted_group.push(ExtractedOverride {
+                            spec,
+                            size,
+                            hash,
+                        });
+                    }
+                    Ok::<_, crate::Error>(extracted_group)
                 }
             })
             .buffer_unordered(OVERRIDE_EXTRACTION_CONCURRENCY)
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<crate::Result<Vec<_>>>()?;
-        extracted_batch.sort_unstable_by_key(|extracted| extracted.spec.index);
-        extracted_overrides.extend(extracted_batch);
-    }
+            .collect::<crate::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+    extracted_overrides.sort_unstable_by_key(|extracted| extracted.spec.index);
 
     for extracted in extracted_overrides {
         cached_pack_hashes.push(extracted.hash.clone());
@@ -1997,7 +1997,7 @@ mod tests {
 
     #[test]
     fn override_batches_bound_concurrency_and_order_duplicate_targets() {
-        let batches = override_extraction_batches(vec![
+        let groups = override_extraction_groups(vec![
             override_spec(0, "config/a.toml"),
             override_spec(1, "config/b.toml"),
             override_spec(2, "config/c.toml"),
@@ -2005,14 +2005,14 @@ mod tests {
             override_spec(4, "config/a.toml"),
         ]);
 
-        assert!(
-            batches
-                .iter()
-                .all(|batch| batch.len() <= OVERRIDE_EXTRACTION_CONCURRENCY)
-        );
-        assert_eq!(batches.len(), 2);
-        assert_eq!(batches[0][0].index, 0);
-        assert_eq!(batches[1][0].index, 4);
+        assert!(groups.iter().all(|group| {
+            group
+                .windows(2)
+                .all(|pair| pair[0].target_path == pair[1].target_path)
+        }));
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0][0].index, 0);
+        assert_eq!(groups[0][1].index, 4);
     }
 
     async fn run_failure_collection(
