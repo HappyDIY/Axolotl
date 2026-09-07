@@ -3,6 +3,12 @@ use tauri::{AppHandle, Emitter, Runtime};
 
 const ACCENT_COLOR_CHANGED: &str = "system-accent-color-changed";
 
+#[cfg(target_os = "macos")]
+thread_local! {
+    static STOP_ACCENT_COLOR_WATCHER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct AccentColor {
     hex: String,
@@ -130,15 +136,36 @@ fn start_accent_color_watcher<R: Runtime>(app: AppHandle<R>) {
             }
         });
 
-    unsafe {
+    let observer = unsafe {
         center.addObserverForName_object_queue_usingBlock(
             Some(NSSystemColorsDidChangeNotification),
             None,
             Some(&queue),
             &block,
-        );
-    }
+        )
+    };
+    let stop = Box::new(move || unsafe {
+        center.removeObserver((&*observer).as_ref());
+    });
+
+    STOP_ACCENT_COLOR_WATCHER.with(|watcher| {
+        if let Some(stop) = watcher.borrow_mut().replace(stop) {
+            stop();
+        }
+    });
 }
+
+#[cfg(target_os = "macos")]
+fn stop_accent_color_watcher() {
+    STOP_ACCENT_COLOR_WATCHER.with(|watcher| {
+        if let Some(stop) = watcher.borrow_mut().take() {
+            stop();
+        }
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop_accent_color_watcher() {}
 
 #[cfg(target_os = "linux")]
 async fn read_accent_color() -> Result<AccentColor, String> {
@@ -217,6 +244,7 @@ pub fn init<R: Runtime>() -> tauri::plugin::TauriPlugin<R> {
             start_accent_color_watcher(app.clone());
             Ok(())
         })
+        .on_drop(|_| stop_accent_color_watcher())
         .invoke_handler(tauri::generate_handler![system_accent_color])
         .build()
 }
