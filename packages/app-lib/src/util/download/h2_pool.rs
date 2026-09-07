@@ -186,10 +186,7 @@ impl SharedH2Connection {
             tokio::time::timeout(STREAM_READY_TIMEOUT, sender.ready())
                 .await
                 .map_err(|_| {
-                    h2::Error::from(std::io::Error::new(
-                        std::io::ErrorKind::TimedOut,
-                        "timed out waiting for HTTP/2 stream capacity",
-                    ))
+                    h2::Error::from(h2::Reason::ENHANCE_YOUR_CALM)
                 })??;
         let ready_wait = ready_started.elapsed();
         if ready_wait >= Duration::from_millis(25) {

@@ -3,8 +3,29 @@
 use url::Url;
 
 use crate::util::fetch::{
-    MODRINTH_CDN_LEGACY_HOST, MODRINTH_CDN_OFFICIAL_HOST,
+    MODRINTH_CDN_LEGACY_HOST, MODRINTH_CDN_OFFICIAL_HOST, TIANPAO_HOST,
 };
+
+/// Identifies a Tianpao response that points at one of Modrinth's real CDN
+/// hosts. The caller uses this only to abandon the mirror request; it must
+/// follow the server-provided host without rewriting it.
+pub(crate) fn is_tianpao_official_redirect(
+    current: &Url,
+    location: Option<&str>,
+) -> bool {
+    current
+        .host_str()
+        .is_some_and(|host| host.eq_ignore_ascii_case(TIANPAO_HOST))
+        && location.is_some_and(|location| {
+            let Ok(redirect) = current.join(location) else {
+                return false;
+            };
+            redirect.host_str().is_some_and(|host| {
+                host.eq_ignore_ascii_case(MODRINTH_CDN_LEGACY_HOST)
+                    || host.eq_ignore_ascii_case(MODRINTH_CDN_OFFICIAL_HOST)
+            })
+        })
+}
 
 pub(crate) fn repair_official_redirect(
     original: &Url,

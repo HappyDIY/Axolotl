@@ -1155,7 +1155,8 @@ async fn download_asset_item(
             .await
             .map_err(|_| {
                 crate::ErrorKind::NetworkError(
-                    "timed out waiting for asset HTTP/2 stream permit",
+                    "timed out waiting for asset HTTP/2 stream permit"
+                        .to_string(),
                 )
             })??,
         )
