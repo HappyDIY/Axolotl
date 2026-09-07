@@ -20,6 +20,7 @@ use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::Notify;
 use tokio_rustls::TlsConnector;
 
 use crate::util::fetch::DownloadRoute;
@@ -71,6 +72,7 @@ pub struct SharedH2Connection {
     /// lets an asset batch distribute work across sibling TCP connections.
     active_streams: Arc<AtomicUsize>,
     last_activity: Mutex<std::time::Instant>,
+    evict: Arc<Notify>,
 }
 
 pub(crate) struct H2StreamActivity {
@@ -96,6 +98,7 @@ impl SharedH2Connection {
             dead: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_streams: Arc::new(AtomicUsize::new(0)),
             last_activity: Mutex::new(std::time::Instant::now()),
+            evict: Arc::new(Notify::new()),
         }
     }
 
@@ -124,6 +127,15 @@ impl SharedH2Connection {
         }
     }
 
+    #[cfg(test)]
+    fn mark_idle_for_test(&self) {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            std::time::Instant::now() - IDLE_EVICTION_TIMEOUT;
+    }
+
     fn is_idle_expired(&self) -> bool {
         self.active_streams() == 0
             && self
@@ -132,6 +144,10 @@ impl SharedH2Connection {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .elapsed()
                 >= IDLE_EVICTION_TIMEOUT
+    }
+
+    fn evict(&self) {
+        self.evict.notify_waiters();
     }
 
     fn has_physical_budget(&self) -> bool {
@@ -435,9 +451,15 @@ async fn establish(
 
     let dead = Arc::clone(&shared.dead);
     let connection_budget = Arc::clone(&shared);
+    let evict = Arc::clone(&shared.evict);
     let authority = authority.to_string();
     tokio::spawn(async move {
-        let _ = connection.await;
+        tokio::select! {
+            _ = connection => {}
+            _ = evict.notified() => {
+                tracing::debug!(authority, "Evicting idle shared HTTP/2 connection");
+            }
+        }
         dead.store(true, std::sync::atomic::Ordering::Release);
         connection_budget.release_physical_budget();
         tracing::debug!(authority, "Shared HTTP/2 connection closed");
@@ -478,6 +500,9 @@ pub(crate) async fn shared_connection(
     if cached.as_ref().is_some_and(|connection| {
         connection.is_dead() || connection.is_idle_expired()
     }) {
+        if let Some(connection) = cached.as_ref() {
+            connection.evict();
+        }
         *cached = None;
     }
     if !allow_cold_connection {
@@ -527,6 +552,9 @@ pub(crate) async fn shared_batch_connection(
     if cached.as_ref().is_some_and(|connection| {
         connection.is_dead() || connection.is_idle_expired()
     }) {
+        if let Some(connection) = cached.as_ref() {
+            connection.evict();
+        }
         *cached = None;
     }
     tracing::debug!(authority, "Establishing sibling HTTP/2 asset connection");
