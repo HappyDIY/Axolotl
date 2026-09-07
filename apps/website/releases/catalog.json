@@ -1,6 +1,63 @@
 {
-  "updated_at": "2026-09-05T21:31:15.000Z",
+  "updated_at": "2026-09-07T21:27:57.000Z",
   "announcements": [
+    {
+      "id": "launcher-1.9.6-beta.2",
+      "version": "1.9.6-beta.2",
+      "publishedAt": "2026-09-07",
+      "title": {
+        "en-US": "Axolotl Launcher 1.9.6-beta.2",
+        "zh-CN": "Axolotl Launcher 1.9.6-beta.2"
+      },
+      "changes": {
+        "added": [
+          {
+            "en-US": "Add announcement system.",
+            "zh-CN": "添加公告系统。"
+          },
+          {
+            "en-US": "Now pages such as the content page will render Minecraft color codes.",
+            "zh-CN": "现在内容页等页面会渲染 Minecraft 颜色代码。"
+          },
+          {
+            "en-US": "Now it can correctly identify the system's primary colors.",
+            "zh-CN": "现在可正确识别系统主要颜色。"
+          }
+        ],
+        "changed": [
+          {
+            "en-US": "Sync the latest LLM model list.",
+            "zh-CN": "同步最新 LLM 模型列表。"
+          },
+          {
+            "en-US": "Greatly improve download performance.",
+            "zh-CN": "大幅提升下载性能（对的对的）。"
+          }
+        ],
+        "fixed": [
+          {
+            "en-US": "Fix the issue where the handling and identification of .minecraft folder instances are inconsistent with industry standards.",
+            "zh-CN": "修复 .minecraft 文件夹实例处理与识别方式与行业规范不一致的问题。"
+          },
+          {
+            "en-US": "Fixed the issue where the app would still launch automatically even when \"Launch when completed\" was not checked.",
+            "zh-CN": "修复未勾选“完成后启动”仍自动启动的问题。"
+          },
+          {
+            "en-US": "Fixed a severe performance degradation issue when extracting and overwriting files.",
+            "zh-CN": "修复解压覆盖文件时的严重性能降级问题。"
+          },
+          {
+            "en-US": "Fixed the issue where notifications in the notification center could not be completely cleared.",
+            "zh-CN": "修复通知中心中的通知无法彻底清除的问题。"
+          },
+          {
+            "en-US": "Fix the issue where Minecraft-related files still display as \"downloading\" after the download has finished.",
+            "zh-CN": "修复 Minecraft 相关文件下载结束后仍显示正在下载的问题。"
+          }
+        ]
+      }
+    },
     {
       "id": "launcher-1.9.6-beta.1",
       "version": "1.9.6-beta.1",
