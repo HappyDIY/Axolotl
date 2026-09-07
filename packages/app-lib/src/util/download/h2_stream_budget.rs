@@ -11,6 +11,8 @@ use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
 
 const MAX_H2_STREAMS: usize = 128;
 const MAX_H2_STREAMS_PER_AUTHORITY: usize = 32;
+const MAX_ASSET_H2_STREAMS: usize = 96;
+const MAX_ASSET_H2_STREAMS_PER_AUTHORITY: usize = 24;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct AuthorityKey {
@@ -23,6 +25,11 @@ static AUTHORITY_BUDGETS: LazyLock<
 > = LazyLock::new(|| Mutex::new(HashMap::new()));
 static GLOBAL_BUDGET: LazyLock<Arc<Semaphore>> =
     LazyLock::new(|| Arc::new(Semaphore::new(MAX_H2_STREAMS)));
+static ASSET_AUTHORITY_BUDGETS: LazyLock<
+    Mutex<HashMap<AuthorityKey, Arc<Semaphore>>>,
+> = LazyLock::new(|| Mutex::new(HashMap::new()));
+static ASSET_GLOBAL_BUDGET: LazyLock<Arc<Semaphore>> =
+    LazyLock::new(|| Arc::new(Semaphore::new(MAX_ASSET_H2_STREAMS)));
 
 pub(crate) struct H2StreamPermit {
     _global: OwnedSemaphorePermit,
@@ -49,6 +56,26 @@ fn budget(route: &DownloadRoute) -> Option<Arc<Semaphore>> {
     )
 }
 
+fn asset_budget(route: &DownloadRoute) -> Option<Arc<Semaphore>> {
+    let authority = crate::util::fetch::url_authority(&route.url)?;
+    let key = AuthorityKey {
+        authority,
+        proxy: route.proxy,
+    };
+    let mut budgets = ASSET_AUTHORITY_BUDGETS.lock();
+    if budgets.len() >= 256 {
+        budgets.retain(|_, budget| Arc::strong_count(budget) > 1);
+    }
+    Some(
+        budgets
+            .entry(key)
+            .or_insert_with(|| {
+                Arc::new(Semaphore::new(MAX_ASSET_H2_STREAMS_PER_AUTHORITY))
+            })
+            .clone(),
+    )
+}
+
 pub(crate) async fn acquire(
     route: &DownloadRoute,
 ) -> Result<H2StreamPermit, AcquireError> {
@@ -60,6 +87,29 @@ pub(crate) async fn acquire(
         }
     };
     let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned();
+    let (authority, global) = tokio::join!(authority, global);
+    let global = global?;
+    let authority = authority?;
+    Ok(H2StreamPermit {
+        _global: global,
+        _authority: authority,
+    })
+}
+
+/// Acquires a stream for the Minecraft asset batch. Assets retain a large
+/// logical worker window, but use a separate physical stream pool so they
+/// cannot consume the ordinary native content share.
+pub(crate) async fn acquire_asset(
+    route: &DownloadRoute,
+) -> Result<H2StreamPermit, AcquireError> {
+    let authority_budget = asset_budget(route);
+    let authority = async {
+        match authority_budget {
+            Some(budget) => Some(budget.acquire_owned().await?),
+            None => Ok(None),
+        }
+    };
+    let global = Arc::clone(&ASSET_GLOBAL_BUDGET).acquire_owned();
     let (authority, global) = tokio::join!(authority, global);
     let global = global?;
     let authority = authority?;
@@ -97,6 +147,32 @@ mod tests {
         assert_eq!(
             budget(&route).unwrap().available_permits(),
             MAX_H2_STREAMS_PER_AUTHORITY,
+        );
+    }
+
+    #[tokio::test]
+    async fn asset_stream_budget_is_separate_and_bounded() {
+        let route = DownloadRoute {
+            url: "https://asset-h2-budget.example/file".to_string(),
+            source: DownloadRouteSource::Bmclapi,
+            is_mirror: true,
+            allow_sensitive_headers: false,
+            supports_range: true,
+            proxy: ProxyPolicy::Direct,
+        };
+        let mut permits = Vec::new();
+        for _ in 0..MAX_ASSET_H2_STREAMS_PER_AUTHORITY {
+            permits.push(acquire_asset(&route).await.unwrap());
+        }
+        assert_eq!(asset_budget(&route).unwrap().available_permits(), 0,);
+        drop(permits);
+        assert_eq!(
+            asset_budget(&route).unwrap().available_permits(),
+            MAX_ASSET_H2_STREAMS_PER_AUTHORITY,
+        );
+        assert_eq!(
+            budget(&route).unwrap().available_permits(),
+            MAX_H2_STREAMS_PER_AUTHORITY
         );
     }
 }

@@ -23,10 +23,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
-/// Client-side concurrency target for the batch asset downloader. The global
-/// H2 budget is 128 streams; retain 32 slots for ordinary native downloads so
-/// a large Minecraft asset batch cannot starve Modpack content.
-pub(crate) const ASSET_BATCH_CONCURRENCY: usize = 96;
+/// Logical worker target for the batch asset downloader. Actual H2 stream
+/// admission is separately capped so assets cannot starve ordinary content.
+pub(crate) const ASSET_BATCH_CONCURRENCY: usize = 256;
 /// Internal retry passes for failed batch items before they are handed back
 /// to the caller for the regular per-file download path.
 const ASSET_BATCH_RETRY_PASSES: usize = 2;
@@ -805,8 +804,8 @@ mod tests {
 }
 
 /// Downloads a batch of small files over a shared HTTP/2 connection group,
-/// multiplexing up to `concurrency` streams. The caller's concurrency is
-/// capped by `ASSET_BATCH_CONCURRENCY` to preserve a native content share. The group begins with one
+/// multiplexing up to `concurrency` logical workers. Physical H2 streams are
+/// governed by the dedicated asset stream budget. The group begins with one
 /// connection and may add one sibling only for a sustained saturated batch;
 /// it never creates one connection per file. Items that cannot be downloaded
 /// after internal retries are returned so the caller can retry them through
@@ -827,7 +826,7 @@ where
         + Sync
         + 'static,
 {
-    let concurrency = concurrency.clamp(1, ASSET_BATCH_CONCURRENCY);
+    let concurrency = concurrency.max(1);
     if apply_native_policy
         && super::native::h2_ineligible_reason(route).is_some()
     {
@@ -1093,7 +1092,7 @@ async fn download_asset_item(
         }
     };
     let _stream_permit = if apply_native_policy {
-        Some(super::h2_stream_budget::acquire(route).await?)
+        Some(super::h2_stream_budget::acquire_asset(route).await?)
     } else {
         None
     };
