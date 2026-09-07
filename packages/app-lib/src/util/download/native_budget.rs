@@ -79,7 +79,7 @@ pub(crate) async fn acquire_many(
     count: usize,
 ) -> Result<Vec<NativeBudgetPermit>, tokio::sync::AcquireError> {
     let authority_budget = budget(route);
-    let (mut global, mut authority) = loop {
+    let (global, authority) = loop {
         let global = Arc::clone(&GLOBAL_BUDGET)
             .acquire_many_owned(count as u32)
             .await?;

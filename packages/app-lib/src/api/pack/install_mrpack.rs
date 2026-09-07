@@ -102,7 +102,7 @@ struct ExtractedOverride {
 fn override_extraction_groups(
     specs: Vec<OverrideExtractionSpec>,
 ) -> Vec<Vec<OverrideExtractionSpec>> {
-    let mut groups = Vec::new();
+    let mut groups: Vec<Vec<OverrideExtractionSpec>> = Vec::new();
     let mut positions = HashMap::<PathBuf, usize>::new();
     for spec in specs {
         if let Some(&index) = positions.get(&spec.target_path) {

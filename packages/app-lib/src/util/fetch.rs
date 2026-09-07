@@ -5554,7 +5554,7 @@ pub async fn download_to_path(
 }
 
 async fn download_to_path_inner(
-    mut request: DownloadRequest,
+    request: DownloadRequest,
     destination: &Path,
     semaphore: &FetchSemaphore,
     mut progress: Option<&mut FetchProgressFn<'_>>,
