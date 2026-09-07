@@ -626,6 +626,10 @@ const statusMessages = defineMessages({
 	completed: { id: 'app.downloads.item-status.completed', defaultMessage: 'Completed' },
 	skipped: { id: 'app.downloads.item-status.skipped', defaultMessage: 'Skipped' },
 	downloading: { id: 'app.downloads.item-status.downloading', defaultMessage: 'Downloading' },
+	waiting_for_resource: {
+		id: 'app.downloads.item-status.waiting-for-resource',
+		defaultMessage: 'Waiting for download resources',
+	},
 	verifying: { id: 'app.downloads.item-status.verifying', defaultMessage: 'Verifying' },
 	writing: { id: 'app.downloads.item-status.writing', defaultMessage: 'Writing' },
 })
@@ -821,10 +825,7 @@ function jobPhaseLabel(job: InstallJobSnapshot) {
 	if (job.rollback_error) return formatMessage(messages.cleanupIncomplete)
 	// Older queued content jobs were initialized with the generic instance phase.
 	// Keep their label meaningful while they are resumed or waiting for the worker.
-	if (
-		job.kind === 'install_content' &&
-		job.phase === 'preparing_instance'
-	) {
+	if (job.kind === 'install_content' && job.phase === 'preparing_instance') {
 		return formatMessage(phaseMessages.downloading_content)
 	}
 	return isLocalRecoveryValidation(job)
@@ -936,7 +937,10 @@ function progressText(job: InstallJobSnapshot) {
 		return formatMessage(messages.verifyingDownloadedFiles)
 	}
 	const finalStage = job.items.find(
-		(item) => item.status === 'writing' || item.status === 'verifying',
+		(item) =>
+			item.status === 'waiting_for_resource' ||
+			item.status === 'writing' ||
+			item.status === 'verifying',
 	)
 	if (finalStage) return statusLabel(finalStage.status)
 	const progress = effectiveInstallProgress(job)

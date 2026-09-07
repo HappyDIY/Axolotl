@@ -1652,6 +1652,7 @@ impl InstallJobProvider {
 #[serde(rename_all = "snake_case")]
 pub enum DownloadItemStatus {
     Queued,
+    WaitingForResource,
     Downloading,
     Verifying,
     Writing,
@@ -2677,6 +2678,7 @@ impl InstallJobState {
                         if matches!(
                             item.status,
                             DownloadItemStatus::Queued
+                                | DownloadItemStatus::WaitingForResource
                                 | DownloadItemStatus::Downloading
                                 | DownloadItemStatus::Verifying
                                 | DownloadItemStatus::Writing

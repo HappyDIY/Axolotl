@@ -189,9 +189,19 @@ async fn download_range(
     reported_bucket: Arc<AtomicU64>,
     progress_delta: u64,
 ) -> Result<(), H2DownloadFailure> {
+    super::h2_download::record_install_stage(
+        request,
+        crate::install::DownloadItemStatus::WaitingForResource,
+    )
+    .await;
     let _permit = super::h2_stream_budget::acquire(route)
         .await
         .map_err(|_| H2DownloadFailure::Connect)?;
+    super::h2_download::record_install_stage(
+        request,
+        crate::install::DownloadItemStatus::Downloading,
+    )
+    .await;
     let mut writer = output
         .open_range(range.start, range.end + 1)
         .await

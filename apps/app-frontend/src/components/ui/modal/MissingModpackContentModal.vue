@@ -347,6 +347,10 @@ const statusMessages = defineMessages({
 	writing: { id: 'app.downloads.item-status.writing', defaultMessage: 'Writing' },
 	completed: { id: 'app.downloads.item-status.completed', defaultMessage: 'Completed' },
 	downloading: { id: 'app.downloads.item-status.downloading', defaultMessage: 'Downloading' },
+	waiting_for_resource: {
+		id: 'app.downloads.item-status.waiting-for-resource',
+		defaultMessage: 'Waiting for download resources',
+	},
 	queued: { id: 'app.downloads.status.queued', defaultMessage: 'Queued' },
 })
 

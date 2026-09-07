@@ -228,6 +228,11 @@ pub(crate) async fn try_download_via_h2(
         )
         .await;
     }
+    record_install_stage(
+        request,
+        crate::install::DownloadItemStatus::WaitingForResource,
+    )
+    .await;
     let _stream_permit = match super::h2_stream_budget::acquire(route).await {
         Ok(permit) => permit,
         Err(_) => {
@@ -237,6 +242,11 @@ pub(crate) async fn try_download_via_h2(
             };
         }
     };
+    record_install_stage(
+        request,
+        crate::install::DownloadItemStatus::Downloading,
+    )
+    .await;
     let result = single_stream(
         &connection,
         &uri,
@@ -506,7 +516,11 @@ async fn single_stream(
     file.flush().await?;
     drop(file);
     let computed = hashers.finish(downloaded);
-    record_install_stage(request).await;
+    record_install_stage(
+        request,
+        crate::install::DownloadItemStatus::Verifying,
+    )
+    .await;
 
     verify_and_finalize(
         part_path,
@@ -528,16 +542,14 @@ async fn single_stream(
     })
 }
 
-async fn record_install_stage(request: &DownloadRequest) {
+pub(crate) async fn record_install_stage(
+    request: &DownloadRequest,
+    status: crate::install::DownloadItemStatus,
+) {
     if let Some(tracking) = &request.install_tracking {
         let reporter = tracking.reporter.clone();
         let item_id = tracking.item_id.clone();
-        let _ = reporter
-            .record_download_stage(
-                item_id,
-                crate::install::DownloadItemStatus::Verifying,
-            )
-            .await;
+        let _ = reporter.record_download_stage(item_id, status).await;
     }
 }
 

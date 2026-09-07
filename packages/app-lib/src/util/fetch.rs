@@ -6124,8 +6124,6 @@ async fn download_to_path_inner(
                 } else {
                     0
                 };
-                let permit =
-                    acquire_native_connection(route, semaphore).await?;
                 let mut activity = crate::State::get_if_initialized()
                     .map(|state| state.begin_download_connection());
                 record_install_download_started(
@@ -6133,6 +6131,18 @@ async fn download_to_path_inner(
                     route,
                     attempts,
                     file_attempt_budget,
+                )
+                .await;
+                record_install_download_stage(
+                    &request,
+                    DownloadItemStatus::WaitingForResource,
+                )
+                .await;
+                let permit =
+                    acquire_native_connection(route, semaphore).await?;
+                record_install_download_stage(
+                    &request,
+                    DownloadItemStatus::Downloading,
                 )
                 .await;
                 let request_started = Instant::now();

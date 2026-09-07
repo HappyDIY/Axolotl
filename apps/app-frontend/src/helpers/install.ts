@@ -203,6 +203,7 @@ export interface InstallJobSnapshot {
 		version_id?: string | null
 		status:
 			| 'queued'
+			| 'waiting_for_resource'
 			| 'downloading'
 			| 'verifying'
 			| 'writing'
@@ -278,7 +279,7 @@ export type DownloadRequestUpdate =
 			job_id: string
 			id: string
 			bytes: number
-			status: 'downloading' | 'writing' | 'verifying'
+			status: 'waiting_for_resource' | 'downloading' | 'writing' | 'verifying'
 			speed_bytes_per_second?: number | null
 			eta_seconds?: number | null
 	  }
