@@ -870,26 +870,6 @@ where
     // first one and keep draining the batch so siblings already in flight or
     // still queued are not abandoned, then surface the error to the caller.
     let mut local_object_error: Option<crate::Error> = None;
-    let _global_permit = if let Some(semaphore) = native_semaphore {
-        match tokio::time::timeout(
-            ASSET_RESOURCE_WAIT_TIMEOUT,
-            semaphore.0.acquire(),
-        )
-        .await
-        {
-            Ok(Ok(permit)) => Some(permit),
-            Ok(Err(_)) => return Ok(items),
-            Err(_) => {
-                tracing::warn!(
-                    source = route.source.as_str(),
-                    "Timed out waiting for asset batch fetch permit"
-                );
-                return Ok(items);
-            }
-        }
-    } else {
-        None
-    };
     let connection =
         match connect_authority(route, apply_native_policy, true).await {
             Ok(connection) => connection,
@@ -958,6 +938,7 @@ where
                         &item,
                         route,
                         apply_native_policy,
+                        native_semaphore,
                         pass > 0,
                     )
                     .await;
@@ -1090,6 +1071,7 @@ async fn download_asset_item(
     item: &H2BatchAsset,
     route: &DownloadRoute,
     apply_native_policy: bool,
+    native_semaphore: Option<&fetch::FetchSemaphore>,
     rescue: bool,
 ) -> crate::Result<AssetBatchItemOutcome> {
     let integrity = Integrity {
@@ -1108,6 +1090,28 @@ async fn download_asset_item(
             "timed out waiting for asset destination lock".to_string(),
         )
     })?;
+    let fetch_permit = if apply_native_policy {
+        let Some(semaphore) = native_semaphore else {
+            return Err(crate::ErrorKind::OtherError(
+                "native asset batch is missing fetch budget".to_string(),
+            )
+            .into());
+        };
+        Some(
+            tokio::time::timeout(
+                ASSET_RESOURCE_WAIT_TIMEOUT,
+                semaphore.0.acquire(),
+            )
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::NetworkError(
+                    "timed out waiting for asset fetch permit".to_string(),
+                )
+            })??,
+        )
+    } else {
+        None
+    };
     // A different downloader may have committed the object while this item
     // waited for the destination lock. Reuse it instead of opening another
     // stream, which also prevents cross-engine `.part`/rename races.
@@ -1174,6 +1178,7 @@ async fn download_asset_item(
     headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("identity"));
 
     let (response, mut stream) = open_stream(&connection, uri, headers).await?;
+    drop(fetch_permit);
     if !response.status().is_success() {
         // 301/302/303/307/308 are redirect responses that must be interpreted
         // by the redirect-handling layer, not treated as line-level transfer
