@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(summary.bytes_total, Some(300));
         let items = job.download_items();
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].status, DownloadItemStatus::Completed);
+        assert_eq!(items[0].status, DownloadItemStatus::Verifying);
         assert_eq!(items[0].attempt, Some(1));
         assert_eq!(items[0].max_attempts, Some(4));
         assert_eq!(
@@ -2555,7 +2555,10 @@ impl InstallJobState {
                         .get(path)
                         .and_then(|&index| items.get_mut(index))
                     {
-                        item.status = DownloadItemStatus::Completed;
+                        // Network transfer completion is not content
+                        // finalization. `ContentFileCompleted` is the event
+                        // that confirms verification and DB registration.
+                        item.status = DownloadItemStatus::Verifying;
                         item.bytes_downloaded = *bytes;
                         item.bytes_total = item.bytes_total.or(Some(*bytes));
                     }

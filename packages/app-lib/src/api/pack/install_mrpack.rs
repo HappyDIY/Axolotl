@@ -47,7 +47,7 @@ use crate::data::ProjectType;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 type ExtractProgressFn<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>>
@@ -63,6 +63,7 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 /// is exhausted does the install ask the user about missing content.
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
+const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
 pub(crate) enum MrpackInstallOutcome {
@@ -1079,22 +1080,34 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             .iter()
             .map(|&index| (index, pack_files[index].clone()))
             .collect::<Vec<_>>();
+        let native_pipeline = (crate::util::download::active_engine()
+            == crate::util::download::DownloadEngine::Legacy)
+            .then(|| {
+                (
+                    Arc::new(Semaphore::new(
+                        state
+                            .download_concurrency()
+                            .min(NATIVE_CONTENT_TASK_CONCURRENCY),
+                    )),
+                    Arc::new(Semaphore::new(
+                        NATIVE_CONTENT_FINALIZE_CONCURRENCY,
+                    )),
+                )
+            });
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
-        Some(if crate::util::download::active_engine()
-            == crate::util::download::DownloadEngine::XmclCompat
-        {
-            state.download_concurrency()
-        } else {
-            state
-                .download_concurrency()
-                .min(NATIVE_CONTENT_TASK_CONCURRENCY)
+        Some(match &native_pipeline {
+            Some((download, _)) => {
+                download.available_permits() + NATIVE_CONTENT_FINALIZE_CONCURRENCY
+            }
+            None => state.download_concurrency(),
         }),
         |(manifest_index, project)| {
             let content_context = content_context.clone();
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
+            let native_pipeline = native_pipeline.clone();
             async move {
                 let project_size = project.file_size as u64;
                 let project_path =
@@ -1205,6 +1218,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     },
                     ..Integrity::default()
                 };
+                // Only the transfer owns a network worker. Metadata and DB
+                // finalization run in a separate bounded stage so a slow
+                // SQLite write cannot stop subsequent file transfers.
+                let download_permit = match native_pipeline.as_ref() {
+                    Some((download, _)) => Some(download.acquire().await?),
+                    None => None,
+                };
                 let download = match download_to_path(
                     DownloadRequest::new(primary_url, ResourceClass::Modpack)
                         .with_candidate_urls(
@@ -1231,8 +1251,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     Ok(download) => download,
                     Err(error) => return Err(error),
                 };
+                drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
+                let finalize_permit = match native_pipeline.as_ref() {
+                    Some((_, finalize)) => Some(finalize.acquire().await?),
+                    None => None,
+                };
                 let path = target_path;
                 let sha1 = if let Some(hash) =
                     project.hashes.get(&PackFileHash::Sha1)
@@ -1300,6 +1325,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         .await?;
                     }
                 }
+                drop(finalize_permit);
 
 								let recovered = download.attempts == 0; //When recovered, the download attempts were set to 0 by download_to_path_inner()
 								if recovered {

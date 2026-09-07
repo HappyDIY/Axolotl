@@ -124,9 +124,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			nextJobs[currentIndex] = job
 			jobs.value = nextJobs
 		} else {
-			jobs.value = [job, ...jobs.value].sort((a, b) =>
-				b.created.localeCompare(a.created),
-			)
+			jobs.value = [job, ...jobs.value].sort((a, b) => b.created.localeCompare(a.created))
 		}
 		const pending = pendingRequestUpdatesByJob.get(job.job_id)
 		if (pending) {
@@ -209,7 +207,9 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				if (!current) return jobs
 				item = {
 					...current,
-					status: 'completed',
+					// A request has reached disk, but an install item may still be
+					// hashing, registering metadata, or waiting for SQLite.
+					status: 'verifying',
 					bytes_downloaded: update.bytes,
 					bytes_total: current.bytes_total ?? update.bytes,
 				}
