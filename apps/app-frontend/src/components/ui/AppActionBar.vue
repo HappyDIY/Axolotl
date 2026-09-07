@@ -293,12 +293,8 @@ async function openNotification(item: NotificationHistoryItem) {
 }
 
 function clearNotificationHistory() {
-	for (const item of notificationManager.getNotifications()) {
-		notificationManager.collapseNotification(item.id)
-	}
-	for (const item of popupNotificationManager.getNotifications()) {
-		popupNotificationManager.collapseNotification(item.id)
-	}
+	notificationManager.clearAllNotifications()
+	popupNotificationManager.clearAllNotifications()
 }
 
 const router = useRouter()
