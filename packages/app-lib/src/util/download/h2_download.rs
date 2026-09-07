@@ -23,10 +23,10 @@ use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as AsyncMutex;
 use url::Url;
 
-/// Client-side concurrency target for the batch asset downloader. All
-/// concurrent streams are multiplexed over one shared HTTP/2 connection per
-/// authority, so this is the number of streams, not connections.
-pub(crate) const ASSET_BATCH_CONCURRENCY: usize = 512;
+/// Client-side concurrency target for the batch asset downloader. The global
+/// H2 budget is 128 streams; retain 32 slots for ordinary native downloads so
+/// a large Minecraft asset batch cannot starve Modpack content.
+pub(crate) const ASSET_BATCH_CONCURRENCY: usize = 96;
 /// Internal retry passes for failed batch items before they are handed back
 /// to the caller for the regular per-file download path.
 const ASSET_BATCH_RETRY_PASSES: usize = 2;
@@ -490,12 +490,14 @@ async fn single_stream(
         }
         if policy.abort_if_slow
             && matches!(
-				slow_policy.observe(
-					downloaded,
-					total_size.saturating_sub(downloaded),
-				),
-				super::native_slow::SlowDecision::Probe { .. }
-			) {
+                slow_policy.observe(
+                    downloaded,
+                    total_size.saturating_sub(downloaded),
+                ),
+                super::native_slow::SlowDecision::Probe { .. }
+                    | super::native_slow::SlowDecision::Idle { .. }
+            )
+        {
             return Err(crate::ErrorKind::NetworkError(
                 "HTTP/2 single stream stayed below expectation".to_string(),
             )
@@ -803,7 +805,8 @@ mod tests {
 }
 
 /// Downloads a batch of small files over a shared HTTP/2 connection group,
-/// multiplexing up to `concurrency` streams. The group begins with one
+/// multiplexing up to `concurrency` streams. The caller's concurrency is
+/// capped by `ASSET_BATCH_CONCURRENCY` to preserve a native content share. The group begins with one
 /// connection and may add one sibling only for a sustained saturated batch;
 /// it never creates one connection per file. Items that cannot be downloaded
 /// after internal retries are returned so the caller can retry them through
@@ -824,6 +827,7 @@ where
         + Sync
         + 'static,
 {
+    let concurrency = concurrency.clamp(1, ASSET_BATCH_CONCURRENCY);
     if apply_native_policy
         && super::native::h2_ineligible_reason(route).is_some()
     {

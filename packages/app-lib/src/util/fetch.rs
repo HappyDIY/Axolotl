@@ -6548,6 +6548,23 @@ async fn download_to_path_inner(
                                     downloaded,
                                 )));
                             }
+                            if allow_low_throughput_abort
+                                && let crate::util::download::native_slow::SlowDecision::Idle {
+                                    elapsed,
+                                } = slow_decision
+                            {
+                                tracing::warn!(
+                                    path = %destination.display(),
+                                    url = %log_url,
+                                    source = route.source.as_str(),
+                                    idle_ms = elapsed.as_millis(),
+                                    "Download body idle deadline exceeded"
+                                );
+                                transfer_error = Some(crate::ErrorKind::NetworkError(
+                                    format!("download body idle for {}", elapsed.as_secs()),
+                                ).into());
+                                break;
+                            }
                             if matches!(
                                 slow_decision,
                                 crate::util::download::native_slow::SlowDecision::Commit
