@@ -4989,25 +4989,30 @@ fn extract_modpack_overrides(
             let queue = Arc::clone(&queue);
             workers.push(scope.spawn(move || -> crate::Result<u32> {
                 let file = std::fs::File::open(archive_path).map_err(|error| {
-                    io::IOError::with_path(error, archive_path)
+                    crate::util::io::IOError::with_path(error, archive_path)
                 })?;
-                let mut archive = zip::ZipArchive::new(file).map_err(archive_error)?;
+                let mut archive =
+                    zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
                 let mut files_written = 0_u32;
                 loop {
-                    check_cancellation(cancellation)?;
+                    crate::api::pack::archive_util::check_cancellation(
+                        cancellation,
+                    )?;
                     let Some(task) = queue.lock().unwrap().pop_front() else {
                         break;
                     };
                     let mut entry = archive
                         .by_index(task.index)
-                        .map_err(archive_error)?;
+                        .map_err(modpack_zip_error)?;
                     if let Some(parent) = task.target.parent() {
                         std::fs::create_dir_all(parent).map_err(|error| {
-                            io::IOError::with_path(error, parent)
+                            crate::util::io::IOError::with_path(error, parent)
                         })?;
                     }
                     let mut output = std::fs::File::create(&task.target)
-                        .map_err(|error| io::IOError::with_path(error, &task.target))?;
+                        .map_err(|error| {
+                            crate::util::io::IOError::with_path(error, &task.target)
+                        })?;
                     let written = crate::api::pack::archive_util::copy_with_cancellation(
                         &mut entry,
                         &mut output,
