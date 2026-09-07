@@ -28,6 +28,7 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_PREWARM_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(30);
+const IDLE_EVICTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum H2ConnectFailureKind {
@@ -69,6 +70,7 @@ pub struct SharedH2Connection {
     /// This is deliberately separate from HTTP/2's peer stream accounting: it
     /// lets an asset batch distribute work across sibling TCP connections.
     active_streams: Arc<AtomicUsize>,
+    last_activity: Mutex<std::time::Instant>,
 }
 
 pub(crate) struct H2StreamActivity {
@@ -93,6 +95,7 @@ impl SharedH2Connection {
             physical_budget: Mutex::new(physical_budget),
             dead: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             active_streams: Arc::new(AtomicUsize::new(0)),
+            last_activity: Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -110,10 +113,25 @@ impl SharedH2Connection {
     }
 
     pub(crate) fn track_stream(&self) -> H2StreamActivity {
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            std::time::Instant::now();
         self.active_streams.fetch_add(1, Ordering::AcqRel);
         H2StreamActivity {
             active_streams: Arc::clone(&self.active_streams),
         }
+    }
+
+    fn is_idle_expired(&self) -> bool {
+        self.active_streams() == 0
+            && self
+                .last_activity
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .elapsed()
+                >= IDLE_EVICTION_TIMEOUT
     }
 
     fn has_physical_budget(&self) -> bool {
@@ -143,6 +161,11 @@ impl SharedH2Connection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
+        *self
+            .last_activity
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            std::time::Instant::now();
         let mut sender =
             tokio::time::timeout(STREAM_READY_TIMEOUT, sender.ready())
                 .await
@@ -439,9 +462,9 @@ pub(crate) async fn shared_connection(
         })?;
     let slot = connection_slot(&authority).await;
     let mut cached = slot.lock().await;
-    if let Some(connection) =
-        cached.as_ref().filter(|connection| !connection.is_dead())
-    {
+    if let Some(connection) = cached.as_ref().filter(|connection| {
+        !connection.is_dead() && !connection.is_idle_expired()
+    }) {
         if !reserve_native_budget || connection.has_physical_budget() {
             tracing::debug!(authority, "Reusing shared HTTP/2 connection");
             return Ok(Arc::clone(connection));
@@ -452,10 +475,9 @@ pub(crate) async fn shared_connection(
                 .to_string(),
         ));
     }
-    if cached
-        .as_ref()
-        .is_some_and(|connection| connection.is_dead())
-    {
+    if cached.as_ref().is_some_and(|connection| {
+        connection.is_dead() || connection.is_idle_expired()
+    }) {
         *cached = None;
     }
     if !allow_cold_connection {
@@ -486,9 +508,9 @@ pub(crate) async fn shared_batch_connection(
         })?;
     let slot = batch_connection_slot(&authority).await;
     let mut cached = slot.lock().await;
-    if let Some(connection) =
-        cached.as_ref().filter(|connection| !connection.is_dead())
-    {
+    if let Some(connection) = cached.as_ref().filter(|connection| {
+        !connection.is_dead() && !connection.is_idle_expired()
+    }) {
         if !reserve_native_budget || connection.has_physical_budget() {
             tracing::debug!(
                 authority,
@@ -502,10 +524,9 @@ pub(crate) async fn shared_batch_connection(
                 .to_string(),
         ));
     }
-    if cached
-        .as_ref()
-        .is_some_and(|connection| connection.is_dead())
-    {
+    if cached.as_ref().is_some_and(|connection| {
+        connection.is_dead() || connection.is_idle_expired()
+    }) {
         *cached = None;
     }
     tracing::debug!(authority, "Establishing sibling HTTP/2 asset connection");

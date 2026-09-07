@@ -5563,15 +5563,19 @@ async fn download_to_path_inner(
         io::create_dir_all(parent).await?;
     }
     let download_lock = destination_download_lock(destination);
-    let _download_guard =
-        tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, download_lock.lock())
-            .await
-            .map_err(|_| {
-                ErrorKind::NetworkError(
-                    "timed out waiting for destination download lock"
-                        .to_string(),
-                )
-            })?;
+    let lock_wait =
+        tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, download_lock.lock());
+    let _download_guard = if let Some(cancellation) = request.cancellation.as_ref() {
+        tokio::select! {
+            _ = cancellation.cancelled() => return Err(ErrorKind::OtherError("download canceled while waiting for destination lock".to_string()).into()),
+            result = lock_wait => result,
+        }
+    } else {
+        lock_wait.await
+    }
+    .map_err(|_| ErrorKind::NetworkError(
+        "timed out waiting for destination download lock".to_string(),
+    ))?;
     let mode = source_mode_for_resource(request.resource);
     let mut routes = {
         let mut urls = Vec::with_capacity(request.candidate_urls.len() + 1);
@@ -6155,11 +6159,18 @@ async fn download_to_path_inner(
                     DownloadItemStatus::WaitingForResource,
                 )
                 .await;
-                let permit = tokio::time::timeout(
+                let permit_wait = tokio::time::timeout(
                     RESOURCE_WAIT_TIMEOUT,
                     acquire_native_connection(route, semaphore),
-                )
-                .await
+                );
+                let permit = if let Some(cancellation) = request.cancellation.as_ref() {
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err(ErrorKind::OtherError("download canceled while waiting for native resources".to_string()).into()),
+                        result = permit_wait => result,
+                    }
+                } else {
+                    permit_wait.await
+                }
                 .map_err(|_| {
                     ErrorKind::NetworkError(
                         "timed out waiting for native download resources"

@@ -234,12 +234,21 @@ pub(crate) async fn try_download_via_h2(
         crate::install::DownloadItemStatus::WaitingForResource,
     )
     .await;
-    let _stream_permit = match tokio::time::timeout(
+    let stream_wait = tokio::time::timeout(
         ASSET_RESOURCE_WAIT_TIMEOUT,
         super::h2_stream_budget::acquire(route),
-    )
-    .await
+    );
+    let stream_result = if let Some(cancellation) =
+        request.cancellation.as_ref()
     {
+        tokio::select! {
+            _ = cancellation.cancelled() => return H2DownloadOutcome::Canceled,
+            result = stream_wait => result,
+        }
+    } else {
+        stream_wait.await
+    };
+    let _stream_permit = match stream_result {
         Ok(Ok(permit)) => permit,
         Ok(Err(_)) | Err(_) => {
             return H2DownloadOutcome::Fallback {
