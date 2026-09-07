@@ -238,6 +238,7 @@ pub(crate) async fn try_download_via_h2(
         ASSET_RESOURCE_WAIT_TIMEOUT,
         super::h2_stream_budget::acquire(route),
     );
+    let stream_wait_started = Instant::now();
     let stream_result = if let Some(cancellation) =
         request.cancellation.as_ref()
     {
@@ -257,6 +258,12 @@ pub(crate) async fn try_download_via_h2(
             };
         }
     };
+    tracing::debug!(
+        route = %fetch::sanitize_url_for_log(&route.url),
+        resource = "h2_stream",
+        wait_ms = stream_wait_started.elapsed().as_millis(),
+        "Acquired native H2 stream resource"
+    );
     record_install_stage(
         request,
         crate::install::DownloadItemStatus::Downloading,

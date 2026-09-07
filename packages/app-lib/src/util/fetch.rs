@@ -5563,6 +5563,7 @@ async fn download_to_path_inner(
         io::create_dir_all(parent).await?;
     }
     let download_lock = destination_download_lock(destination);
+    let lock_started = Instant::now();
     let lock_wait =
         tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, download_lock.lock());
     let _download_guard = if let Some(cancellation) = request.cancellation.as_ref() {
@@ -5576,6 +5577,11 @@ async fn download_to_path_inner(
     .map_err(|_| ErrorKind::NetworkError(
         "timed out waiting for destination download lock".to_string(),
     ))?;
+    tracing::debug!(
+        destination = %destination.display(),
+        wait_ms = lock_started.elapsed().as_millis(),
+        "Acquired destination download lock"
+    );
     let mode = source_mode_for_resource(request.resource);
     let mut routes = {
         let mut urls = Vec::with_capacity(request.candidate_urls.len() + 1);
@@ -6163,6 +6169,7 @@ async fn download_to_path_inner(
                     RESOURCE_WAIT_TIMEOUT,
                     acquire_native_connection(route, semaphore),
                 );
+                let resource_wait_started = Instant::now();
                 let permit = if let Some(cancellation) = request.cancellation.as_ref() {
                     tokio::select! {
                         _ = cancellation.cancelled() => return Err(ErrorKind::OtherError("download canceled while waiting for native resources".to_string()).into()),
@@ -6177,6 +6184,12 @@ async fn download_to_path_inner(
                             .to_string(),
                     )
                 })??;
+                tracing::debug!(
+                    route = %sanitize_url_for_log(&route.url),
+                    resource = "native_connection_and_fetch",
+                    wait_ms = resource_wait_started.elapsed().as_millis(),
+                    "Acquired native download resources"
+                );
                 record_install_download_stage(
                     &request,
                     DownloadItemStatus::Downloading,
