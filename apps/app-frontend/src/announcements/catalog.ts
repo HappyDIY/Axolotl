@@ -50,7 +50,6 @@ export const launcherAnnouncements: readonly LauncherAnnouncement[] = [
 					'en-US': 'Now pages such as the content page will render Minecraft color codes.',
 					'zh-CN': '现在内容页等页面会渲染 Minecraft 颜色代码。',
 				},
-				,
 				{
 					'en-US': "Now it can correctly identify the system's primary colors.",
 					'zh-CN': '现在可正确识别系统主要颜色。',
