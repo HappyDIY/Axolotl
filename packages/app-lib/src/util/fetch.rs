@@ -86,6 +86,7 @@ const MAX_GLOBAL_TAIL_HEDGES: usize = 8;
 const MAX_REDIRECT_LOCATION_BYTES: usize = 8 * 1024;
 const FILE_TRANSFER_CONNECT_TIMEOUT: time::Duration =
     time::Duration::from_secs(20);
+const RESOURCE_WAIT_TIMEOUT: time::Duration = time::Duration::from_secs(45);
 #[cfg(not(test))]
 const FILE_TRANSFER_READ_TIMEOUT: time::Duration =
     time::Duration::from_secs(60);
@@ -5562,7 +5563,15 @@ async fn download_to_path_inner(
         io::create_dir_all(parent).await?;
     }
     let download_lock = destination_download_lock(destination);
-    let _download_guard = download_lock.lock().await;
+    let _download_guard =
+        tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, download_lock.lock())
+            .await
+            .map_err(|_| {
+                ErrorKind::NetworkError(
+                    "timed out waiting for destination download lock"
+                        .to_string(),
+                )
+            })?;
     let mode = source_mode_for_resource(request.resource);
     let mut routes = {
         let mut urls = Vec::with_capacity(request.candidate_urls.len() + 1);
@@ -5691,7 +5700,15 @@ async fn download_to_path_inner(
         None
     };
     if let Some((h2_route, h2_policy)) = h2_selection {
-        let h2_permit = semaphore.0.acquire().await?;
+        let h2_permit =
+            tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, semaphore.0.acquire())
+                .await
+                .map_err(|_| {
+                    ErrorKind::NetworkError(
+                        "timed out waiting for HTTP/2 download permit"
+                            .to_string(),
+                    )
+                })??;
         let h2_started = Instant::now();
         match crate::util::download::h2_download::try_download_via_h2(
             &request,
@@ -6138,8 +6155,17 @@ async fn download_to_path_inner(
                     DownloadItemStatus::WaitingForResource,
                 )
                 .await;
-                let permit =
-                    acquire_native_connection(route, semaphore).await?;
+                let permit = tokio::time::timeout(
+                    RESOURCE_WAIT_TIMEOUT,
+                    acquire_native_connection(route, semaphore),
+                )
+                .await
+                .map_err(|_| {
+                    ErrorKind::NetworkError(
+                        "timed out waiting for native download resources"
+                            .to_string(),
+                    )
+                })??;
                 record_install_download_stage(
                     &request,
                     DownloadItemStatus::Downloading,

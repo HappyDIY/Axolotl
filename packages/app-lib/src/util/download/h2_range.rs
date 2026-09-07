@@ -194,9 +194,13 @@ async fn download_range(
         crate::install::DownloadItemStatus::WaitingForResource,
     )
     .await;
-    let _permit = super::h2_stream_budget::acquire(route)
-        .await
-        .map_err(|_| H2DownloadFailure::Connect)?;
+    let _permit = tokio::time::timeout(
+        Duration::from_secs(45),
+        super::h2_stream_budget::acquire(route),
+    )
+    .await
+    .map_err(|_| H2DownloadFailure::Connect)?
+    .map_err(|_| H2DownloadFailure::Connect)?;
     super::h2_download::record_install_stage(
         request,
         crate::install::DownloadItemStatus::Downloading,
