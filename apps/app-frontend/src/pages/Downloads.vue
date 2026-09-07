@@ -973,6 +973,7 @@ function hasDeterminateParallelProgress(job: InstallJobSnapshot) {
 }
 
 function parallelProgressText(job: InstallJobSnapshot) {
+	if (isParallelTrackComplete(job)) return statusLabel('completed')
 	const progress = effectiveParallelProgress(job)
 	if (!hasDeterminateInstallProgress(progress)) {
 		return job.parallel ? phaseLabel(job.parallel.phase) : ''
@@ -981,6 +982,7 @@ function parallelProgressText(job: InstallJobSnapshot) {
 }
 
 function progressText(job: InstallJobSnapshot) {
+	if (isMainTrackComplete(job)) return statusLabel('completed')
 	const textSource = installProgressTextSource(job)
 	if (textSource.type === 'required_files') {
 		return `${completedRequiredFiles(job)} / ${totalRequiredFiles(job)}`

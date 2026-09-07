@@ -281,6 +281,11 @@ impl MinecraftDownloadProgress {
         current: u64,
         total: u64,
     ) -> crate::Result<()> {
+        // A zero total represents a fully cached/no-op Minecraft install.
+        // Persist it as a completed unit so parallel modpack progress does
+        // not remain indeterminate after the task returned successfully.
+        let (current, total) =
+            if total == 0 { (1, 1) } else { (current, total) };
         self.reporter
             .update(
                 InstallPhaseId::DownloadingMinecraft,
@@ -316,6 +321,13 @@ impl MinecraftDownloadProgress {
     }
 
     async fn finish(&self) -> crate::Result<()> {
+        // The initial missing-byte estimate can be stale when another install,
+        // a local runtime source, or a cache satisfies the file before this
+        // task reaches it. A successful Minecraft install is terminal for this
+        // progress track, so publish its total as complete instead of leaving
+        // a misleading `0/N` download bar behind.
+        let total = self.total.load(Ordering::Relaxed);
+        self.emit_progress(total, total).await?;
         let source = self.source.lock().ok().and_then(|source| source.clone());
         let fallback_count = self.fallback_count.load(Ordering::Relaxed);
         if let Some(source) = source {
