@@ -1,9 +1,7 @@
 //! Functions for fetching information from the Internet
 use super::download::modrinth_redirect::{
-    canonical_cdn_url,
     is_official_redirect as is_official_modrinth_cdn_redirect,
     repair_official_redirect as repair_official_cdn_redirect,
-    tianpao_redirect_target as tianpao_modrinth_redirect_target,
 };
 use super::download_dns::DownloadDnsResolver;
 use super::download_manager::{DownloadSpeedTracker, SpeedSnapshot};
@@ -40,11 +38,6 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
 };
 use url::Url;
-
-#[cfg(test)]
-fn canonical_modrinth_cdn_url(url: &str) -> String {
-    canonical_cdn_url(url)
-}
 
 #[cfg(test)]
 fn is_safe_redirect_location(location: &str) -> bool {
@@ -638,36 +631,9 @@ fn modrinth_request_kind(url: &str) -> Option<&'static str> {
     }
 }
 
-/// Rewrites the legacy `cdn.modrinth.com` host to the official
-/// `cdn-alt.modrinth.com` host, preserving scheme, path and query. Other
-/// hosts are returned unchanged, so the result can be used unconditionally.
-fn is_modrinth_cdn_url(url: &str) -> bool {
-    url.starts_with("https://cdn-alt.modrinth.com")
-}
-
-fn is_forge_cdn_mirror_url(url: &str) -> bool {
+fn is_modrinth_api_url(url: &str) -> bool {
     Url::parse(url).ok().is_some_and(|parsed| {
-        matches!(
-            parsed.host_str(),
-            Some(
-                "edge.forgecdn.net"
-                    | "media.forgecdn.net"
-                    | "mediafilez.forgecdn.net"
-            )
-        )
-    })
-}
-
-fn is_modrinth_host_url(url: &str) -> bool {
-    Url::parse(url).ok().is_some_and(|parsed| {
-        matches!(
-            parsed.host_str(),
-            Some(
-                "api.modrinth.com"
-                    | "cdn.modrinth.com"
-                    | "cdn-alt.modrinth.com"
-            )
-        )
+        matches!(parsed.host_str(), Some("api.modrinth.com"))
     })
 }
 
@@ -922,7 +888,7 @@ fn route(
 }
 
 fn official_route(url: &str, resource: ResourceClass) -> DownloadRoute {
-    let url = canonical_cdn_url(url);
+    let url = url.to_string();
     let source = Url::parse(&url)
         .ok()
         .and_then(|url| url.host_str().map(str::to_string))
@@ -1137,9 +1103,7 @@ fn order_auto_routes(
     resource: ResourceClass,
     force_mirror_first: bool,
 ) {
-    let cold_prefers_mirror = force_mirror_first
-        || crate::State::get_if_initialized()
-            .is_some_and(|state| state.auto_prefers_mirror());
+    let cold_prefers_mirror = force_mirror_first;
     let health = ROUTE_HEALTH.lock().clone();
     routes.sort_by(|left, right| {
         let route_health = |route: &DownloadRoute| {
@@ -1173,6 +1137,14 @@ fn order_auto_routes(
                         left_mirror_rank.cmp(&right_mirror_rank)
                     })
                     .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| {
+                // Automatic content downloads start from the supplied
+                // official URL. Health can still move a failing official
+                // route behind a mirror, but connectivity alone is not a
+                // reason to call a mirror faster.
+                (!force_mirror_first && !is_official_route(left))
+                    .cmp(&(!force_mirror_first && !is_official_route(right)))
             })
             .then_with(|| {
                 (right_health.success_samples > 0)
@@ -1227,33 +1199,20 @@ fn uses_mirror_first_loader_routes(url: &str, resource: ResourceClass) -> bool {
         .any(|loader| path.contains(loader))
 }
 
-/// Content CDNs have no authentication requirement, so Automatic mode can
-/// safely try their mirror before historical official-CDN measurements. A
-/// failed or cooling mirror still remains behind a healthy official route.
-fn uses_mirror_first_cdn_routes(url: &str) -> bool {
-    is_modrinth_cdn_url(url) || is_forge_cdn_mirror_url(url)
-}
-
 pub fn resolve_download_routes_for(
     url: &str,
     resource: ResourceClass,
     mode: crate::state::DownloadSourceMode,
 ) -> Vec<DownloadRoute> {
-    let url = canonical_cdn_url(url);
+    let url = url.to_string();
     let official = official_route(&url, resource);
     let mirror_first_loader = uses_mirror_first_loader_routes(&url, resource);
     let mut routes = explicit_mirror_routes(&url, resource);
     routes.push(official);
-    // Modrinth API stays official-only. Modrinth CDN and CurseForge CDN content
-    // use the existing mirror selector; in Automatic mode Tianpao is preferred
-    // over official.
-    let mode = if uses_mirror_first_cdn_routes(&url) {
-        if mode == crate::state::DownloadSourceMode::Auto {
-            crate::state::DownloadSourceMode::MirrorPreferred
-        } else {
-            mode
-        }
-    } else if is_modrinth_host_url(&url) {
+    // Modrinth API calls are authenticated and remain official-only. CDN
+    // downloads retain their supplied official URL and can fall back to a
+    // health-ranked mirror in Automatic mode.
+    let mode = if is_modrinth_api_url(&url) {
         crate::state::DownloadSourceMode::OfficialOnly
     } else {
         mode
@@ -3610,10 +3569,7 @@ async fn send_path_request_with_clients(
             ))
             .into());
         }
-        current = tianpao_modrinth_redirect_target(&current, &next)
-            .or_else(|| {
-                repair_official_cdn_redirect(&original, &next, &location)
-            })
+        current = repair_official_cdn_redirect(&original, &next, &location)
             .unwrap_or(next);
     }
     unreachable!()
@@ -3870,7 +3826,13 @@ fn route_segmented_concurrency_cap(
         .min(crate::util::download::native_budget::available(route));
     if route.source == DownloadRouteSource::Bmclapi
         || route.source == DownloadRouteSource::Tianpao
-        || is_modrinth_cdn_url(&route.url)
+        || matches!(route.source, DownloadRouteSource::Official)
+            && Url::parse(&route.url).ok().is_some_and(|url| {
+                matches!(
+                    url.host_str(),
+                    Some("cdn.modrinth.com" | "cdn-alt.modrinth.com")
+                )
+            })
     {
         cap.min(4)
     } else {
@@ -4408,11 +4370,7 @@ async fn ensure_task_routes_probed(
     }
     let mirror_first_loader =
         uses_mirror_first_loader_routes(&request.url, request.resource);
-    order_auto_routes(
-        routes,
-        request.resource,
-        mirror_first_loader || uses_mirror_first_cdn_routes(&request.url),
-    );
+    order_auto_routes(routes, request.resource, mirror_first_loader);
 }
 
 pub(crate) async fn prepare_native_download_routes(
@@ -4435,8 +4393,7 @@ pub(crate) async fn prepare_native_download_routes(
         order_auto_routes(
             routes,
             request.resource,
-            uses_mirror_first_loader_routes(&request.url, request.resource)
-                || uses_mirror_first_cdn_routes(&request.url),
+            uses_mirror_first_loader_routes(&request.url, request.resource),
         );
     }
 }
@@ -5601,16 +5558,6 @@ async fn download_to_path_inner(
     semaphore: &FetchSemaphore,
     mut progress: Option<&mut FetchProgressFn<'_>>,
 ) -> crate::Result<DownloadResult> {
-    // Canonicalize legacy Modrinth CDN URLs to the official cdn-alt host at
-    // the single entry point so every caller (modpacks, single content
-    // installs, missing-content recovery) gets the same behaviour before route
-    // resolution decides whether a Tianpao mirror should be attempted first.
-    request.url = canonical_cdn_url(&request.url);
-    request.candidate_urls = request
-        .candidate_urls
-        .iter()
-        .map(|url| canonical_cdn_url(url))
-        .collect();
     if let Some(parent) = destination.parent() {
         io::create_dir_all(parent).await?;
     }
@@ -5718,26 +5665,6 @@ async fn download_to_path_inner(
 
     prepare_native_download_routes(&request, &mut routes, semaphore).await;
 
-    if let Some(index) = routes.iter().position(|route| {
-        crate::util::download::modrinth_redirect::tianpao_redirect_target_for_route(&route.url)
-            .is_some()
-    }) {
-        let mut route = routes[index].clone();
-        route.url = crate::util::download::modrinth_redirect::tianpao_redirect_target_for_route(
-            &route.url,
-        )
-        .expect("redirect capability was just checked");
-        route.source = DownloadRouteSource::Official;
-        route.is_mirror = false;
-        route.allow_sensitive_headers = true;
-        routes.remove(index);
-        routes.insert(0, route);
-        tracing::debug!(
-            url = %sanitize_url_for_log(&routes[0].url),
-            "Skipping known Tianpao redirect route for shared HTTP/2"
-        );
-    }
-
     // Prefer one stream on a healthy shared HTTP/2 connection when the file
     // size and transport reputation justify it. Larger or slow H2 transfers
     // fall through to independent HTTP/1.1 range connections.
@@ -5823,15 +5750,6 @@ async fn download_to_path_inner(
                 failure,
                 preserve_partial,
             } => {
-                if failure == crate::util::download::h2_download::H2DownloadFailure::TianpaoRedirect {
-                    crate::util::download::modrinth_redirect::remember_tianpao_redirect(
-                        &h2_route.url,
-                    );
-                    tracing::debug!(
-                        url = %sanitize_url_for_log(&h2_route.url),
-                        "Recorded session-only Tianpao Modrinth redirect capability"
-                    );
-                }
                 if failure.integrity_failure() {
                     if !is_official_route(&h2_route) {
                         h2_failed_nonofficial = Some(h2_route.url.clone());
@@ -7516,24 +7434,19 @@ mod tests {
     }
 
     #[test]
-    fn modrinth_cdn_urls_are_canonicalized_to_cdn_alt() {
-        assert_eq!(
-            canonical_modrinth_cdn_url(
-                "https://cdn.modrinth.com/data/project/version/file.jar?download=1"
-            ),
-            "https://cdn-alt.modrinth.com/data/project/version/file.jar?download=1"
-        );
-        assert_eq!(
-            canonical_modrinth_cdn_url(
-                "https://cdn-alt.modrinth.com/data/project/version/file.jar"
-            ),
-            "https://cdn-alt.modrinth.com/data/project/version/file.jar"
-        );
-        assert_eq!(
-            canonical_modrinth_cdn_url("https://example.com/data/file.jar"),
-            "https://example.com/data/file.jar"
-        );
-        assert_eq!(canonical_modrinth_cdn_url("not-a-url"), "not-a-url");
+    fn modrinth_cdn_routes_preserve_the_original_official_host() {
+        for host in ["cdn.modrinth.com", "cdn-alt.modrinth.com"] {
+            let url = format!(
+                "https://{host}/data/project/version/file.jar?download=1"
+            );
+            let routes = resolve_download_routes_for(
+                &url,
+                ResourceClass::Modrinth,
+                crate::state::DownloadSourceMode::OfficialOnly,
+            );
+            assert_eq!(routes.len(), 1);
+            assert_eq!(routes[0].url, url);
+        }
     }
 
     #[test]
@@ -8086,13 +7999,9 @@ mod tests {
             },
         );
 
-        order_auto_routes(
-            &mut routes,
-            ResourceClass::Modrinth,
-            uses_mirror_first_cdn_routes(url),
-        );
+        order_auto_routes(&mut routes, ResourceClass::Modrinth, false);
 
-        assert_eq!(routes[0].source, DownloadRouteSource::Tianpao);
+        assert_eq!(routes[0].source, DownloadRouteSource::Official);
         *ROUTE_HEALTH.lock() = previous_health;
     }
 
@@ -8167,41 +8076,6 @@ mod tests {
         assert!(!is_mrpack_url(
             "https://cdn.modrinth.com/data/project/version/mod.jar"
         ));
-    }
-
-    #[test]
-    fn tianpao_modrinth_redirect_keeps_the_legacy_cdn_host() {
-        let current = Url::parse(
-            "https://mod.tianpao.top/data/project/version/file.jar?download=1",
-        )
-        .unwrap();
-        let redirect = Url::parse(
-            "https://cdn-alt.modrinth.com/data/project/version/file.jar?download=1",
-        )
-        .unwrap();
-
-        assert_eq!(
-            tianpao_modrinth_redirect_target(&current, &redirect)
-                .unwrap()
-                .as_str(),
-            "https://cdn.modrinth.com/data/project/version/file.jar?download=1",
-        );
-    }
-
-    #[test]
-    fn non_tianpao_redirect_keeps_its_original_official_host() {
-        let current = Url::parse(
-            "https://other-mirror.example/data/project/version/file.jar",
-        )
-        .unwrap();
-        let redirect = Url::parse(
-            "https://cdn-alt.modrinth.com/data/project/version/file.jar",
-        )
-        .unwrap();
-
-        assert!(
-            tianpao_modrinth_redirect_target(&current, &redirect).is_none()
-        );
     }
 
     #[test]

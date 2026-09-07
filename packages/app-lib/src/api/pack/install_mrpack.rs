@@ -1028,14 +1028,17 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 .collect(),
         )
         .await?;
-    // Warm the shared DNS cache for the official Modrinth hosts so the batch
-    // download starts with an ordered address list instead of racing queries.
-    crate::util::fetch::prewarm_download_dns(&[
-        crate::util::fetch::MODRINTH_CDN_OFFICIAL_HOST,
-        crate::util::fetch::TIANPAO_HOST,
-        "api.modrinth.com",
-    ])
-    .await;
+    // Prewarm exactly the hosts this pack can use. Do not introduce a mirror
+    // route or rewrite an official CDN host merely for DNS cache warming.
+    let dns_hosts = pack
+        .files
+        .iter()
+        .flat_map(|file| file.downloads.iter())
+        .filter_map(|url| url::Url::parse(url).ok())
+        .filter_map(|url| url.host_str().map(str::to_string))
+        .collect::<HashSet<_>>();
+    let dns_hosts = dns_hosts.iter().map(String::as_str).collect::<Vec<_>>();
+    crate::util::fetch::prewarm_download_dns(&dns_hosts).await;
     // Start the Minecraft core install concurrently with the content
     // download so both progress bars advance at once. The Minecraft install
     // reports on the parallel track (phase + bytes); content stays the main

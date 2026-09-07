@@ -5,11 +5,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const DEFAULT_HOST_OVERRIDES: [(&str, &str); 2] = [
-    ("mod.tianpao.top", "www.shopify.com"),
-    ("cdn.modrinth.com", "www.shopify.com"),
-];
-
 /// `lookup_host` does not expose the authoritative record TTL. Keep entries
 /// long enough to retain the connection-reuse benefit, but short enough that
 /// a changed CDN, VPN, or network is not pinned until the application exits.
@@ -45,17 +40,11 @@ pub struct DownloadDnsResolver {
 
 impl Default for DownloadDnsResolver {
     fn default() -> Self {
-        let host_overrides = DEFAULT_HOST_OVERRIDES
-            .into_iter()
-            .map(|(host, resolver_host)| {
-                (host.to_string(), resolver_host.to_string())
-            })
-            .collect();
         Self {
             reliability: Arc::default(),
             last_resolved: Arc::default(),
             resolving_hosts: Arc::default(),
-            host_overrides: Arc::new(Mutex::new(host_overrides)),
+            host_overrides: Arc::default(),
             #[cfg(test)]
             test_addresses: Arc::default(),
             #[cfg(test)]
@@ -606,22 +595,20 @@ mod tests {
     }
 
     #[test]
-    fn tianpao_default_uses_the_shopify_resolver_host() {
-        assert_eq!(
+    fn default_resolver_does_not_override_tianpao() {
+        assert!(
             DownloadDnsResolver::default()
                 .host_override("mod.tianpao.top")
-                .as_deref(),
-            Some("www.shopify.com"),
+                .is_none()
         );
     }
 
     #[test]
-    fn legacy_modrinth_cdn_uses_the_shopify_resolver_host() {
-        assert_eq!(
+    fn default_resolver_does_not_override_legacy_modrinth_cdn() {
+        assert!(
             DownloadDnsResolver::default()
                 .host_override("cdn.modrinth.com")
-                .as_deref(),
-            Some("www.shopify.com"),
+                .is_none()
         );
     }
 }
