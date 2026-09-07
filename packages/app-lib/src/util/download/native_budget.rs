@@ -5,6 +5,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError};
+use tokio::time::{Duration, sleep};
 
 const MAX_NATIVE_CONNECTIONS: usize = 32;
 const MAX_CONNECTIONS_PER_AUTHORITY: usize = 8;
@@ -49,23 +50,28 @@ fn budget(route: &DownloadRoute) -> Option<Arc<Semaphore>> {
 pub(crate) async fn acquire(
     route: &DownloadRoute,
 ) -> Result<NativeBudgetPermit, tokio::sync::AcquireError> {
-    // Acquire both classes concurrently. Awaiting one permit while holding
-    // the other can strand the global pool behind an authority-local queue.
     let authority_budget = budget(route);
-    let authority = async {
-        match authority_budget {
-            Some(budget) => Ok(Some(budget.acquire_owned().await?)),
-            None => Ok(None),
-        }
-    };
-    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned();
-    let (authority, global) = tokio::join!(authority, global);
-    let global = global?;
-    let authority = authority?;
-    Ok(NativeBudgetPermit {
-        _global: global,
-        _authority: authority,
-    })
+    loop {
+        let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned().await?;
+        let authority = match authority_budget.as_ref() {
+            Some(budget) => match Arc::clone(budget).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(TryAcquireError::NoPermits) => {
+                    drop(global);
+                    sleep(Duration::from_millis(5)).await;
+                    continue;
+                }
+                Err(TryAcquireError::Closed) => {
+                    unreachable!("native authority budgets are never closed")
+                }
+            },
+            None => None,
+        };
+        return Ok(NativeBudgetPermit {
+            _global: global,
+            _authority: authority,
+        });
+    }
 }
 
 pub(crate) async fn acquire_many(
@@ -73,18 +79,28 @@ pub(crate) async fn acquire_many(
     count: usize,
 ) -> Result<Vec<NativeBudgetPermit>, tokio::sync::AcquireError> {
     let authority_budget = budget(route);
-    let authority = async {
-        match authority_budget {
+    let (mut global, mut authority) = loop {
+        let global = Arc::clone(&GLOBAL_BUDGET)
+            .acquire_many_owned(count as u32)
+            .await?;
+        let authority = match authority_budget.as_ref() {
             Some(budget) => {
-                Ok(Some(budget.acquire_many_owned(count as u32).await?))
+                match Arc::clone(budget).try_acquire_many_owned(count as u32) {
+                    Ok(permit) => Some(permit),
+                    Err(TryAcquireError::NoPermits) => {
+                        drop(global);
+                        sleep(Duration::from_millis(5)).await;
+                        continue;
+                    }
+                    Err(TryAcquireError::Closed) => unreachable!(
+                        "native authority budgets are never closed"
+                    ),
+                }
             }
-            None => Ok(None),
-        }
+            None => None,
+        };
+        break (global, authority);
     };
-    let global = Arc::clone(&GLOBAL_BUDGET).acquire_many_owned(count as u32);
-    let (authority, global) = tokio::join!(authority, global);
-    let global = global?;
-    let authority = authority?;
     let mut global = global;
     let mut authority = authority;
     let mut permits = Vec::with_capacity(count);

@@ -156,16 +156,20 @@ pub(crate) async fn try_download_via_h2(
     let total_size = if let Some(size) = expected_size {
         size
     } else {
-        let _probe_stream_permit =
-            match super::h2_stream_budget::acquire(route).await {
-                Ok(permit) => permit,
-                Err(_) => {
-                    return H2DownloadOutcome::Fallback {
-                        failure: H2DownloadFailure::Connect,
-                        preserve_partial: false,
-                    };
-                }
-            };
+        let _probe_stream_permit = match tokio::time::timeout(
+            ASSET_RESOURCE_WAIT_TIMEOUT,
+            super::h2_stream_budget::acquire(route),
+        )
+        .await
+        {
+            Ok(Ok(permit)) => permit,
+            Ok(Err(_)) | Err(_) => {
+                return H2DownloadOutcome::Fallback {
+                    failure: H2DownloadFailure::Connect,
+                    preserve_partial: false,
+                };
+            }
+        };
         let mut probe_headers = request_headers(request, route);
         probe_headers.insert(RANGE, HeaderValue::from_static("bytes=0-0"));
         probe_headers

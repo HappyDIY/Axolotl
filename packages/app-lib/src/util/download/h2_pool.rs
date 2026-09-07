@@ -30,6 +30,7 @@ const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 const DNS_PREWARM_TIMEOUT: Duration = Duration::from_secs(10);
 const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const IDLE_EVICTION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+const CONNECTION_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum H2ConnectFailureKind {
@@ -197,7 +198,9 @@ impl SharedH2Connection {
             );
         }
         let (response, _) = sender.send_request(request, true)?;
-        response.await
+        tokio::time::timeout(STREAM_READY_TIMEOUT, response)
+            .await
+            .map_err(|_| h2::Error::from(h2::Reason::ENHANCE_YOUR_CALM))?
     }
 }
 
@@ -314,7 +317,11 @@ async fn connect_tcp(host: &str, port: u16) -> std::io::Result<TcpStream> {
             Err(error) => last_error = Some(error),
         }
         if resolver.record_connection_failure(host) {
-            resolver.pre_resolve(host).await;
+            let _ = tokio::time::timeout(
+                CONNECTION_WAIT_TIMEOUT,
+                resolver.pre_resolve(host),
+            )
+            .await;
             let refreshed = resolver.resolved_addresses(host);
             if !refreshed.is_empty() && refreshed != addresses {
                 match connect_addresses(host, port, &refreshed).await {
@@ -480,7 +487,16 @@ pub(crate) async fn shared_connection(
             )
         })?;
     let slot = connection_slot(&authority).await;
-    let mut cached = slot.lock().await;
+    let mut cached = tokio::time::timeout(CONNECTION_WAIT_TIMEOUT, slot.lock())
+        .await
+        .map_err(|_| {
+            H2ConnectError::new(
+                H2ConnectFailureKind::Protocol,
+                format!(
+                    "timed out waiting for HTTP/2 connection slot {authority}"
+                ),
+            )
+        })?;
     if let Some(connection) = cached.as_ref().filter(|connection| {
         !connection.is_dead() && !connection.is_idle_expired()
     }) {
@@ -509,7 +525,17 @@ pub(crate) async fn shared_connection(
         ));
     }
     tracing::debug!(authority, "Establishing cold shared HTTP/2 connection");
-    let connection = establish(route, reserve_native_budget).await?;
+    let connection = tokio::time::timeout(
+        CONNECTION_WAIT_TIMEOUT,
+        establish(route, reserve_native_budget),
+    )
+    .await
+    .map_err(|_| {
+        H2ConnectError::new(
+            H2ConnectFailureKind::Tcp,
+            format!("timed out establishing HTTP/2 connection to {authority}"),
+        )
+    })??;
     *cached = Some(Arc::clone(&connection));
     Ok(connection)
 }
@@ -529,7 +555,17 @@ pub(crate) async fn shared_batch_connection(
             )
         })?;
     let slot = batch_connection_slot(&authority).await;
-    let mut cached = slot.lock().await;
+    let mut cached = tokio::time::timeout(
+        CONNECTION_WAIT_TIMEOUT,
+        slot.lock(),
+    )
+    .await
+    .map_err(|_| {
+        H2ConnectError::new(
+            H2ConnectFailureKind::Protocol,
+            format!("timed out waiting for asset HTTP/2 connection slot {authority}"),
+        )
+    })?;
     if let Some(connection) = cached.as_ref().filter(|connection| {
         !connection.is_dead() && !connection.is_idle_expired()
     }) {
@@ -555,7 +591,19 @@ pub(crate) async fn shared_batch_connection(
         *cached = None;
     }
     tracing::debug!(authority, "Establishing sibling HTTP/2 asset connection");
-    let connection = establish(route, reserve_native_budget).await?;
+    let connection = tokio::time::timeout(
+        CONNECTION_WAIT_TIMEOUT,
+        establish(route, reserve_native_budget),
+    )
+    .await
+    .map_err(|_| {
+        H2ConnectError::new(
+            H2ConnectFailureKind::Tcp,
+            format!(
+                "timed out establishing asset HTTP/2 connection to {authority}"
+            ),
+        )
+    })??;
     *cached = Some(Arc::clone(&connection));
     Ok(connection)
 }

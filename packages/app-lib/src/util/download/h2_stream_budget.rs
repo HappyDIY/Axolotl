@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use tokio::sync::{AcquireError, OwnedSemaphorePermit, Semaphore};
+use tokio::time::{Duration, sleep};
 
 const MAX_H2_STREAMS: usize = 128;
 const MAX_H2_STREAMS_PER_AUTHORITY: usize = 32;
@@ -80,20 +81,27 @@ pub(crate) async fn acquire(
     route: &DownloadRoute,
 ) -> Result<H2StreamPermit, AcquireError> {
     let authority_budget = budget(route);
-    let authority = async {
-        match authority_budget {
-            Some(budget) => Ok(Some(budget.acquire_owned().await?)),
-            None => Ok(None),
-        }
-    };
-    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned();
-    let (authority, global) = tokio::join!(authority, global);
-    let global = global?;
-    let authority = authority?;
-    Ok(H2StreamPermit {
-        _global: global,
-        _authority: authority,
-    })
+    loop {
+        let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned().await?;
+        let authority = match authority_budget.as_ref() {
+            Some(budget) => match Arc::clone(budget).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    drop(global);
+                    sleep(Duration::from_millis(5)).await;
+                    continue;
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    unreachable!("H2 authority budgets are never closed")
+                }
+            },
+            None => None,
+        };
+        return Ok(H2StreamPermit {
+            _global: global,
+            _authority: authority,
+        });
+    }
 }
 
 /// Acquires a stream for the Minecraft asset batch. Assets retain a large
@@ -103,20 +111,27 @@ pub(crate) async fn acquire_asset(
     route: &DownloadRoute,
 ) -> Result<H2StreamPermit, AcquireError> {
     let authority_budget = asset_budget(route);
-    let authority = async {
-        match authority_budget {
-            Some(budget) => Ok(Some(budget.acquire_owned().await?)),
-            None => Ok(None),
-        }
-    };
-    let global = Arc::clone(&ASSET_GLOBAL_BUDGET).acquire_owned();
-    let (authority, global) = tokio::join!(authority, global);
-    let global = global?;
-    let authority = authority?;
-    Ok(H2StreamPermit {
-        _global: global,
-        _authority: authority,
-    })
+    loop {
+        let global = Arc::clone(&ASSET_GLOBAL_BUDGET).acquire_owned().await?;
+        let authority = match authority_budget.as_ref() {
+            Some(budget) => match Arc::clone(budget).try_acquire_owned() {
+                Ok(permit) => Some(permit),
+                Err(tokio::sync::TryAcquireError::NoPermits) => {
+                    drop(global);
+                    sleep(Duration::from_millis(5)).await;
+                    continue;
+                }
+                Err(tokio::sync::TryAcquireError::Closed) => {
+                    unreachable!("asset authority budgets are never closed")
+                }
+            },
+            None => None,
+        };
+        return Ok(H2StreamPermit {
+            _global: global,
+            _authority: authority,
+        });
+    }
 }
 
 #[cfg(test)]
