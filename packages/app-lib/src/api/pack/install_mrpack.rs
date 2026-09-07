@@ -41,6 +41,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use super::install_from::{CreatePack, CreatePackFile, PackFormat};
 use crate::data::ProjectType;
@@ -64,6 +65,7 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
 const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
+const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
 pub(crate) enum MrpackInstallOutcome {
@@ -1277,7 +1279,26 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     )
                     .await?;
                 let finalize_permit = match native_pipeline.as_ref() {
-                    Some((_, finalize)) => Some(finalize.acquire().await?),
+                    Some((_, finalize)) => {
+                        let cancellation =
+                            content_context.reporter.cancellation_token();
+                        let wait = tokio::time::timeout(
+                            FINALIZE_WAIT_TIMEOUT,
+                            finalize.acquire(),
+                        );
+                        Some(tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                return Err(crate::ErrorKind::OtherError(
+                                    "modpack finalization canceled while waiting for worker".to_string(),
+                                ).into());
+                            }
+                            result = wait => result.map_err(|_| {
+                                crate::ErrorKind::NetworkError(
+                                    "timed out waiting for modpack finalization worker".to_string(),
+                                )
+                            })??,
+                        })
+                    }
                     None => None,
                 };
                 content_context
@@ -1319,7 +1340,23 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                             DownloadItemStatus::WaitingForDatabase,
                         )
                         .await?;
-                    let _permit = state.install_db_semaphore.acquire().await?;
+                    let cancellation =
+                        content_context.reporter.cancellation_token();
+                    let _permit = tokio::select! {
+                        _ = cancellation.cancelled() => {
+                            return Err(crate::ErrorKind::OtherError(
+                                "modpack finalization canceled while waiting for database".to_string(),
+                            ).into());
+                        }
+                        result = tokio::time::timeout(
+                            FINALIZE_WAIT_TIMEOUT,
+                            state.install_db_semaphore.acquire(),
+                        ) => result.map_err(|_| {
+                            crate::ErrorKind::NetworkError(
+                                "timed out waiting for modpack database".to_string(),
+                            )
+                        })??,
+                    };
                     if let Some(project_type) =
                     ProjectType::get_from_parent_folder(project.path.as_str())
                     {
