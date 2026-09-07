@@ -54,7 +54,7 @@ pub(crate) async fn acquire(
     let authority_budget = budget(route);
     let authority = async {
         match authority_budget {
-            Some(budget) => Some(budget.acquire_owned().await?),
+            Some(budget) => Ok(Some(budget.acquire_owned().await?)),
             None => Ok(None),
         }
     };
@@ -76,7 +76,7 @@ pub(crate) async fn acquire_many(
     let authority = async {
         match authority_budget {
             Some(budget) => {
-                Some(budget.acquire_many_owned(count as u32).await?)
+                Ok(Some(budget.acquire_many_owned(count as u32).await?))
             }
             None => Ok(None),
         }

@@ -1,7 +1,7 @@
 use crate::launcher::instance_runtime::InstanceRuntimeAdapter;
 use crate::state::State;
 use crate::util::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 #[tracing::instrument]
 pub async fn get_full_path(instance_id: &str) -> crate::Result<PathBuf> {
