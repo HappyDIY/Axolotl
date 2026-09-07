@@ -52,11 +52,17 @@ fn budget(route: &DownloadRoute) -> Option<Arc<Semaphore>> {
 pub(crate) async fn acquire(
     route: &DownloadRoute,
 ) -> Result<H2StreamPermit, AcquireError> {
-    let authority = match budget(route) {
-        Some(budget) => Some(budget.acquire_owned().await?),
-        None => None,
+    let authority_budget = budget(route);
+    let authority = async {
+        match authority_budget {
+            Some(budget) => Some(budget.acquire_owned().await?),
+            None => Ok(None),
+        }
     };
-    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned().await?;
+    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned();
+    let (authority, global) = tokio::join!(authority, global);
+    let global = global?;
+    let authority = authority?;
     Ok(H2StreamPermit {
         _global: global,
         _authority: authority,

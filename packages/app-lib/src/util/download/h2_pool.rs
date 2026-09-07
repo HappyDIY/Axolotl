@@ -26,6 +26,8 @@ use crate::util::fetch::DownloadRoute;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const TLS_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const DNS_PREWARM_TIMEOUT: Duration = Duration::from_secs(10);
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(crate) enum H2ConnectFailureKind {
@@ -141,7 +143,15 @@ impl SharedH2Connection {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let mut sender = sender.ready().await?;
+        let mut sender =
+            tokio::time::timeout(STREAM_READY_TIMEOUT, sender.ready())
+                .await
+                .map_err(|_| {
+                    h2::Error::from(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "timed out waiting for HTTP/2 stream capacity",
+                    ))
+                })??;
         let ready_wait = ready_started.elapsed();
         if ready_wait >= Duration::from_millis(25) {
             tracing::debug!(
@@ -332,9 +342,11 @@ async fn establish(
 
     // Pre-resolve so `connect_tcp` gets the ordered, reliability-ranked
     // address list shared with the legacy reqwest path.
-    crate::util::fetch::DOWNLOAD_DNS_RESOLVER
-        .pre_resolve(host)
-        .await;
+    let _ = tokio::time::timeout(
+        DNS_PREWARM_TIMEOUT,
+        crate::util::fetch::DOWNLOAD_DNS_RESOLVER.pre_resolve(host),
+    )
+    .await;
 
     let tcp = connect_tcp(host, port).await.map_err(|error| {
 		H2ConnectError::new(
@@ -440,6 +452,12 @@ pub(crate) async fn shared_connection(
                 .to_string(),
         ));
     }
+    if cached
+        .as_ref()
+        .is_some_and(|connection| connection.is_dead())
+    {
+        *cached = None;
+    }
     if !allow_cold_connection {
         return Err(H2ConnectError::new(
             H2ConnectFailureKind::Protocol,
@@ -483,6 +501,12 @@ pub(crate) async fn shared_batch_connection(
             "sibling HTTP/2 connection is not covered by the native connection budget"
                 .to_string(),
         ));
+    }
+    if cached
+        .as_ref()
+        .is_some_and(|connection| connection.is_dead())
+    {
+        *cached = None;
     }
     tracing::debug!(authority, "Establishing sibling HTTP/2 asset connection");
     let connection = establish(route, reserve_native_budget).await?;

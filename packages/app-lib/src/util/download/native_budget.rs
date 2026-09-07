@@ -49,11 +49,19 @@ fn budget(route: &DownloadRoute) -> Option<Arc<Semaphore>> {
 pub(crate) async fn acquire(
     route: &DownloadRoute,
 ) -> Result<NativeBudgetPermit, tokio::sync::AcquireError> {
-    let authority = match budget(route) {
-        Some(budget) => Some(budget.acquire_owned().await?),
-        None => None,
+    // Acquire both classes concurrently. Awaiting one permit while holding
+    // the other can strand the global pool behind an authority-local queue.
+    let authority_budget = budget(route);
+    let authority = async {
+        match authority_budget {
+            Some(budget) => Some(budget.acquire_owned().await?),
+            None => Ok(None),
+        }
     };
-    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned().await?;
+    let global = Arc::clone(&GLOBAL_BUDGET).acquire_owned();
+    let (authority, global) = tokio::join!(authority, global);
+    let global = global?;
+    let authority = authority?;
     Ok(NativeBudgetPermit {
         _global: global,
         _authority: authority,
@@ -64,13 +72,19 @@ pub(crate) async fn acquire_many(
     route: &DownloadRoute,
     count: usize,
 ) -> Result<Vec<NativeBudgetPermit>, tokio::sync::AcquireError> {
-    let authority = match budget(route) {
-        Some(budget) => Some(budget.acquire_many_owned(count as u32).await?),
-        None => None,
+    let authority_budget = budget(route);
+    let authority = async {
+        match authority_budget {
+            Some(budget) => {
+                Some(budget.acquire_many_owned(count as u32).await?)
+            }
+            None => Ok(None),
+        }
     };
-    let global = Arc::clone(&GLOBAL_BUDGET)
-        .acquire_many_owned(count as u32)
-        .await?;
+    let global = Arc::clone(&GLOBAL_BUDGET).acquire_many_owned(count as u32);
+    let (authority, global) = tokio::join!(authority, global);
+    let global = global?;
+    let authority = authority?;
     let mut global = global;
     let mut authority = authority;
     let mut permits = Vec::with_capacity(count);
@@ -94,11 +108,14 @@ pub(crate) async fn acquire_many(
 pub(crate) fn try_acquire(
     route: &DownloadRoute,
 ) -> Result<NativeBudgetPermit, TryAcquireError> {
+    let global = Arc::clone(&GLOBAL_BUDGET).try_acquire_owned()?;
     let authority = match budget(route) {
-        Some(budget) => Some(budget.try_acquire_owned()?),
+        Some(budget) => match budget.try_acquire_owned() {
+            Ok(permit) => Some(permit),
+            Err(error) => return Err(error),
+        },
         None => None,
     };
-    let global = Arc::clone(&GLOBAL_BUDGET).try_acquire_owned()?;
     Ok(NativeBudgetPermit {
         _global: global,
         _authority: authority,
