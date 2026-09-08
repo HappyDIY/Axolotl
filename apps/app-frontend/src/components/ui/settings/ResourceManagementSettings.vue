@@ -809,7 +809,7 @@ function validateMinecraftDirectory(value) {
 								v-model="minecraftDirectories[index].mode"
 								:aria-label="formatMessage(messages.minecraftDirectoryMode)"
 								:options="minecraftDirectoryModeOptions"
-								class="w-56 max-w-[45%]"
+								class="w-[200px] max-w-[45%]"
 							/>
 							<IconButton
 								:label="formatMessage(messages.removeMinecraftDirectory)"

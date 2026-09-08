@@ -6749,6 +6749,15 @@
   "app.settings.resources.minecraft-directories-description": {
     "message": "新增一或多個供實例使用的外部 .minecraft 資料夾。這些資料夾會與 Axolotl 資料分開保存。"
   },
+  "app.settings.resources.minecraft-directory-mode": {
+    "message": "遊戲目錄模式"
+  },
+  "app.settings.resources.minecraft-directory-mode.isolated": {
+    "message": "版本隔離"
+  },
+  "app.settings.resources.minecraft-directory-mode.shared": {
+    "message": "共用 .minecraft 目錄"
+  },
   "app.settings.resources.add-minecraft-directory": {
     "message": "新增 .minecraft 目錄"
   },

@@ -7115,6 +7115,15 @@
   "app.settings.resources.minecraft-directories-description": {
     "message": "Add one or more .minecraft folders for instances that use an external game directory. These folders are kept separate from Axolotl data."
   },
+  "app.settings.resources.minecraft-directory-mode": {
+    "message": "Game directory mode"
+  },
+  "app.settings.resources.minecraft-directory-mode.isolated": {
+    "message": "Version-isolated"
+  },
+  "app.settings.resources.minecraft-directory-mode.shared": {
+    "message": "Shared .minecraft directory"
+  },
   "app.settings.resources.minecraft-directory-must-end-with": {
     "message": "The selected folder must be named .minecraft."
   },
