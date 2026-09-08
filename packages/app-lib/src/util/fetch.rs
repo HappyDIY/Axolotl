@@ -25,7 +25,6 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::error::Error;
 use std::ffi::OsStr;
 use std::future::Future;
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{
@@ -372,8 +371,6 @@ static IN_FLIGHT_DOWNLOADS: LazyLock<
     dashmap::DashMap<String, Weak<AsyncMutex<()>>>,
 > = LazyLock::new(dashmap::DashMap::new);
 
-const ROUTE_HEALTH_ALPHA: f64 = 0.25;
-
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 enum ResourceFamily {
     Minecraft,
@@ -595,9 +592,7 @@ fn route_health_key(
 }
 
 fn update_ewma(current: &mut Option<f64>, sample: f64) {
-    *current = Some(current.map_or(sample, |current| {
-        current * (1.0 - ROUTE_HEALTH_ALPHA) + sample * ROUTE_HEALTH_ALPHA
-    }));
+    super::download::route_health::update_ewma(current, sample);
 }
 
 fn persisted_route_health(
@@ -4219,18 +4214,17 @@ async fn ensure_task_routes_probed(
     if semaphore.0.available_permits() < candidates.len() {
         return;
     }
-    let mut probe_scope = candidates
+    let mut probe_authorities = candidates
         .iter()
         .filter_map(|route| {
             effective_route_authority(route)
                 .map(|authority| format!("{authority}:{:?}", route.proxy))
         })
         .collect::<Vec<_>>();
-    probe_scope.sort_unstable();
-    let mut scope_hasher = std::collections::hash_map::DefaultHasher::new();
-    family.hash(&mut scope_hasher);
-    probe_scope.hash(&mut scope_hasher);
-    let scope = scope_hasher.finish();
+    let scope = super::download::route_health::probe_scope(
+        family.as_str(),
+        &mut probe_authorities,
+    );
     let task_key = request
         .install_tracking
         .as_ref()

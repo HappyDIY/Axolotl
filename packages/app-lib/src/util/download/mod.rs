@@ -22,6 +22,7 @@ pub(crate) mod native_budget;
 pub(crate) mod native_reputation;
 pub(crate) mod native_slow;
 pub(crate) mod range_output;
+pub(crate) mod route_health;
 pub(crate) mod route_policy;
 pub mod shared;
 pub mod slow;
