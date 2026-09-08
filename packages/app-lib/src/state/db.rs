@@ -89,6 +89,7 @@ pub(crate) async fn connect(
     crate::util::io::create_dir_all(&settings_dir).await?;
 
     migrate_legacy_release_database(&settings_dir).await?;
+    reconcile_default_channel_database(&settings_dir).await?;
     let db_path = app_db_path(&settings_dir).await?;
     let db_dir = db_path.parent().ok_or_else(|| {
         crate::ErrorKind::FSError(format!(
@@ -245,11 +246,26 @@ async fn app_db_path(settings_dir: &Path) -> crate::Result<PathBuf> {
 async fn read_update_channel(
     settings_dir: &Path,
 ) -> crate::Result<&'static str> {
+    Ok(read_explicit_update_channel(settings_dir)
+        .await?
+        .unwrap_or_else(default_update_channel))
+}
+
+/// Reads the update channel the user explicitly chose, if any.
+///
+/// Returns `None` when the user has not made a choice yet: either the
+/// `update-channel.json` file is missing, or it carries no `active_channel`
+/// value. This lets fresh installs fall back to the channel of the current
+/// build (see [`default_update_channel`]) instead of always defaulting to the
+/// Release channel.
+async fn read_explicit_update_channel(
+    settings_dir: &Path,
+) -> crate::Result<Option<&'static str>> {
     let path = settings_dir.join(UPDATE_CHANNEL_STATE_FILE);
     let contents = match tokio::fs::read_to_string(&path).await {
         Ok(contents) => contents,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok("release");
+            return Ok(None);
         }
         Err(error) => return Err(error.into()),
     };
@@ -263,14 +279,86 @@ async fn read_update_channel(
         });
 
     match channel.as_deref() {
-        Some("beta") => Ok("beta"),
-        Some("release") | None => Ok("release"),
+        Some("release") => Ok(Some("release")),
+        Some("beta") => Ok(Some("beta")),
+        None => Ok(None),
         Some(other) => Err(crate::ErrorKind::FSError(format!(
             "Invalid update channel {other:?} in {}",
             path.display()
         ))
         .into()),
     }
+}
+
+/// Resolves the default update channel for a given app version.
+///
+/// The Release channel is the only stable channel, so any version carrying a
+/// pre-release segment (`-beta`, `-rc`, ...) belongs to a pre-release channel.
+/// The launcher currently ships a single pre-release channel, Beta; additional
+/// channels can be mapped here as they are introduced.
+fn default_update_channel_for(version: &str) -> &'static str {
+    match version.split_once('-') {
+        None => "release",
+        Some(_) => "beta",
+    }
+}
+
+/// Default update channel of the current build, used whenever the user has
+/// not explicitly chosen an update channel.
+pub fn default_update_channel() -> &'static str {
+    default_update_channel_for(env!("CARGO_PKG_VERSION"))
+}
+
+/// When the user has not explicitly chosen an update channel, keeps an
+/// existing app database aligned with the update channel of the current
+/// build.
+///
+/// Fresh pre-release builds previously fell back to the Release channel and
+/// created their database under `<settings>/release/app.db`. If such a
+/// database exists while the build's own default channel has none, move it
+/// over so the database follows the build instead of silently starting over
+/// with an empty database in the default channel's directory.
+async fn reconcile_default_channel_database(
+    settings_dir: &Path,
+) -> crate::Result<()> {
+    if read_explicit_update_channel(settings_dir).await?.is_some() {
+        return Ok(());
+    }
+
+    let channel = default_update_channel();
+    let other_channel = if channel == "release" {
+        "beta"
+    } else {
+        "release"
+    };
+
+    let target = settings_dir.join(channel).join(LEGACY_APP_DB_FILE);
+    if target.try_exists()? {
+        return Ok(());
+    }
+    let source = settings_dir.join(other_channel).join(LEGACY_APP_DB_FILE);
+    if !source.try_exists()? {
+        return Ok(());
+    }
+
+    let target_dir = settings_dir.join(channel);
+    crate::util::io::create_dir_all(&target_dir).await?;
+    tokio::fs::rename(&source, &target).await?;
+    for suffix in ["-wal", "-shm"] {
+        let source_sidecar = sidecar_path(&source, suffix);
+        if source_sidecar.try_exists()? {
+            tokio::fs::rename(source_sidecar, sidecar_path(&target, suffix))
+                .await?;
+        }
+    }
+
+    tracing::info!(
+        source = %source.display(),
+        destination = %target.display(),
+        channel,
+        "Moved the existing app database into the default update channel"
+    );
+    Ok(())
 }
 
 async fn migrate_legacy_release_database(
@@ -1940,6 +2028,189 @@ mod tests {
                 .await
                 .unwrap();
         assert!(foreign_key_errors.is_empty());
+    }
+
+    fn temporary_settings_dir(test_name: &str) -> PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "theseus-db-channel-test-{test_name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory)
+            .expect("temporary settings directory should be created");
+        directory
+    }
+
+    #[test]
+    fn default_channel_resolves_from_version() {
+        for (version, expected) in [
+            ("1.9.6", "release"),
+            ("1.9.6.0", "release"),
+            ("1.9.6-beta.3", "beta"),
+            ("1.9.6-rc.1", "beta"),
+            ("1.9.6-alpha.2", "beta"),
+        ] {
+            assert_eq!(
+                default_update_channel_for(version),
+                expected,
+                "unexpected default channel for {version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_channel_falls_back_without_explicit_choice() {
+        let directory = temporary_settings_dir("build-default");
+
+        assert_eq!(
+            read_explicit_update_channel(&directory).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            read_update_channel(&directory).await.unwrap(),
+            default_update_channel()
+        );
+
+        std::fs::write(
+            directory.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"immediate_update_fetch":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(&directory).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            read_update_channel(&directory).await.unwrap(),
+            default_update_channel()
+        );
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn update_channel_honors_explicit_selection() {
+        let directory = temporary_settings_dir("explicit-selection");
+
+        std::fs::write(
+            directory.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"release"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(&directory).await.unwrap(),
+            Some("release")
+        );
+        assert_eq!(read_update_channel(&directory).await.unwrap(), "release");
+
+        std::fs::write(
+            directory.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"beta"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(&directory).await.unwrap(),
+            Some("beta")
+        );
+        assert_eq!(read_update_channel(&directory).await.unwrap(), "beta");
+
+        std::fs::write(
+            directory.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"dev"}"#,
+        )
+        .unwrap();
+        assert!(read_explicit_update_channel(&directory).await.is_err());
+        assert!(read_update_channel(&directory).await.is_err());
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_moves_database_without_explicit_choice() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = temporary_settings_dir("reconcile-move");
+
+        let source_dir = directory.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(LEGACY_APP_DB_FILE), "existing data")
+            .unwrap();
+        std::fs::write(
+            source_dir.join(format!("{LEGACY_APP_DB_FILE}-wal")),
+            "wal",
+        )
+        .unwrap();
+
+        reconcile_default_channel_database(&directory)
+            .await
+            .unwrap();
+
+        let target_dir = directory.join(channel);
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join(LEGACY_APP_DB_FILE))
+                .unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"))
+            )
+            .unwrap(),
+            "wal"
+        );
+        assert!(!source_dir.join(LEGACY_APP_DB_FILE).exists());
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_never_overwrites_or_deletes() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = temporary_settings_dir("reconcile-keep");
+
+        let source_dir = directory.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "untouched").unwrap();
+
+        // An explicit channel choice disables reconciliation entirely.
+        std::fs::write(
+            directory.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"release"}"#,
+        )
+        .unwrap();
+        reconcile_default_channel_database(&directory)
+            .await
+            .unwrap();
+        assert!(source_db.exists());
+        assert!(!directory.join(channel).join(LEGACY_APP_DB_FILE).exists());
+
+        // An existing database in the default channel is left alone.
+        std::fs::remove_file(directory.join(UPDATE_CHANNEL_STATE_FILE))
+            .unwrap();
+        let default_dir = directory.join(channel);
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&default_db, "default data").unwrap();
+        reconcile_default_channel_database(&directory)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&default_db).unwrap(),
+            "default data"
+        );
+        assert_eq!(std::fs::read_to_string(&source_db).unwrap(), "untouched");
+
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     fn initial_migration() -> &'static Migration {

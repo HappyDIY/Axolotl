@@ -236,7 +236,7 @@ async fn initialize_state(app: tauri::AppHandle) -> api::Result<()> {
 fn get_update_channel(app: tauri::AppHandle) -> api::Result<String> {
     let channel = read_update_channel_state(&app)?
         .active_channel
-        .unwrap_or_else(|| "release".to_string());
+        .unwrap_or_else(|| theseus::default_update_channel().to_string());
 
     match channel.as_str() {
         "release" | "beta" => Ok(channel),
@@ -280,7 +280,11 @@ fn get_update_preferences(
     app: tauri::AppHandle,
 ) -> api::Result<UpdatePreferences> {
     let state = read_update_channel_state(&app)?;
-    let is_beta = state.active_channel.as_deref() == Some("beta");
+    let effective_channel = state
+        .active_channel
+        .as_deref()
+        .unwrap_or_else(|| theseus::default_update_channel());
+    let is_beta = effective_channel == "beta";
     Ok(UpdatePreferences {
         immediate_update_fetch: is_beta
             || state.immediate_update_fetch.unwrap_or(false),
