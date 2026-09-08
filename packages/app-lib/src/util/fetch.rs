@@ -5494,6 +5494,102 @@ async fn try_xmcl_download(
     )
 }
 
+enum H2AttemptResult {
+    Completed(DownloadResult),
+    Fallback { failed_nonofficial: Option<String> },
+}
+
+async fn try_h2_download(
+    request: &DownloadRequest,
+    route: DownloadRoute,
+    policy: crate::util::download::native::NativeH2Policy,
+    destination: &Path,
+    part_path: &Path,
+    semaphore: &FetchSemaphore,
+) -> crate::Result<H2AttemptResult> {
+    let _permit =
+        tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, semaphore.0.acquire())
+            .await
+            .map_err(|_| {
+                ErrorKind::NetworkError(
+                    "timed out waiting for HTTP/2 download permit".to_string(),
+                )
+            })??;
+    let started = Instant::now();
+    match crate::util::download::h2_download::try_download_via_h2(
+        request,
+        &route,
+        destination,
+        part_path,
+        policy,
+    )
+    .await
+    {
+        crate::util::download::h2_download::H2DownloadOutcome::Completed(
+            result,
+        ) => {
+            record_route_transfer_success(
+                &route,
+                request.resource,
+                result.size,
+                started.elapsed(),
+            );
+            if let Some(authority) = original_route_authority(&route) {
+                crate::util::download::native_reputation::record_transport_success(
+                    &authority,
+                    route.proxy,
+                    if request.h2_range_concurrency.is_some() {
+                        crate::util::download::native_reputation::NativeTransport::H2MultiRange
+                    } else {
+                        crate::util::download::native_reputation::NativeTransport::H2Single
+                    },
+                    result.size as f64 / started.elapsed().as_secs_f64().max(0.001),
+                );
+            }
+            if let Some(tracking) = &request.install_tracking
+                && let Err(error) = tracking
+                    .reporter
+                    .record_download_request_finished(
+                        &tracking.item_id,
+                        result.size,
+                    )
+                    .await
+            {
+                tracing::warn!(error = %error, "Failed to record completed download request");
+            }
+            Ok(H2AttemptResult::Completed(result))
+        }
+        crate::util::download::h2_download::H2DownloadOutcome::Canceled => {
+            Err(ErrorKind::OtherError("download canceled".to_string()).into())
+        }
+        crate::util::download::h2_download::H2DownloadOutcome::Fallback {
+            failure,
+            preserve_partial,
+        } => {
+            let mut failed_nonofficial = None;
+            if failure.integrity_failure() {
+                if !is_official_route(&route) {
+                    failed_nonofficial = Some(route.url.clone());
+                    tracing::warn!(url = %sanitize_url_for_log(&route.url), source = route.source.as_str(), "Mirror hash validation failed; falling back to the official source");
+                }
+            } else if failure.should_cooldown_authority()
+                && let Some(authority) = url_authority(&route.url)
+            {
+                record_authority_h2_failure(&authority);
+            }
+            if failure.is_transfer_failure() {
+                record_native_transfer_failure(&route, None);
+                record_route_health_failure(&route, request.resource, None);
+            }
+            if !preserve_partial {
+                remove_if_exists(part_path).await?;
+            }
+            cleanup_segment_files(part_path, MAX_SEGMENT_CONCURRENCY).await?;
+            Ok(H2AttemptResult::Fallback { failed_nonofficial })
+        }
+    }
+}
+
 async fn download_to_path_inner(
     request: DownloadRequest,
     destination: &Path,
@@ -5553,116 +5649,27 @@ async fn download_to_path_inner(
     // Prefer one stream on a healthy shared HTTP/2 connection when the file
     // size and transport reputation justify it. Larger or slow H2 transfers
     // fall through to independent HTTP/1.1 range connections.
-    let mut h2_failed_nonofficial = None;
-    let h2_selection =
-        select_h2_download_route(&request, &routes, &part_path).await;
-    if let Some((h2_route, h2_policy)) = h2_selection {
-        let h2_permit =
-            tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, semaphore.0.acquire())
-                .await
-                .map_err(|_| {
-                    ErrorKind::NetworkError(
-                        "timed out waiting for HTTP/2 download permit"
-                            .to_string(),
-                    )
-                })??;
-        let h2_started = Instant::now();
-        match crate::util::download::h2_download::try_download_via_h2(
+    let mut h2_failed_nonofficial = if let Some((h2_route, h2_policy)) =
+        select_h2_download_route(&request, &routes, &part_path).await
+    {
+        match try_h2_download(
             &request,
-            &h2_route,
+            h2_route,
+            h2_policy,
             destination,
             &part_path,
-            h2_policy,
+            semaphore,
         )
-        .await
+        .await?
         {
-            crate::util::download::h2_download::H2DownloadOutcome::Completed(
-                result,
-            ) => {
-                record_route_transfer_success(
-                    &h2_route,
-                    request.resource,
-                    result.size,
-                    h2_started.elapsed(),
-                );
-                if let Some(authority) = original_route_authority(&h2_route) {
-                    crate::util::download::native_reputation::record_transport_success(
-                        &authority,
-                        h2_route.proxy,
-                        if request.h2_range_concurrency.is_some() {
-                            crate::util::download::native_reputation::NativeTransport::H2MultiRange
-                        } else {
-                            crate::util::download::native_reputation::NativeTransport::H2Single
-                        },
-                        result.size as f64
-                            / h2_started.elapsed().as_secs_f64().max(0.001),
-                    );
-                }
-                if let Some(tracking) = &request.install_tracking
-                    && let Err(error) = tracking
-                        .reporter
-                        .record_download_request_finished(
-                            &tracking.item_id,
-                            result.size,
-                        )
-                        .await
-                {
-                    tracing::warn!(
-                        error = %error,
-                        "Failed to record completed download request"
-                    );
-                }
-                return Ok(result);
-            }
-            crate::util::download::h2_download::H2DownloadOutcome::Canceled => {
-                return Err(crate::ErrorKind::OtherError(
-                    "download canceled".to_string(),
-                )
-                .into());
-            }
-            crate::util::download::h2_download::H2DownloadOutcome::Fallback {
-                failure,
-                preserve_partial,
-            } => {
-                if failure.integrity_failure() {
-                    if !is_official_route(&h2_route) {
-                        h2_failed_nonofficial = Some(h2_route.url.clone());
-                        tracing::warn!(
-                            url = %sanitize_url_for_log(&h2_route.url),
-                            source = h2_route.source.as_str(),
-                            "Mirror hash validation failed; falling back to the official source"
-                        );
-                    }
-                } else if failure.should_cooldown_authority()
-                    && let Some(authority) = url_authority(&h2_route.url)
-                {
-                    record_authority_h2_failure(&authority);
-                }
-                if failure.is_transfer_failure() {
-                    record_native_transfer_failure(&h2_route, None);
-                    record_route_health_failure(
-                        &h2_route,
-                        request.resource,
-                        None,
-                    );
-                }
-                tracing::debug!(
-                    url = %sanitize_url_for_log(&h2_route.url),
-                    source = h2_route.source.as_str(),
-                    failure = ?failure,
-                    reason = failure.as_str(),
-                    preserve_partial,
-                    "Multiplexed download unavailable; using legacy path"
-                );
-                if !preserve_partial {
-                    remove_if_exists(&part_path).await?;
-                }
-                cleanup_segment_files(&part_path, MAX_SEGMENT_CONCURRENCY)
-                    .await?;
+            H2AttemptResult::Completed(result) => return Ok(result),
+            H2AttemptResult::Fallback { failed_nonofficial } => {
+                failed_nonofficial
             }
         }
-        drop(h2_permit);
-    }
+    } else {
+        None
+    };
 
     let mut official_integrity_retry = h2_failed_nonofficial.is_some();
     if let Some(failed_route) = h2_failed_nonofficial.take() {
