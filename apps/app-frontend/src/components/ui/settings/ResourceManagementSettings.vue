@@ -18,7 +18,6 @@ import ConfirmModalWrapper from '@/components/ui/modal/ConfirmModalWrapper.vue'
 import { purge_cache_types } from '@/helpers/cache.js'
 import { configureCurseForgeManualDownloadWatcher } from '@/helpers/curseforge'
 import { syncConfiguredDirectLinks } from '@/helpers/direct-link-sync'
-import type { ExternalMinecraftRoot } from '@/helpers/instance'
 import {
 	getMissingContentScannerSettings,
 	setMissingContentScannerSettings,
@@ -433,12 +432,15 @@ const messages = defineMessages({
 
 const MINECRAFT_DIRECTORIES_STORAGE_KEY = 'axolotl-minecraft-directories'
 
+/** @typedef {import('@/helpers/instance').ExternalMinecraftRoot} ExternalMinecraftRoot */
+
 function isMinecraftDirectoryPath(value) {
 	const normalized = value.trim().replace(/[\\/]+$/, '')
 	return normalized.length > 0 && normalized.split(/[\\/]/).at(-1)?.toLowerCase() === '.minecraft'
 }
 
-function loadMinecraftDirectories(): ExternalMinecraftRoot[] {
+/** @returns {ExternalMinecraftRoot[]} */
+function loadMinecraftDirectories() {
 	try {
 		const raw = localStorage.getItem(MINECRAFT_DIRECTORIES_STORAGE_KEY)
 		if (!raw) return []
@@ -464,7 +466,8 @@ function loadMinecraftDirectories(): ExternalMinecraftRoot[] {
 	}
 }
 
-function persistMinecraftDirectories(values: ExternalMinecraftRoot[]) {
+/** @param {ExternalMinecraftRoot[]} values */
+function persistMinecraftDirectories(values) {
 	try {
 		const validValues = [...new Map(
 			values

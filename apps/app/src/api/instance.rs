@@ -525,6 +525,7 @@ pub async fn instance_create_direct_link(
             base_path: request.base_path,
             instance_folder: request.instance_folder,
             instance_path: request.instance_path,
+            game_dir_mode: None,
         },
     )
     .await?;
