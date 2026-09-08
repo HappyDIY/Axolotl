@@ -5409,6 +5409,54 @@ async fn select_h2_download_route(
     Some((h2_route, policy))
 }
 
+async fn reuse_existing_download(
+    request: &DownloadRequest,
+    routes: &[DownloadRoute],
+    destination: &Path,
+    part_path: &Path,
+) -> crate::Result<Option<DownloadResult>> {
+    if request.integrity.is_empty()
+        || !tokio::fs::try_exists(destination)
+            .await
+            .map_err(|error| IOError::with_path(error, destination))?
+    {
+        return Ok(None);
+    }
+    let Ok(size) = verify_file(destination, &request.integrity).await else {
+        return Ok(None);
+    };
+    let route = routes
+        .first()
+        .cloned()
+        .unwrap_or_else(|| official_route(&request.url, request.resource));
+    remove_if_exists(part_path).await?;
+    Ok(Some(DownloadResult {
+        path: destination.to_path_buf(),
+        url: route.url,
+        source: route.source,
+        size,
+        attempts: 0,
+        fallback_count: 0,
+    }))
+}
+
+async fn prepare_partial_download(
+    routes: &[DownloadRoute],
+    part_path: &Path,
+    integrity: &Integrity,
+) -> crate::Result<()> {
+    let dns_hosts =
+        routes.iter().filter_map(route_host).collect::<HashSet<_>>();
+    let dns_hosts = dns_hosts.iter().map(String::as_str).collect::<Vec<_>>();
+    prewarm_download_dns(&dns_hosts).await;
+    preserve_or_remove_partial(
+        part_path,
+        integrity,
+        any_route_can_resume(routes),
+    )
+    .await
+}
+
 async fn download_to_path_inner(
     request: DownloadRequest,
     destination: &Path,
@@ -5443,36 +5491,13 @@ async fn download_to_path_inner(
     let credentials: Option<crate::state::ModrinthCredentials> = None;
     let part_path = suffixed_path(destination, ".part");
 
-    if !request.integrity.is_empty()
-        && tokio::fs::try_exists(destination)
-            .await
-            .map_err(|error| IOError::with_path(error, destination))?
-        && let Ok(size) = verify_file(destination, &request.integrity).await
+    if let Some(result) =
+        reuse_existing_download(&request, &routes, destination, &part_path)
+            .await?
     {
-        let route = routes
-            .first()
-            .cloned()
-            .unwrap_or_else(|| official_route(&request.url, request.resource));
-        remove_if_exists(&part_path).await?;
-        return Ok(DownloadResult {
-            path: destination.to_path_buf(),
-            url: route.url,
-            source: route.source,
-            size,
-            attempts: 0,
-            fallback_count: 0,
-        });
+        return Ok(result);
     }
-    let dns_hosts =
-        routes.iter().filter_map(route_host).collect::<HashSet<_>>();
-    let dns_hosts = dns_hosts.iter().map(String::as_str).collect::<Vec<_>>();
-    prewarm_download_dns(&dns_hosts).await;
-    preserve_or_remove_partial(
-        &part_path,
-        &request.integrity,
-        any_route_can_resume(&routes),
-    )
-    .await?;
+    prepare_partial_download(&routes, &part_path, &request.integrity).await?;
     if crate::util::download::active_engine()
         == crate::util::download::DownloadEngine::XmclCompat
     {
