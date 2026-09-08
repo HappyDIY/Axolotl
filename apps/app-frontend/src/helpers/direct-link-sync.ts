@@ -1,8 +1,12 @@
-import { type DirectLinkSyncReport, sync_direct_links } from './instance'
+import {
+	type DirectLinkSyncReport,
+	type ExternalMinecraftRoot,
+	sync_direct_links,
+} from './instance'
 
 export const DIRECT_LINKS_SYNCED_EVENT = 'axolotl-direct-links-synced'
 
-let requestedRoots: string[] = []
+let requestedRoots: ExternalMinecraftRoot[] = []
 let syncWorker: Promise<void> | undefined
 let syncPending = false
 
@@ -11,8 +15,8 @@ let syncPending = false
  * events. Each request records a fresh snapshot; changes received during an
  * in-flight reconciliation always run immediately afterwards.
  */
-export function syncConfiguredDirectLinks(roots: readonly string[]): Promise<void> {
-	requestedRoots = [...roots]
+export function syncConfiguredDirectLinks(roots: readonly ExternalMinecraftRoot[]): Promise<void> {
+	requestedRoots = roots.map((root) => ({ ...root }))
 	syncPending = true
 	if (!syncWorker) {
 		syncWorker = drainSyncRequests().finally(() => {

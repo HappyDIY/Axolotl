@@ -4,12 +4,26 @@ use crate::api::pack::import::direct_link::{
     has_minecraft_version_manifest, resolve_direct_link,
 };
 use crate::event::{InstancePayloadType, emit::emit_instance};
+use crate::launcher::ExternalGameDirMode;
 use crate::state::instances::{
     CreateDirectLinkInstance, EditInstance, adapters::sqlite::instance_rows,
 };
 use crate::state::{AppliedContentSetPatch, State};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalMinecraftRoot {
+    pub path: PathBuf,
+    #[serde(default = "default_external_root_mode")]
+    pub mode: ExternalGameDirMode,
+}
+
+fn default_external_root_mode() -> ExternalGameDirMode {
+    // Existing string-only Settings entries used version isolation exclusively.
+    ExternalGameDirMode::Isolated
+}
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,30 +40,35 @@ pub struct DirectLinkSyncReport {
 /// associated, changed JSON metadata is refreshed, and records whose version
 /// JSON disappeared are removed without touching any remaining files.
 pub(crate) async fn sync_direct_link_instances(
-    roots: Vec<PathBuf>,
+    roots: Vec<ExternalMinecraftRoot>,
     state: &State,
 ) -> crate::Result<DirectLinkSyncReport> {
     let mut report = DirectLinkSyncReport::default();
     let mut canonical_roots = Vec::new();
     for root in &roots {
-        match crate::util::io::canonicalize(root) {
-            Ok(root) if root.is_dir() => canonical_roots.push(root),
+        match crate::util::io::canonicalize(&root.path) {
+            Ok(path) if path.is_dir() => {
+                canonical_roots.push((path, root.mode))
+            }
             Ok(_) => {
                 report.missing += 1;
-                report
-                    .errors
-                    .push(format!("{} is not a directory", root.display()));
+                report.errors.push(format!(
+                    "{} is not a directory",
+                    root.path.display()
+                ));
             }
             Err(error) => {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     report.missing += 1;
                 }
-                report.errors.push(format!("{}: {error}", root.display()));
+                report
+                    .errors
+                    .push(format!("{}: {error}", root.path.display()));
             }
         }
     }
-    canonical_roots.sort();
-    canonical_roots.dedup();
+    canonical_roots.sort_by(|left, right| left.0.cmp(&right.0));
+    canonical_roots.dedup_by(|left, right| left.0 == right.0);
 
     let existing = crate::state::list_instances(&state.pool)
         .await?
@@ -57,7 +76,7 @@ pub(crate) async fn sync_direct_link_instances(
         .collect::<Vec<_>>();
     let mut seen_json = Vec::<PathBuf>::new();
 
-    for root in &canonical_roots {
+    for (root, mode) in &canonical_roots {
         let versions = root.join("versions");
         let entries = match std::fs::read_dir(&versions) {
             Ok(entries) => entries,
@@ -138,7 +157,9 @@ pub(crate) async fn sync_direct_link_instances(
                     || instance.linked_dot_minecraft.as_deref()
                         != Some(
                             resolved.dot_minecraft.to_string_lossy().as_ref(),
-                        );
+                        )
+                    || instance.linked_game_dir_mode.as_deref()
+                        != Some(mode.key());
                 let content_changed = metadata.applied_content_set.game_version
                     != resolved.game_version
                     || metadata.applied_content_set.loader != resolved.loader;
@@ -190,6 +211,7 @@ pub(crate) async fn sync_direct_link_instances(
                                     .to_string_lossy()
                                     .to_string(),
                             ),
+                            game_dir_mode: Some(mode.key().to_string()),
                         },
                         &mut tx,
                     )
@@ -220,6 +242,7 @@ pub(crate) async fn sync_direct_link_instances(
                         instance_path: Some(
                             folder.to_string_lossy().to_string(),
                         ),
+                        game_dir_mode: Some(*mode),
                     },
                     state,
                 )
@@ -339,13 +362,15 @@ fn version_isolated_root(path: &str) -> Option<PathBuf> {
 /// drop all of its associations.
 fn configured_root_matches(
     root: &Path,
-    canonical_roots: &[PathBuf],
-    configured_roots: &[PathBuf],
+    canonical_roots: &[(PathBuf, ExternalGameDirMode)],
+    configured_roots: &[ExternalMinecraftRoot],
 ) -> bool {
-    canonical_roots.iter().any(|candidate| candidate == root)
+    canonical_roots
+        .iter()
+        .any(|(candidate, _)| candidate == root)
         || configured_roots
             .iter()
-            .any(|candidate| paths_match(candidate, root))
+            .any(|candidate| paths_match(&candidate.path, root))
 }
 
 fn paths_match(left: &Path, right: &Path) -> bool {
@@ -372,7 +397,14 @@ mod tests {
         let root = PathBuf::from("minecraft-root");
         let equivalent = PathBuf::from("minecraft-root").join(".");
 
-        assert!(configured_root_matches(&equivalent, &[], &[root]));
+        assert!(configured_root_matches(
+            &equivalent,
+            &[],
+            &[ExternalMinecraftRoot {
+                path: root,
+                mode: ExternalGameDirMode::Isolated,
+            }],
+        ));
     }
 
     #[test]
@@ -380,7 +412,10 @@ mod tests {
         assert!(!configured_root_matches(
             Path::new("minecraft-root"),
             &[],
-            &[PathBuf::from("other-root")],
+            &[ExternalMinecraftRoot {
+                path: PathBuf::from("other-root"),
+                mode: ExternalGameDirMode::Isolated,
+            }],
         ));
     }
 }

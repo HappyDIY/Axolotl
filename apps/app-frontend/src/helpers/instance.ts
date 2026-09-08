@@ -82,7 +82,16 @@ export interface DirectLinkSyncReport {
 	errors: string[]
 }
 
-export async function sync_direct_links(roots: string[]): Promise<DirectLinkSyncReport> {
+export type ExternalMinecraftRootMode = 'isolated' | 'shared'
+
+export interface ExternalMinecraftRoot {
+	path: string
+	mode: ExternalMinecraftRootMode
+}
+
+export async function sync_direct_links(
+	roots: ExternalMinecraftRoot[],
+): Promise<DirectLinkSyncReport> {
 	return await invoke<DirectLinkSyncReport>('plugin:instance|instance_sync_direct_links', {
 		roots,
 	})

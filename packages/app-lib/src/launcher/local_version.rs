@@ -281,16 +281,32 @@ pub struct MergedVersion {
     pub hmcl_settings: HmclVersionSettings,
 }
 
+/// Checks whether a JSON file is a Minecraft version document rather than
+/// runtime state such as `usercache.json`. Version directories commonly keep
+/// both kinds of JSON side by side.
+fn is_minecraft_version_document(path: &Path) -> bool {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .is_some_and(|value| {
+            value
+                .as_object()
+                .and_then(|object| object.get("id"))
+                .and_then(Value::as_str)
+                .is_some_and(|id| !id.trim().is_empty())
+        })
+}
+
 /// Finds the version JSON used by both import validation and launch resolution.
-/// The conventional same-name JSON wins; otherwise exactly one JSON in the
-/// version directory is accepted.
+/// The conventional same-name manifest wins; otherwise exactly one Minecraft
+/// version manifest in the version directory is accepted.
 pub fn discover_version_json(
     root: &Path,
     version_id: &str,
 ) -> crate::Result<PathBuf> {
     let version_dir = root.join("versions").join(version_id);
     let conventional = version_dir.join(format!("{version_id}.json"));
-    if conventional.is_file() {
+    if conventional.is_file() && is_minecraft_version_document(&conventional) {
         return Ok(conventional);
     }
 
@@ -306,6 +322,7 @@ pub fn discover_version_json(
         .filter(|path| {
             path.is_file()
                 && path.extension().and_then(|ext| ext.to_str()) == Some("json")
+                && is_minecraft_version_document(path)
         })
         .collect::<Vec<_>>();
     json_files.sort();
@@ -953,6 +970,29 @@ mod tests {
             discover_version_json(dir.path(), "fallback")
                 .unwrap()
                 .ends_with("actual.json")
+        );
+    }
+
+    #[test]
+    fn ignores_non_version_json_alongside_a_manifest() {
+        let dir = tempdir().unwrap();
+        write_json(
+            dir.path(),
+            "copied-version",
+            "actual-version.json",
+            json!({"id":"actual-version"}),
+        );
+        write_json(
+            dir.path(),
+            "copied-version",
+            "usercache.json",
+            json!([{ "name": "Player", "uuid": "example" }]),
+        );
+
+        assert!(
+            discover_version_json(dir.path(), "copied-version")
+                .unwrap()
+                .ends_with("actual-version.json")
         );
     }
 

@@ -8,12 +8,13 @@ use crate::install::{
     InstallProgressReporter,
 };
 use crate::instance::QuickPlayType;
+pub use crate::launcher::direct_link::ExternalGameDirMode;
 pub(crate) use crate::launcher::direct_link::{
     DirectLinkedLaunch, LinkedLauncherDialect, apply_hmcl_settings,
-    conservative_launch_facts, extract_linked_natives, hmcl_java_candidates,
-    hmcl_with_global_fallback, merged_to_version_info,
-    normalize_merged_loader_libraries, pcl_available_memory_gb,
-    pcl_ram_profile,
+    conservative_launch_facts, external_version_dir_for_game_override,
+    extract_linked_natives, hmcl_java_candidates, hmcl_with_global_fallback,
+    merged_to_version_info, normalize_merged_loader_libraries,
+    pcl_available_memory_gb, pcl_ram_profile,
 };
 use crate::launcher::download::{LocalRuntimeSource, download_log_config};
 use crate::launcher::instance_runtime::InstanceRuntimeAdapter;
@@ -626,33 +627,28 @@ async fn get_instance_full_path(
     Ok(full_path)
 }
 
-/// Writes downloaded version metadata and the client jar into a
-/// version-isolated external game directory. Shared artifacts remain in
+/// Writes downloaded version metadata and the client jar into the external
+/// `.minecraft/versions/<name>` directory. Shared artifacts remain in
 /// Axolotl's metadata cache, while the external root retains the conventional
-/// `.minecraft/versions/<name>/<name>.{json,jar}` structure.
+/// Minecraft version metadata structure.
 async fn materialize_external_version(
     instance: &Instance,
     version_id: &str,
     version_info: &VersionInfo,
     state: &State,
 ) -> crate::Result<()> {
-    let Some(game_dir_override) = instance.game_dir_override.as_deref() else {
+    let Some((version_dir, _)) =
+        external_version_dir_for_game_override(instance)
+    else {
         return Ok(());
     };
-    let version_dir = PathBuf::from(game_dir_override);
-    if !version_dir
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| name.eq_ignore_ascii_case("versions"))
-    {
-        return Ok(());
-    }
     let Some(version_name) =
         version_dir.file_name().and_then(|name| name.to_str())
     else {
         return Ok(());
     };
+
+    io::create_dir_all(&version_dir).await?;
 
     let mut serialized = serde_json::to_value(version_info)?;
     if let Some(object) = serialized.as_object_mut() {
@@ -677,15 +673,15 @@ async fn promote_external_instance_link(
     if instance.is_direct_linked() {
         return Ok(());
     }
-    let Some(game_dir_override) = instance.game_dir_override.as_deref() else {
-        return Ok(());
-    };
-    let Some(direct) = DirectLinkedLaunch::from_external_version_dir(
-        Path::new(game_dir_override),
-    )?
+    let Some(direct) = DirectLinkedLaunch::from_game_dir_override(instance)?
     else {
         return Ok(());
     };
+    let game_dir_mode = direct.game_dir_mode.ok_or_else(|| {
+        crate::ErrorKind::LauncherError(
+            "External instance link has no game-directory mode".to_string(),
+        )
+    })?;
     let root = direct.dot_minecraft.to_string_lossy().to_string();
     let version_json = direct
         .version_json
@@ -702,6 +698,7 @@ async fn promote_external_instance_link(
             dot_minecraft: Some(root.clone()),
             version_id: Some(direct.version_id.clone()),
             version_json_path: version_json,
+            game_dir_mode: Some(game_dir_mode.key().to_string()),
         },
         &mut tx,
     )

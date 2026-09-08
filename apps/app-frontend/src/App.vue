@@ -537,7 +537,25 @@ function startDirectLinkSync() {
 		try {
 			const parsed = JSON.parse(localStorage.getItem('axolotl-minecraft-directories') ?? '[]')
 			return Array.isArray(parsed)
-				? parsed.filter((value): value is string => typeof value === 'string' && value.trim())
+				? parsed.flatMap((value) => {
+						if (typeof value === 'string' && value.trim()) {
+							return [{ path: value, mode: 'isolated' as const }]
+						}
+						if (
+							value &&
+							typeof value === 'object' &&
+							typeof value.path === 'string' &&
+							value.path.trim()
+						) {
+							return [
+								{
+									path: value.path,
+									mode: value.mode === 'shared' ? ('shared' as const) : ('isolated' as const),
+								},
+							]
+						}
+						return []
+					})
 				: []
 		} catch {
 			return []

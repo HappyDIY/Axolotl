@@ -10,8 +10,8 @@ pub(crate) mod commands;
 pub(crate) use self::commands::get_content_snapshot;
 pub use self::commands::{
     AppliedContentSetPatch, CreateDirectLinkInstance, CreateInstance,
-    DirectLinkSyncReport, EditInstance, InstanceLaunchOverridesPatch,
-    InstanceMetadata,
+    DirectLinkSyncReport, EditInstance, ExternalMinecraftRoot,
+    InstanceLaunchOverridesPatch, InstanceMetadata,
 };
 pub(crate) use self::commands::{
     create_direct_link_instance, create_instance, edit_instance, get_instance,

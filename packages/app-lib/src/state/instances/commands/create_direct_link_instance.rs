@@ -2,6 +2,7 @@ use crate::api::pack::import::{
     ImportLauncherType,
     direct_link::{direct_link_group, resolve_direct_link},
 };
+use crate::launcher::ExternalGameDirMode;
 use crate::state::instances::{
     ContentSet, ContentSetStatus, ContentSourceKind, Instance,
     InstanceLaunchOverrides, InstanceLink, LoaderComponent,
@@ -29,6 +30,8 @@ pub struct CreateDirectLinkInstance {
     /// Pre-resolved version directory, including compatible-mode selections.
     #[serde(default)]
     pub instance_path: Option<String>,
+    #[serde(default)]
+    pub game_dir_mode: Option<ExternalGameDirMode>,
 }
 
 pub(crate) async fn create_direct_link_instance(
@@ -89,6 +92,9 @@ pub(crate) async fn create_direct_link_instance(
         linked_version_json_path: Some(
             resolved.version_json.to_string_lossy().to_string(),
         ),
+        linked_game_dir_mode: input
+            .game_dir_mode
+            .map(|mode| mode.key().to_string()),
         // Directly associated instances resolve their game directory from the
         // link metadata; the managed `game_dir_override` never applies.
         game_dir_override: None,
@@ -128,6 +134,7 @@ pub(crate) async fn create_direct_link_instance(
             dot_minecraft: instance.linked_dot_minecraft.clone(),
             version_id: instance.linked_version_id.clone(),
             version_json_path: instance.linked_version_json_path.clone(),
+            game_dir_mode: instance.linked_game_dir_mode.clone(),
         },
         &mut tx,
     )
@@ -232,6 +239,7 @@ mod tests {
                 base_path: minecraft.path().to_path_buf(),
                 instance_folder: "versions/ui-folder".to_string(),
                 instance_path: None,
+                game_dir_mode: None,
             },
             &state,
         )
@@ -316,6 +324,7 @@ mod tests {
                         .to_string_lossy()
                         .to_string(),
                 ),
+                game_dir_mode: None,
             },
             &state,
         )

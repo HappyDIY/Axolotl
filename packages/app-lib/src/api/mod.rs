@@ -35,6 +35,7 @@ pub mod worlds;
 
 pub mod data {
     pub use crate::instance::McArchiveCoreInstallResult;
+    pub use crate::launcher::ExternalGameDirMode;
     pub use crate::state::{
         AppliedContentSetPatch, CacheBehaviour, CacheValueType, CachedEntry,
         ContentFavorite, ContentFavoriteInput, ContentFavoriteProvider,
@@ -45,16 +46,16 @@ pub mod data {
         ContentUpdateResolutionChoice, ContentUpdateScope, CoreComponent,
         CoreComponentKind, CoreComponentSource, CoreJarPreview,
         CreateDirectLinkInstance, CreateInstance, Credentials, Dependency,
-        DirectLinkSyncReport, DirectoryInfo, EditInstance, Hooks,
-        InstanceContentPack, InstanceContentSnapshot,
-        InstanceContentSnapshotItem, InstanceContentWarning,
-        InstanceInstallCandidate, InstanceInstallTarget,
-        InstanceLaunchOverridesPatch, InstanceLink, InstanceMetadata,
-        InstancePostUpgradeNotice, InstancePostUpgradeWarning,
-        InstanceUpgradeAction, InstanceUpgradeDependencyChange,
-        InstanceUpgradeDependencyChangeKind, InstanceUpgradeEnvironment,
-        InstanceUpgradeFixedConstraint, InstanceUpgradeIssue,
-        InstanceUpgradeIssueCode, InstanceUpgradeItem,
+        DirectLinkSyncReport, DirectoryInfo, EditInstance,
+        ExternalMinecraftRoot, Hooks, InstanceContentPack,
+        InstanceContentSnapshot, InstanceContentSnapshotItem,
+        InstanceContentWarning, InstanceInstallCandidate,
+        InstanceInstallTarget, InstanceLaunchOverridesPatch, InstanceLink,
+        InstanceMetadata, InstancePostUpgradeNotice,
+        InstancePostUpgradeWarning, InstanceUpgradeAction,
+        InstanceUpgradeDependencyChange, InstanceUpgradeDependencyChangeKind,
+        InstanceUpgradeEnvironment, InstanceUpgradeFixedConstraint,
+        InstanceUpgradeIssue, InstanceUpgradeIssueCode, InstanceUpgradeItem,
         InstanceUpgradeItemStatus, InstanceUpgradePlan,
         InstanceUpgradeResolution, InstanceUpgradeResolutionBatchResult,
         InstanceUpgradeResolutionResult, InstanceUpgradeSelection,

@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::state::{DirectoryInfo, Instance};
 
@@ -34,23 +34,26 @@ impl InstanceRuntimeAdapter {
             return Ok(Some(Self::from_direct(direct)));
         }
 
-        let Some(path) = instance.game_dir_override.as_deref() else {
-            return Ok(None);
-        };
         let Some(direct) =
-            DirectLinkedLaunch::from_external_version_dir(Path::new(path))?
+            DirectLinkedLaunch::from_game_dir_override(instance)?
         else {
             return Ok(None);
         };
-        Ok(Some(Self::MinecraftIsolated { direct }))
+        Ok(Some(Self::from_direct(direct)))
     }
 
     fn from_direct(direct: DirectLinkedLaunch) -> Self {
-        let isolated = match direct.dialect {
-            super::LinkedLauncherDialect::Pcl
-            | super::LinkedLauncherDialect::PclCe => true,
-            super::LinkedLauncherDialect::Generic => true,
-            super::LinkedLauncherDialect::Hmcl => false,
+        let isolated = match direct.game_dir_mode {
+            Some(super::ExternalGameDirMode::Isolated) => true,
+            Some(super::ExternalGameDirMode::Shared) => false,
+            Some(super::ExternalGameDirMode::Automatic) | None => {
+                match direct.dialect {
+                    super::LinkedLauncherDialect::Pcl
+                    | super::LinkedLauncherDialect::PclCe => true,
+                    super::LinkedLauncherDialect::Generic => true,
+                    super::LinkedLauncherDialect::Hmcl => false,
+                }
+            }
         };
         if isolated {
             Self::MinecraftIsolated { direct }

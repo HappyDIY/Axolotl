@@ -771,6 +771,7 @@ mod tests {
             version_id: "demo".to_string(),
             version_json: None,
             dialect: LinkedLauncherDialect::Hmcl,
+            game_dir_mode: None,
         };
 
         let classpath = get_linked_class_paths(

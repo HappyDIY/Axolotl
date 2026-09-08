@@ -102,6 +102,7 @@ pub(crate) async fn create_instance(
             linked_dot_minecraft: None,
             linked_version_id: None,
             linked_version_json_path: None,
+            linked_game_dir_mode: None,
             game_dir_override: input.game_dir_override,
             created: now,
             modified: now,

@@ -146,6 +146,7 @@ pub struct Instance {
     pub linked_dot_minecraft: Option<String>,
     pub linked_version_id: Option<String>,
     pub linked_version_json_path: Option<String>,
+    pub linked_game_dir_mode: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -329,6 +330,7 @@ impl From<InstanceMetadata> for Instance {
             linked_version_json_path: metadata
                 .instance
                 .linked_version_json_path,
+            linked_game_dir_mode: metadata.instance.linked_game_dir_mode,
         }
     }
 }
@@ -531,7 +533,7 @@ pub async fn instance_create_direct_link(
 
 #[tauri::command]
 pub async fn instance_sync_direct_links(
-    roots: Vec<PathBuf>,
+    roots: Vec<theseus::data::ExternalMinecraftRoot>,
 ) -> Result<theseus::data::DirectLinkSyncReport> {
     Ok(theseus::instance::sync_direct_links(roots).await?)
 }

@@ -5762,6 +5762,7 @@ mod tests {
                 base_path: minecraft.path().to_path_buf(),
                 instance_folder: "versions/duplicate-demo".to_string(),
                 instance_path: None,
+                game_dir_mode: None,
             },
             &state,
         )

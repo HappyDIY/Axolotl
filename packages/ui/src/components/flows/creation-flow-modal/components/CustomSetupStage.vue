@@ -714,16 +714,39 @@ function removeIcon() {
 const BUILTIN_GAME_DIR = 'builtin'
 const MINECRAFT_DIRECTORIES_STORAGE_KEY = 'axolotl-minecraft-directories'
 
-function loadMinecraftDirectories(): string[] {
+type ConfiguredMinecraftDirectory = {
+	path: string
+	mode: 'isolated' | 'shared'
+}
+
+function loadMinecraftDirectories(): ConfiguredMinecraftDirectory[] {
 	try {
 		const parsed = JSON.parse(localStorage.getItem(MINECRAFT_DIRECTORIES_STORAGE_KEY) ?? '[]')
 		if (!Array.isArray(parsed)) return []
 		return [
-			...new Set(
-				parsed.filter(
-					(value): value is string => typeof value === 'string' && value.trim().length > 0,
-				),
-			),
+			...new Map(
+				parsed
+					.flatMap((value): ConfiguredMinecraftDirectory[] => {
+						if (typeof value === 'string' && value.trim()) {
+							return [{ path: value, mode: 'isolated' }]
+						}
+						if (
+							value &&
+							typeof value === 'object' &&
+							typeof value.path === 'string' &&
+							value.path.trim()
+						) {
+							return [
+								{
+									path: value.path,
+									mode: value.mode === 'shared' ? 'shared' : 'isolated',
+								},
+							]
+						}
+						return []
+					})
+					.map((directory) => [directory.path, directory]),
+			).values(),
 		]
 	} catch {
 		return []
@@ -731,7 +754,13 @@ function loadMinecraftDirectories(): string[] {
 }
 
 const configuredMinecraftDirectories = loadMinecraftDirectories()
-const gameDirOptions = [BUILTIN_GAME_DIR, ...configuredMinecraftDirectories]
+const gameDirOptions = [
+	BUILTIN_GAME_DIR,
+	...configuredMinecraftDirectories.map((entry) => entry.path),
+]
+const configuredMinecraftDirectoryModes = new Map(
+	configuredMinecraftDirectories.map((entry) => [entry.path, entry.mode]),
+)
 if (
 	ctx.gameDirOverrideMode.value !== 'builtin' &&
 	ctx.gameDirOverride.value &&
@@ -753,7 +782,8 @@ const gameDirSelection = computed<string>({
 			ctx.gameDirOverride.value = null
 			return
 		}
-		ctx.gameDirOverrideMode.value = 'isolated'
+		ctx.gameDirOverrideMode.value =
+			configuredMinecraftDirectoryModes.get(selection) === 'shared' ? 'not-isolated' : 'isolated'
 		ctx.gameDirOverride.value = selection
 	},
 })

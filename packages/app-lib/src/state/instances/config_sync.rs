@@ -432,6 +432,7 @@ mod tests {
             linked_dot_minecraft: None,
             linked_version_id: None,
             linked_version_json_path: None,
+            linked_game_dir_mode: None,
             game_dir_override: Some(r"D:\Games\.minecraft".to_string()),
             created: now,
             modified: now,

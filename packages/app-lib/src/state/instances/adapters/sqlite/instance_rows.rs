@@ -47,6 +47,7 @@ pub(crate) struct DirectLinkFields {
     pub dot_minecraft: Option<String>,
     pub version_id: Option<String>,
     pub version_json_path: Option<String>,
+    pub game_dir_mode: Option<String>,
 }
 
 impl DirectLinkFields {
@@ -56,6 +57,7 @@ impl DirectLinkFields {
         instance.linked_dot_minecraft = self.dot_minecraft.clone();
         instance.linked_version_id = self.version_id.clone();
         instance.linked_version_json_path = self.version_json_path.clone();
+        instance.linked_game_dir_mode = self.game_dir_mode.clone();
     }
 }
 
@@ -72,6 +74,7 @@ where
         Option<String>,
         Option<String>,
         Option<String>,
+        Option<String>,
     )> = sqlx::query_as(
         "
 		SELECT
@@ -80,6 +83,7 @@ where
 			linked_dot_minecraft,
 			linked_version_id,
 			linked_version_json_path
+			, linked_game_dir_mode
 		FROM instances
 		WHERE id = ?
 		",
@@ -96,12 +100,14 @@ where
                 dot_minecraft,
                 version_id,
                 version_json_path,
+                game_dir_mode,
             )| DirectLinkFields {
                 launcher,
                 launcher_root,
                 dot_minecraft,
                 version_id,
                 version_json_path,
+                game_dir_mode,
             },
         )
         .unwrap_or_default())
@@ -118,6 +124,7 @@ pub(crate) async fn set_direct_link_fields(
     let dot_minecraft = fields.dot_minecraft.as_deref();
     let version_id = fields.version_id.as_deref();
     let version_json_path = fields.version_json_path.as_deref();
+    let game_dir_mode = fields.game_dir_mode.as_deref();
 
     sqlx::query(
         "
@@ -128,6 +135,7 @@ pub(crate) async fn set_direct_link_fields(
 			linked_dot_minecraft = ?,
 			linked_version_id = ?,
 			linked_version_json_path = ?
+			, linked_game_dir_mode = ?
 		WHERE id = ?
 		",
     )
@@ -136,6 +144,7 @@ pub(crate) async fn set_direct_link_fields(
     .bind(dot_minecraft)
     .bind(version_id)
     .bind(version_json_path)
+    .bind(game_dir_mode)
     .bind(id)
     .execute(&mut **tx)
     .await?;
@@ -164,6 +173,7 @@ impl TryFrom<InstanceRow> for Instance {
             linked_dot_minecraft: None,
             linked_version_id: None,
             linked_version_json_path: None,
+            linked_game_dir_mode: None,
             game_dir_override: row.game_dir_override,
             created: timestamp(row.created),
             modified: timestamp(row.modified),
@@ -303,6 +313,7 @@ struct InstanceMetadataRow {
     linked_dot_minecraft: Option<String>,
     linked_version_id: Option<String>,
     linked_version_json_path: Option<String>,
+    linked_game_dir_mode: Option<String>,
     game_dir_override: Option<String>,
     created: i64,
     modified: i64,
@@ -365,6 +376,7 @@ impl InstanceMetadataRow {
             dot_minecraft: self.linked_dot_minecraft.clone(),
             version_id: self.linked_version_id.clone(),
             version_json_path: self.linked_version_json_path.clone(),
+            game_dir_mode: self.linked_game_dir_mode.clone(),
         };
         let mut instance = InstanceRow {
             id: self.id,
@@ -678,6 +690,7 @@ pub(crate) async fn get_instance_metadata_by_id(
             i.linked_dot_minecraft,
             i.linked_version_id,
             i.linked_version_json_path,
+            i.linked_game_dir_mode,
             i.game_dir_override,
             i.created,
             i.modified,
@@ -768,6 +781,7 @@ pub(crate) async fn get_instance_metadata_many(
             i.linked_dot_minecraft,
             i.linked_version_id,
             i.linked_version_json_path,
+            i.linked_game_dir_mode,
             i.game_dir_override,
             i.created,
             i.modified,
@@ -852,6 +866,7 @@ pub(crate) async fn list_instance_metadata(
             i.linked_dot_minecraft,
             i.linked_version_id,
             i.linked_version_json_path,
+            i.linked_game_dir_mode,
             i.game_dir_override,
             i.created,
             i.modified,
@@ -933,6 +948,7 @@ pub(crate) async fn get_instance_launch_context(
             i.linked_dot_minecraft,
             i.linked_version_id,
             i.linked_version_json_path,
+            i.linked_game_dir_mode,
             i.game_dir_override,
             i.created,
             i.modified,
@@ -1678,6 +1694,7 @@ mod tests {
                 linked_dot_minecraft TEXT,
                 linked_version_id TEXT,
                 linked_version_json_path TEXT,
+                linked_game_dir_mode TEXT,
                 game_dir_override TEXT,
                 created INTEGER NOT NULL,
                 modified INTEGER NOT NULL,

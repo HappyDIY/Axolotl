@@ -32,6 +32,11 @@ pub struct Instance {
     /// Canonical path of the actual local version JSON selected at creation.
     #[serde(default)]
     pub linked_version_json_path: Option<String>,
+    /// Explicit game-directory layout selected for this external root. `None`
+    /// preserves the launcher-specific behavior used by links created before
+    /// external-root modes were configurable.
+    #[serde(default)]
+    pub linked_game_dir_mode: Option<String>,
     /// Optional absolute game-directory override for ordinary instances;
     /// directly associated instances resolve their game dir from the link
     /// metadata instead.

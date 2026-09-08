@@ -15,6 +15,7 @@ export type GameInstance = {
 	linked_dot_minecraft?: string | null
 	linked_version_id?: string | null
 	linked_version_json_path?: string | null
+	linked_game_dir_mode?: 'automatic' | 'isolated' | 'shared' | null
 
 	game_version: string
 	protocol_version?: number
