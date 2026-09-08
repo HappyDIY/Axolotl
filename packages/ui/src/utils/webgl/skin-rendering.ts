@@ -13,16 +13,17 @@ export interface SkinRendererConfig {
 
 const ENABLE_VOXEL_LAYER_GEOMETRY = true
 const MODEL_PIXEL_SIZE = 1 / 16
+const NON_LEG_VERTICAL_OFFSET = -MODEL_PIXEL_SIZE / 2
 
-/** Lift every non-leg component by exactly one Minecraft pixel. */
-function liftNonLegModelParts(model: THREE.Object3D): void {
-	if (model.userData.nonLegPartsLifted) return
+/** Aligns the torso, arms, head, and cape with the stationary legs. */
+function offsetNonLegModelParts(model: THREE.Object3D): void {
+	if (model.userData.nonLegPartsOffsetApplied) return
 
-	const liftableRoots = new Set(['Head', 'Right_Arm', 'Left_Arm', 'Body_2', 'Body_Layer', 'Cape'])
+	const nonLegRoots = new Set(['Head', 'Right_Arm', 'Left_Arm', 'Body_2', 'Body_Layer', 'Cape'])
 	model.traverse((node) => {
-		if (liftableRoots.has(node.name)) node.position.y += MODEL_PIXEL_SIZE
+		if (nonLegRoots.has(node.name)) node.position.y += NON_LEG_VERTICAL_OFFSET
 	})
-	model.userData.nonLegPartsLifted = true
+	model.userData.nonLegPartsOffsetApplied = true
 }
 
 /**
@@ -95,9 +96,9 @@ function scaleLayerGeometry(geometry: THREE.BufferGeometry, name: string): void 
 }
 
 export function applyThreeDSkinLayers(model: THREE.Object3D, texture?: THREE.Texture): void {
+	offsetNonLegModelParts(model)
 	const pixels = texture ? readSkinPixels(texture) : null
 	if (!pixels || !texture) return
-	liftNonLegModelParts(model)
 	model.traverse((child) => {
 		const mesh = child as THREE.Mesh
 		if (
