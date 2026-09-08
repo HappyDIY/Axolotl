@@ -3,7 +3,7 @@
 use base64::Engine;
 use std::path::PathBuf;
 use tokio::fs::File;
-use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 use crate::Result;
 use crate::api::servers::lifecycle::is_server_running;
@@ -12,6 +12,59 @@ use crate::event::{ExitReason, ServerPayloadType};
 use crate::state::{clear_log_buffer, push_log_line};
 
 const MAX_PTY_LINE_BYTES: usize = 256 * 1024;
+const MAX_SERVER_LOG_LINE_BYTES: usize = 64 * 1024;
+const SERVER_LOG_TRUNCATION_MARKER: &str =
+    " … [log output truncated by Axolotl] … ";
+
+async fn read_bounded_server_log_line<R>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut saw_bytes = false;
+    let mut truncated = false;
+
+    loop {
+        let (consumed, reached_line_end) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                if !saw_bytes {
+                    return Ok(None);
+                }
+                break;
+            }
+
+            saw_bytes = true;
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let maximum_content_bytes = MAX_SERVER_LOG_LINE_BYTES
+                .saturating_sub(SERVER_LOG_TRUNCATION_MARKER.len() + 1);
+            let remaining = maximum_content_bytes.saturating_sub(line.len());
+            let copied = remaining.min(consumed);
+            line.extend_from_slice(&available[..copied]);
+            truncated |= copied < consumed;
+            (consumed, available[consumed - 1] == b'\n')
+        };
+        reader.consume(consumed);
+        if reached_line_end {
+            break;
+        }
+    }
+
+    if truncated {
+        while matches!(line.last(), Some(b'\r' | b'\n')) {
+            line.pop();
+        }
+        line.extend_from_slice(SERVER_LOG_TRUNCATION_MARKER.as_bytes());
+        line.push(b'\n');
+    }
+
+    Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+}
 
 pub async fn get_log_buffer(server_id: &str) -> Result<Vec<String>> {
     Ok(crate::state::get_log_buffer(server_id))
@@ -27,21 +80,16 @@ pub(super) async fn stream_server_output(
     reader: impl tokio::io::AsyncRead + Unpin,
 ) {
     let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
     let mut jna_hint_emitted = false;
-    loop {
-        line.clear();
-        match buf_reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                process_server_output_line(
-                    &server_id,
-                    line.trim_end_matches(['\r', '\n']),
-                    &mut jna_hint_emitted,
-                )
-                .await;
-            }
-        }
+    while let Ok(Some(line)) =
+        read_bounded_server_log_line(&mut buf_reader).await
+    {
+        process_server_output_line(
+            &server_id,
+            line.trim_end_matches(['\r', '\n']),
+            &mut jna_hint_emitted,
+        )
+        .await;
     }
 }
 
@@ -173,14 +221,12 @@ pub(super) async fn tail_server_log_file(server_id: String, dir: PathBuf) {
         }
     };
 
-    let mut line = String::new();
     loop {
         if !is_server_running(&server_id) {
             return;
         }
-        line.clear();
-        match reader.read_line(&mut line).await {
-            Ok(0) => {
+        match read_bounded_server_log_line(&mut reader).await {
+            Ok(None) => {
                 // Caught up. Detect log rotation (file replaced/truncated) and
                 // otherwise wait for more output to be appended.
                 if let Ok(meta) = tokio::fs::metadata(&log_path).await
@@ -192,7 +238,7 @@ pub(super) async fn tail_server_log_file(server_id: String, dir: PathBuf) {
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
-            Ok(_) => {
+            Ok(Some(line)) => {
                 let trimmed = line.trim_end_matches(['\r', '\n']);
                 let cleaned = strip_ansi(trimmed);
                 let already_present =
@@ -346,6 +392,26 @@ mod tests {
         let oversized = vec![b'x'; MAX_PTY_LINE_BYTES + 1];
         assert!(take_complete_pty_lines(&mut pending, &oversized).is_empty());
         assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_server_log_reader_consumes_oversized_line() {
+        let input =
+            format!("{}\nnext\n", "x".repeat(MAX_SERVER_LOG_LINE_BYTES * 2));
+        let mut reader = BufReader::new(std::io::Cursor::new(input));
+
+        let first = read_bounded_server_log_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = read_bounded_server_log_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(first.contains("truncated by Axolotl"));
+        assert!(first.len() <= MAX_SERVER_LOG_LINE_BYTES);
+        assert_eq!(second, "next\n");
     }
 
     #[test]

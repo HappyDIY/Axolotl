@@ -1,5 +1,5 @@
 use std::fmt::Write as _;
-use std::io::{BufRead, SeekFrom};
+use std::io::{BufRead, Read, SeekFrom};
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -42,6 +42,10 @@ pub enum LogType {
 }
 
 const LOG_COMPACTION_THRESHOLD: usize = 20;
+const MAX_LOG_DISPLAY_BYTES: usize = 2 * 1024 * 1024;
+const MAX_LOG_DISPLAY_LINE_BYTES: usize = 64 * 1024;
+const LOG_DISPLAY_TRUNCATION_MARKER: &str =
+    "\n… [log display truncated by Axolotl] …\n";
 
 #[derive(Serialize, Debug)]
 pub struct LatestLogCursor {
@@ -101,6 +105,7 @@ struct LogCompactionStats {
 struct CompactedLog {
     output: String,
     stats: LogCompactionStats,
+    display_truncated: bool,
 }
 
 async fn resolve_instance_path(
@@ -243,13 +248,105 @@ fn read_compacted_log<R: BufRead>(
         );
     }
 
-    Ok(CompactedLog { output, stats })
+    Ok(CompactedLog {
+        output,
+        stats,
+        display_truncated: false,
+    })
 }
 
 fn compact_duplicate_lines(input: &str) -> CompactedLog {
     let mut reader = std::io::Cursor::new(input.as_bytes());
     read_compacted_log(&mut reader)
         .expect("compacting an in-memory log should not fail")
+}
+
+#[cfg(test)]
+fn compact_log_for_display(input: &str) -> CompactedLog {
+    cap_log_for_display(compact_duplicate_lines(input), false)
+}
+
+fn truncate_display_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    let retained_bytes =
+        max_bytes.saturating_sub(LOG_DISPLAY_TRUNCATION_MARKER.len());
+    let prefix_end = char_boundary_before(value, retained_bytes / 2);
+    let suffix_start = char_boundary_after(
+        value,
+        value.len().saturating_sub(retained_bytes - prefix_end),
+    );
+    format!(
+        "{}{}{}",
+        &value[..prefix_end],
+        LOG_DISPLAY_TRUNCATION_MARKER,
+        &value[suffix_start..]
+    )
+}
+
+fn char_boundary_before(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn char_boundary_after(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn cap_log_for_display(
+    mut compacted: CompactedLog,
+    source_truncated: bool,
+) -> CompactedLog {
+    let mut output = String::with_capacity(
+        compacted.output.len().min(MAX_LOG_DISPLAY_BYTES),
+    );
+    let mut truncated = source_truncated;
+
+    for original_line in compacted.output.split_inclusive('\n') {
+        let line =
+            truncate_display_text(original_line, MAX_LOG_DISPLAY_LINE_BYTES);
+        truncated |= line.len() != original_line.len();
+        if output.len().saturating_add(line.len())
+            > MAX_LOG_DISPLAY_BYTES
+                .saturating_sub(LOG_DISPLAY_TRUNCATION_MARKER.len())
+        {
+            truncated = true;
+            break;
+        }
+        output.push_str(&line);
+    }
+
+    if truncated {
+        output.push_str(LOG_DISPLAY_TRUNCATION_MARKER);
+    }
+    compacted.output = output;
+    compacted.display_truncated = truncated;
+    compacted
+}
+
+fn read_limited_compacted_log<R: Read>(
+    reader: &mut R,
+) -> std::io::Result<CompactedLog> {
+    let mut bytes = Vec::with_capacity(MAX_LOG_DISPLAY_BYTES);
+    reader
+        .take((MAX_LOG_DISPLAY_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    let source_truncated = bytes.len() > MAX_LOG_DISPLAY_BYTES;
+    bytes.truncate(MAX_LOG_DISPLAY_BYTES);
+    let input = String::from_utf8_lossy(&bytes);
+    Ok(cap_log_for_display(
+        compact_duplicate_lines(&input),
+        source_truncated,
+    ))
 }
 
 fn format_count(count: usize) -> String {
@@ -275,6 +372,21 @@ async fn maybe_emit_log_compaction_warning(
     let _ = crate::event::emit::emit_warning(&format!(
         "Axolotl Launcher has compacted {} repeated log lines in {} before displaying it for performance reasons.",
         format_count(stats.compacted_lines),
+        file_name,
+    ))
+    .await;
+}
+
+async fn maybe_emit_log_display_truncation_warning(
+    file_name: &str,
+    truncated: bool,
+) {
+    if !truncated {
+        return;
+    }
+
+    let _ = crate::event::emit::emit_warning(&format!(
+        "Axolotl Launcher truncated {} before displaying it to keep the console responsive. The original log file remains unchanged.",
         file_name,
     ))
     .await;
@@ -444,17 +556,27 @@ async fn get_output_by_filename_from_path(
             let gz =
                 flate2::read::GzDecoder::new(std::io::BufReader::new(file));
             let mut reader = std::io::BufReader::new(gz);
-            let compacted = read_compacted_log(&mut reader)
+            let compacted = read_limited_compacted_log(&mut reader)
                 .map_err(|e| IOError::with_path(e, &path))?;
             maybe_emit_log_compaction_warning(file_name, compacted.stats).await;
+            maybe_emit_log_display_truncation_warning(
+                file_name,
+                compacted.display_truncated,
+            )
+            .await;
             return Ok(CensoredString::censor(compacted.output, &credentials));
         } else if ext == "log" || ext == "txt" {
             let file = std::fs::File::open(&path)
                 .map_err(|e| IOError::with_path(e, &path))?;
             let mut reader = std::io::BufReader::new(file);
-            let compacted = read_compacted_log(&mut reader)
+            let compacted = read_limited_compacted_log(&mut reader)
                 .map_err(|e| IOError::with_path(e, &path))?;
             maybe_emit_log_compaction_warning(file_name, compacted.stats).await;
+            maybe_emit_log_display_truncation_warning(
+                file_name,
+                compacted.display_truncated,
+            )
+            .await;
             return Ok(CensoredString::censor(compacted.output, &credentials));
         }
     }
@@ -535,7 +657,8 @@ pub async fn get_live_log_buffer(
     let state = State::get().await?;
     let lines = crate::state::get_log_buffer(instance_id);
     let joined = lines.join("\n");
-    let compacted = compact_duplicate_lines(&joined);
+    let compacted =
+        cap_log_for_display(compact_duplicate_lines(&joined), false);
 
     let credentials = Credentials::get_all(&state.pool)
         .await?
@@ -543,6 +666,11 @@ pub async fn get_live_log_buffer(
         .map(|x| x.1)
         .collect::<Vec<_>>();
     maybe_emit_log_compaction_warning("live log", compacted.stats).await;
+    maybe_emit_log_display_truncation_warning(
+        "live log",
+        compacted.display_truncated,
+    )
+    .await;
     Ok(CensoredString::censor(compacted.output, &credentials))
 }
 
@@ -597,17 +725,26 @@ pub async fn get_generic_live_log_cursor(
         new_file = true;
     }
 
-    let mut buffer = Vec::new();
-    file.seek(SeekFrom::Start(cursor))
+    let requested_start = cursor;
+    let unread_bytes = metadata.len().saturating_sub(cursor);
+    let display_start = if unread_bytes > MAX_LOG_DISPLAY_BYTES as u64 {
+        metadata.len().saturating_sub(MAX_LOG_DISPLAY_BYTES as u64)
+    } else {
+        cursor
+    };
+    let source_truncated = display_start != requested_start;
+    let mut buffer = Vec::with_capacity(MAX_LOG_DISPLAY_BYTES);
+    file.seek(SeekFrom::Start(display_start))
         .map_err(|e| IOError::with_path(e, &path))
         .await?; // Seek to cursor
-    let bytes_read = file
+    file.take(MAX_LOG_DISPLAY_BYTES as u64)
         .read_to_end(&mut buffer)
         .map_err(|e| IOError::with_path(e, &path))
         .await?; // Read to end of file
     let output = String::from_utf8_lossy(&buffer); // Convert to String
-    let compacted = compact_duplicate_lines(&output);
-    let cursor = cursor + bytes_read as u64; // Update cursor
+    let compacted =
+        cap_log_for_display(compact_duplicate_lines(&output), source_truncated);
+    let cursor = metadata.len(); // Consume skipped output as well as the display window.
 
     let credentials = Credentials::get_all(&state.pool)
         .await?
@@ -615,6 +752,11 @@ pub async fn get_generic_live_log_cursor(
         .map(|x| x.1)
         .collect::<Vec<_>>();
     maybe_emit_log_compaction_warning(log_file_name, compacted.stats).await;
+    maybe_emit_log_display_truncation_warning(
+        log_file_name,
+        compacted.display_truncated,
+    )
+    .await;
     let output = CensoredString::censor(compacted.output, &credentials);
     Ok(LatestLogCursor {
         cursor,
@@ -732,6 +874,30 @@ mod tests {
                 .exists(),
             "no profile directory may be created for a direct-link instance"
         );
+    }
+
+    #[test]
+    fn display_compaction_bounds_oversized_nbt_line() {
+        let log = format!("NBT: {}", "你".repeat(100_000));
+
+        let compacted = compact_log_for_display(&log);
+
+        assert!(compacted.display_truncated);
+        assert!(compacted.output.len() <= MAX_LOG_DISPLAY_BYTES);
+        assert!(compacted.output.contains("truncated by Axolotl"));
+        assert!(compacted.output.is_char_boundary(compacted.output.len()));
+    }
+
+    #[test]
+    fn display_compaction_bounds_many_distinct_lines() {
+        let log = (0..100_000)
+            .map(|index| format!("line-{index}\n"))
+            .collect::<String>();
+
+        let compacted = compact_log_for_display(&log);
+
+        assert!(compacted.display_truncated);
+        assert!(compacted.output.len() <= MAX_LOG_DISPLAY_BYTES);
     }
 
     #[tokio::test]

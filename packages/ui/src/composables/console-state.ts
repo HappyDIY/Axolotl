@@ -3,10 +3,13 @@ import { type Ref, shallowRef, triggerRef } from 'vue'
 import { detectLogLevel } from '../layouts/shared/console/composables/log-level'
 import type { Log4jEvent, LogLevel, LogLine } from '../layouts/shared/console/types'
 
-const ARCHIVE_CAPACITY = 500_000
+const ARCHIVE_CAPACITY = 20_000
+const ARCHIVE_TEXT_CAPACITY = 4 * 1024 * 1024
+const MAX_LOG_LINE_LENGTH = 64 * 1024
 const BATCH_TIMEOUT_MS = 300
 const INITIAL_BATCH_SIZE = 256
 const ENTRY_START_RE = /^\[\d{2}:\d{2}:\d{2}\]/
+const LOG_TRUNCATION_MARKER = ' … [log output truncated by Axolotl] … '
 
 export interface ConsoleState {
 	output: Ref<LogLine[]>
@@ -75,12 +78,21 @@ function formatTimestamp(millis?: number): string {
 	return `[${hours}:${minutes}:${seconds}]`
 }
 
+function truncateLogText(text: string, maximumLength = MAX_LOG_LINE_LENGTH): string {
+	if (text.length <= maximumLength) return text
+
+	const retainedLength = Math.max(0, maximumLength - LOG_TRUNCATION_MARKER.length)
+	const prefixLength = Math.floor(retainedLength / 2)
+	const suffixLength = retainedLength - prefixLength
+	return `${text.slice(0, prefixLength)}${LOG_TRUNCATION_MARKER}${text.slice(-suffixLength)}`
+}
+
 function formatLog4jLines(event: Log4jEvent): LogLine[] {
 	const level = mapLog4jLevel(event.level)
 	const time = formatTimestamp(event.timestamp_millis)
 	const thread = event.thread_name ?? ''
 	const levelText = event.level ?? ''
-	const message = event.message?.trim() ?? ''
+	const message = truncateLogText(event.message?.trim() ?? '')
 	const prefix = time ? `${time} [${thread}/${levelText}]: ` : `[${thread}/${levelText}]: `
 	const messageLines = message.split(/[\r\n]+/)
 	const lines: LogLine[] = [{ text: prefix + messageLines[0], level }]
@@ -91,7 +103,7 @@ function formatLog4jLines(event: Log4jEvent): LogLine[] {
 	}
 
 	if (event.throwable) {
-		for (const line of event.throwable.split(/[\r\n]+/)) {
+		for (const line of truncateLogText(event.throwable).split(/[\r\n]+/)) {
 			if (!line) continue
 			lines.push({ text: line, level: 'error' })
 		}
@@ -101,13 +113,29 @@ function formatLog4jLines(event: Log4jEvent): LogLine[] {
 }
 
 function textToLogLine(text: string): LogLine {
-	return { text, level: detectLogLevel(text) }
+	const truncated = truncateLogText(text)
+	return { text: truncated, level: detectLogLevel(truncated) }
 }
 
 export function createConsoleState(): ConsoleState {
 	const output = shallowRef<LogLine[]>([])
 	let lineBuffer: LogLine[] = []
 	let batchTimer: ReturnType<typeof setTimeout> | null = null
+	let outputTextLength = 0
+
+	function appendLines(lines: LogLine[]) {
+		for (const line of lines) {
+			const text = truncateLogText(line.text)
+			output.value.push(text === line.text ? line : { ...line, text })
+			outputTextLength += text.length
+		}
+
+		while (output.value.length > ARCHIVE_CAPACITY || outputTextLength > ARCHIVE_TEXT_CAPACITY) {
+			const removed = output.value.shift()
+			if (!removed) break
+			outputTextLength -= removed.text.length
+		}
+	}
 
 	function flushBuffer() {
 		if (lineBuffer.length === 0) return
@@ -115,14 +143,7 @@ export function createConsoleState(): ConsoleState {
 		const lines = groupContinuations(lineBuffer)
 		lineBuffer = []
 		batchTimer = null
-		for (const line of lines) {
-			output.value.push(line)
-		}
-
-		const overflow = output.value.length - ARCHIVE_CAPACITY
-		if (overflow > 0) {
-			output.value.splice(0, overflow)
-		}
+		appendLines(lines)
 
 		triggerRef(output)
 	}
@@ -165,19 +186,14 @@ export function createConsoleState(): ConsoleState {
 			}
 		}
 
-		for (const line of lines) {
-			output.value.push(line)
-		}
-		const overflow = output.value.length - ARCHIVE_CAPACITY
-		if (overflow > 0) {
-			output.value.splice(0, overflow)
-		}
+		appendLines(lines)
 		triggerRef(output)
 		return Promise.resolve()
 	}
 
 	function clear() {
 		output.value = []
+		outputTextLength = 0
 		lineBuffer = []
 		if (batchTimer) {
 			clearTimeout(batchTimer)

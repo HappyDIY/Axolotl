@@ -21,12 +21,16 @@ use std::time::Instant;
 #[cfg(feature = "tauri")]
 use tauri::Emitter;
 use tempfile::TempDir;
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 const LAUNCHER_LOG_PATH: &str = "launcher_log.txt";
-const LOG_BUFFER_CAPACITY: usize = 50_000;
+const LOG_BUFFER_CAPACITY: usize = 10_000;
+const LOG_BUFFER_BYTE_CAPACITY: usize = 4 * 1024 * 1024;
+const MAX_LIVE_LOG_LINE_BYTES: usize = 64 * 1024;
+const MAX_PERSISTED_LOG_LINE_BYTES: usize = 256 * 1024;
+const LOG_TRUNCATION_MARKER: &str = " … [log output truncated by Axolotl] … ";
 const PROCESS_INITIALIZATION_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(15);
 
@@ -114,19 +118,28 @@ async fn record_post_upgrade_launch_best_effort(
 
 struct LogRingBuffer {
     lines: VecDeque<String>,
+    byte_len: usize,
 }
 
 impl LogRingBuffer {
     fn new() -> Self {
         Self {
             lines: VecDeque::new(),
+            byte_len: 0,
         }
     }
 
     fn push(&mut self, line: String) {
-        if self.lines.len() >= LOG_BUFFER_CAPACITY {
-            self.lines.pop_front();
+        let line_len = line.len();
+        while self.lines.len() >= LOG_BUFFER_CAPACITY
+            || self.byte_len.saturating_add(line_len) > LOG_BUFFER_BYTE_CAPACITY
+        {
+            let Some(removed) = self.lines.pop_front() else {
+                break;
+            };
+            self.byte_len = self.byte_len.saturating_sub(removed.len());
         }
+        self.byte_len += line_len;
         self.lines.push_back(line);
     }
 
@@ -136,6 +149,7 @@ impl LogRingBuffer {
 
     fn clear(&mut self) {
         self.lines.clear();
+        self.byte_len = 0;
     }
 }
 
@@ -143,10 +157,68 @@ static LOG_BUFFERS: LazyLock<DashMap<String, LogRingBuffer>> =
     LazyLock::new(DashMap::new);
 
 pub fn push_log_line(instance_id: &str, line: String) {
+    let line = truncate_live_log_text(&line);
     LOG_BUFFERS
         .entry(instance_id.to_string())
         .or_insert_with(LogRingBuffer::new)
         .push(line);
+}
+
+fn truncate_live_log_text(value: &str) -> String {
+    if value.len() <= MAX_LIVE_LOG_LINE_BYTES {
+        return value.to_string();
+    }
+
+    let retained_bytes =
+        MAX_LIVE_LOG_LINE_BYTES.saturating_sub(LOG_TRUNCATION_MARKER.len());
+    let prefix_end = char_boundary_before(value, retained_bytes / 2);
+    let suffix_start = char_boundary_after(
+        value,
+        value.len().saturating_sub(retained_bytes - prefix_end),
+    );
+    format!(
+        "{}{}{}",
+        &value[..prefix_end],
+        LOG_TRUNCATION_MARKER,
+        &value[suffix_start..]
+    )
+}
+
+fn char_boundary_before(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index > 0 && !value.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
+fn char_boundary_after(value: &str, mut index: usize) -> usize {
+    index = index.min(value.len());
+    while index < value.len() && !value.is_char_boundary(index) {
+        index += 1;
+    }
+    index
+}
+
+fn append_bounded_log4j_content(buffer: &mut String, text: &str) {
+    let retained_bytes = MAX_PERSISTED_LOG_LINE_BYTES
+        .saturating_sub(LOG_TRUNCATION_MARKER.len());
+    if buffer.len() >= retained_bytes {
+        if !buffer.ends_with(LOG_TRUNCATION_MARKER) {
+            buffer.push_str(LOG_TRUNCATION_MARKER);
+        }
+        return;
+    }
+
+    let available = retained_bytes.saturating_sub(buffer.len());
+    if text.len() <= available {
+        buffer.push_str(text);
+        return;
+    }
+
+    let end = char_boundary_before(text, available);
+    buffer.push_str(&text[..end]);
+    buffer.push_str(LOG_TRUNCATION_MARKER);
 }
 
 pub fn get_log_buffer(instance_id: &str) -> Vec<String> {
@@ -479,6 +551,57 @@ pub struct Log4jEvent {
 }
 
 impl Process {
+    async fn read_bounded_output_line<R>(
+        reader: &mut R,
+    ) -> std::io::Result<Option<String>>
+    where
+        R: AsyncBufRead + Unpin,
+    {
+        let mut line = Vec::new();
+        let mut saw_bytes = false;
+        let mut truncated = false;
+
+        loop {
+            let (consumed, reached_line_end) = {
+                let available = reader.fill_buf().await?;
+                if available.is_empty() {
+                    if !saw_bytes {
+                        return Ok(None);
+                    }
+                    break;
+                }
+
+                saw_bytes = true;
+                let consumed = available
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(available.len(), |index| index + 1);
+                let maximum_content_bytes = MAX_PERSISTED_LOG_LINE_BYTES
+                    .saturating_sub(LOG_TRUNCATION_MARKER.len() + 1);
+                let remaining =
+                    maximum_content_bytes.saturating_sub(line.len());
+                let copied = remaining.min(consumed);
+                line.extend_from_slice(&available[..copied]);
+                truncated |= copied < consumed;
+                (consumed, available[consumed - 1] == b'\n')
+            };
+            reader.consume(consumed);
+            if reached_line_end {
+                break;
+            }
+        }
+
+        if truncated {
+            while matches!(line.last(), Some(b'\r' | b'\n')) {
+                line.pop();
+            }
+            line.extend_from_slice(LOG_TRUNCATION_MARKER.as_bytes());
+            line.push(b'\n');
+        }
+
+        Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+    }
+
     async fn process_output<R>(
         instance_id: &str,
         _instance_path: &str,
@@ -671,7 +794,10 @@ impl Process {
                     Ok(Event::Text(mut e)) => {
                         if in_message || in_throwable {
                             if let Ok(text) = e.xml_content() {
-                                current_content.push_str(&text);
+                                append_bounded_log4j_content(
+                                    &mut current_content,
+                                    &text,
+                                );
                             }
                         } else if !in_event
                             && !e.inplace_trim_end()
@@ -694,7 +820,10 @@ impl Process {
                         if (in_message || in_throwable)
                             && let Ok(text) = e.xml_content()
                         {
-                            current_content.push_str(&text);
+                            append_bounded_log4j_content(
+                                &mut current_content,
+                                &text,
+                            );
                         }
                     }
                     _ => (),
@@ -703,13 +832,9 @@ impl Process {
                 buf.clear();
             }
         } else {
-            let mut line = String::new();
-
-            while let Ok(bytes_read) = buf_reader.read_line(&mut line).await {
-                if bytes_read == 0 {
-                    break; // End of stream
-                }
-
+            while let Ok(Some(line)) =
+                Self::read_bounded_output_line(&mut buf_reader).await
+            {
                 if !line.is_empty() {
                     if let Err(e) = Self::append_to_log_file(&log_path, &line) {
                         tracing::warn!("Failed to write to log file: {}", e);
@@ -733,8 +858,6 @@ impl Process {
                         );
                     }
                 }
-
-                line.clear();
             }
         }
     }
@@ -781,7 +904,12 @@ impl Process {
     }
 
     fn emit_log4j_event(instance_id: &str, event: &Log4jEvent) {
-        if let Some(formatted) = Self::format_log4j_entry(event) {
+        let mut event = event.clone();
+        event.message = event.message.as_deref().map(truncate_live_log_text);
+        event.throwable =
+            event.throwable.as_deref().map(truncate_live_log_text);
+
+        if let Some(formatted) = Self::format_log4j_entry(&event) {
             push_log_line(instance_id, formatted.trim_end().to_string());
         }
         if let Some(ref throwable) = event.throwable {
@@ -797,7 +925,7 @@ impl Process {
                     "log",
                     LogPayload {
                         instance_id: instance_id.to_string(),
-                        event: LogEvent::Log4j(event.clone()),
+                        event: LogEvent::Log4j(event),
                     },
                 );
             }
@@ -809,7 +937,8 @@ impl Process {
     }
 
     fn emit_legacy_log(instance_id: &str, message: &str) {
-        push_log_line(instance_id, message.to_string());
+        let message = truncate_live_log_text(message);
+        push_log_line(instance_id, message.clone());
 
         #[cfg(feature = "tauri")]
         {
@@ -818,9 +947,7 @@ impl Process {
                     "log",
                     LogPayload {
                         instance_id: instance_id.to_string(),
-                        event: LogEvent::Legacy {
-                            message: message.to_string(),
-                        },
+                        event: LogEvent::Legacy { message },
                     },
                 );
             }
@@ -1165,6 +1292,53 @@ impl Process {
 #[cfg(test)]
 mod post_upgrade_tests {
     use super::*;
+
+    #[test]
+    fn live_log_lines_are_truncated_on_character_boundaries() {
+        let line = format!("prefix{}suffix", "你".repeat(40_000));
+        let truncated = truncate_live_log_text(&line);
+
+        assert!(truncated.is_char_boundary(truncated.len()));
+        assert!(truncated.len() <= MAX_LIVE_LOG_LINE_BYTES);
+        assert!(truncated.contains("truncated by Axolotl"));
+        assert!(truncated.starts_with("prefix"));
+        assert!(truncated.ends_with("suffix"));
+    }
+
+    #[test]
+    fn log4j_content_stops_growing_after_the_limit() {
+        let mut content = String::new();
+        append_bounded_log4j_content(
+            &mut content,
+            &"你".repeat(MAX_PERSISTED_LOG_LINE_BYTES),
+        );
+        let length_after_overflow = content.len();
+        append_bounded_log4j_content(&mut content, "ignored");
+
+        assert!(content.len() <= MAX_PERSISTED_LOG_LINE_BYTES);
+        assert_eq!(content.len(), length_after_overflow);
+        assert!(content.contains("truncated by Axolotl"));
+    }
+
+    #[tokio::test]
+    async fn bounded_output_reader_consumes_oversized_line() {
+        let input =
+            format!("{}\nnext\n", "x".repeat(MAX_PERSISTED_LOG_LINE_BYTES * 2));
+        let mut reader = BufReader::new(std::io::Cursor::new(input));
+
+        let first = Process::read_bounded_output_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = Process::read_bounded_output_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(first.contains("truncated by Axolotl"));
+        assert!(first.len() <= MAX_PERSISTED_LOG_LINE_BYTES);
+        assert_eq!(second, "next\n");
+    }
 
     #[test]
     fn new_or_modified_crash_report_marks_session_changed() {
