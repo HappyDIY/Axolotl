@@ -1,6 +1,65 @@
 {
-  "updated_at": "2026-09-07T21:27:57.000Z",
+  "updated_at": "2026-09-08T21:12:54.000Z",
   "announcements": [
+    {
+      "id": "launcher-1.9.6-beta.3",
+      "version": "1.9.6-beta.3",
+      "publishedAt": "2026-09-08",
+      "title": {
+        "en-US": "Axolotl Launcher 1.9.6-beta.3",
+        "zh-CN": "Axolotl Launcher 1.9.6-beta.3"
+      },
+      "changes": {
+        "added": [
+          {
+            "en-US": "The Forge server now supports input completion.",
+            "zh-CN": "Forge 服务器现在有输入补全机制。"
+          },
+          {
+            "en-US": "Minecraft can now launch in a maximized window on Windows.",
+            "zh-CN": "Windows 平台现在可使 Minecraft 以最大化窗口的方式启动。"
+          },
+          {
+            "en-US": "The launcher now uses modern oauth authentication for official account login, with the option to sign in through a browser or via the device code flow.",
+            "zh-CN": "现在启动器执行正版登录时将使用现代 oauth 登录，并可选择在浏览器登录或使用设备代码流登录。"
+          }
+        ],
+        "fixed": [
+          {
+            "en-US": "Fix the lag caused by individual real-time log messages being too long.",
+            "zh-CN": "修复实时日志单条消息过长导致的卡顿问题。"
+          },
+          {
+            "en-US": "Mitigates application freezes caused by changing the resolution and DPI scaling.",
+            "zh-CN": "缓解修改分辨率与 DPI 缩放导致的应用冻结问题。"
+          },
+          {
+            "en-US": "Fix the issue where returning to the module details page always redirects to the first page.",
+            "zh-CN": "修复返回模组详情页后总是跳转第一页的问题。"
+          },
+          {
+            "en-US": "Fix an issue where mods and Minecraft were not downloaded simultaneously when installing ZIP-format modpacks.",
+            "zh-CN": "修复 zip 格式的整合包在安装时 Mod 与 Minecraft 不同步下载的问题。"
+          },
+          {
+            "en-US": "Fix an issue where the skin preview does not update immediately after switching accounts.",
+            "zh-CN": "修复切换账户后皮肤预览不会立刻更新的问题。"
+          },
+          {
+            "en-US": "Fixed the issue where the skin preview shadow styling was incorrect.",
+            "zh-CN": "修复皮肤预览阴影样式不正确的问题。"
+          },
+          {
+            "en-US": "Fix an issue where low-version installations such as OptiFine 1.7.10 could not launch due to missing libraries.",
+            "zh-CN": "修复 1.7.10 Optifine 等低版本安装时缺少库导致无法启动的问题。"
+          },
+          {
+            "en-US": "Fix incorrect behavior when importing instances.",
+            "zh-CN": "修复导入实例时的错误行为。"
+          }
+        ]
+      }
+    },
     {
       "id": "launcher-1.9.6-beta.2",
       "version": "1.9.6-beta.2",
