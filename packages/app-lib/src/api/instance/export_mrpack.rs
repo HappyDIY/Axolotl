@@ -63,6 +63,7 @@ pub async fn export_mrpack(
     }
     let included_export_candidates = included_export_candidates
         .into_iter()
+        .map(|candidate| candidate.replace('\\', "/"))
         .filter(|x| {
             if let Some(f) = PathBuf::from(x).file_name()
                 && f.to_string_lossy().starts_with(".DS_Store")
@@ -370,6 +371,16 @@ fn pack_get_relative_path(
     )?)
 }
 
+/// The `.mrpack` specification stores archive paths as Unix-style relative
+/// paths, even when the source instance is on Windows.
+fn mrpack_relative_path(
+    relative_path: &str,
+) -> crate::Result<SafeRelativeUtf8UnixPathBuf> {
+    Ok(SafeRelativeUtf8UnixPathBuf::try_from(
+        relative_path.replace('\\', "/"),
+    )?)
+}
+
 #[tracing::instrument(skip_all)]
 pub async fn create_mrpack_json(
     metadata: &InstanceMetadata,
@@ -572,9 +583,10 @@ async fn create_mrpack_json_inner(
         let Some((hashes, download)) = remote else {
             continue;
         };
-        let Ok(path) = SafeRelativeUtf8UnixPathBuf::try_from(
-            original_content_relative_path(path.as_str()),
-        ) else {
+        let relative_path = path.as_str().replace('\\', "/");
+        let Ok(path) = mrpack_relative_path(&original_content_relative_path(
+            &relative_path,
+        )) else {
             continue;
         };
         if !remote_paths.insert(path.as_str().to_string()) {
@@ -631,6 +643,14 @@ mod tests {
     use crate::state::{CreateDirectLinkInstance, State};
     use std::sync::Arc;
     use tempfile::TempDir;
+
+    #[test]
+    fn mrpack_paths_normalize_windows_separators() {
+        let path =
+            super::mrpack_relative_path(r"config\subdir\options.txt").unwrap();
+
+        assert_eq!(path.as_str(), "config/subdir/options.txt");
+    }
 
     /// The launcher state is a process-wide singleton; initialize it once and
     /// reuse it so `State::get()` resolves inside these APIs. The state root
