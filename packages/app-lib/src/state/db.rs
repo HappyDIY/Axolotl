@@ -318,6 +318,15 @@ pub fn default_update_channel() -> &'static str {
 /// database exists while the build's own default channel has none, move it
 /// over so the database follows the build instead of silently starting over
 /// with an empty database in the default channel's directory.
+///
+/// The `-wal` and `-shm` sidecars are moved before the main database, making
+/// the main database rename the commit point of the migration: any partial
+/// or failed attempt leaves the main database in the source directory, so a
+/// later startup either resumes the migration or leaves the source database
+/// intact. A sidecar is only moved when its target does not already exist;
+/// if a target sidecar is present alongside a source sidecar, the main
+/// database is left in place rather than risking a database whose WAL data
+/// would remain behind. Nothing is ever deleted or overwritten.
 async fn reconcile_default_channel_database(
     settings_dir: &Path,
 ) -> crate::Result<()> {
@@ -343,15 +352,32 @@ async fn reconcile_default_channel_database(
 
     let target_dir = settings_dir.join(channel);
     crate::util::io::create_dir_all(&target_dir).await?;
-    tokio::fs::rename(&source, &target).await?;
+
+    let mut unresolved_sidecar = false;
     for suffix in ["-wal", "-shm"] {
         let source_sidecar = sidecar_path(&source, suffix);
-        if source_sidecar.try_exists()? {
-            tokio::fs::rename(source_sidecar, sidecar_path(&target, suffix))
-                .await?;
+        if !source_sidecar.try_exists()? {
+            continue;
         }
+        let target_sidecar = sidecar_path(&target, suffix);
+        if target_sidecar.try_exists()? {
+            tracing::warn!(
+                source = %source_sidecar.display(),
+                destination = %target_sidecar.display(),
+                channel,
+                "Both update channel databases have a {suffix} file; \
+                 leaving the existing database in place"
+            );
+            unresolved_sidecar = true;
+            continue;
+        }
+        tokio::fs::rename(&source_sidecar, &target_sidecar).await?;
+    }
+    if unresolved_sidecar {
+        return Ok(());
     }
 
+    tokio::fs::rename(&source, &target).await?;
     tracing::info!(
         source = %source.display(),
         destination = %target.display(),
@@ -2209,6 +2235,87 @@ mod tests {
             "default data"
         );
         assert_eq!(std::fs::read_to_string(&source_db).unwrap(), "untouched");
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_resumes_after_an_interrupted_attempt() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = temporary_settings_dir("reconcile-resume");
+
+        // A previous attempt crashed after moving the -wal sidecar.
+        let source_dir = directory.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let target_dir = directory.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(
+            target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal")),
+            "wal",
+        )
+        .unwrap();
+
+        reconcile_default_channel_database(&directory)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join(LEGACY_APP_DB_FILE))
+                .unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"))
+            )
+            .unwrap(),
+            "wal"
+        );
+        assert!(!source_db.exists());
+
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reconcile_keeps_source_when_sidecars_conflict() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = temporary_settings_dir("reconcile-conflict");
+
+        let source_dir = directory.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let source_wal = source_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"));
+        std::fs::write(&source_wal, "source wal").unwrap();
+        let target_dir = directory.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target_wal = target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"));
+        std::fs::write(&target_wal, "target wal").unwrap();
+
+        reconcile_default_channel_database(&directory)
+            .await
+            .unwrap();
+
+        // Neither the main database nor either WAL file is touched.
+        assert_eq!(
+            std::fs::read_to_string(&source_db).unwrap(),
+            "existing data"
+        );
+        assert_eq!(std::fs::read_to_string(&source_wal).unwrap(), "source wal");
+        assert_eq!(std::fs::read_to_string(&target_wal).unwrap(), "target wal");
+        assert!(!target_dir.join(LEGACY_APP_DB_FILE).exists());
 
         std::fs::remove_dir_all(&directory).unwrap();
     }
