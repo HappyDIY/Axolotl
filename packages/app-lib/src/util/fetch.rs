@@ -5510,6 +5510,48 @@ pub async fn download_to_path(
     result
 }
 
+fn build_download_routes(
+    request: &DownloadRequest,
+    mode: crate::state::DownloadSourceMode,
+) -> Vec<DownloadRoute> {
+    let mut urls = Vec::with_capacity(request.candidate_urls.len() + 1);
+    urls.push(request.url.clone());
+    urls.extend(request.candidate_urls.iter().cloned());
+    let mut routes = Vec::new();
+    for (index, url) in urls.into_iter().enumerate() {
+        let mut candidates =
+            resolve_download_routes_for(&url, request.resource, mode);
+        if index > 0 {
+            for candidate in &mut candidates {
+                if !candidate.is_mirror {
+                    candidate.source = DownloadRouteSource::Alternate;
+                    candidate.allow_sensitive_headers = false;
+                }
+            }
+        }
+        for candidate in candidates {
+            if !routes.iter().any(|existing: &DownloadRoute| {
+                existing.url == candidate.url
+                    && existing.proxy == candidate.proxy
+            }) {
+                routes.push(candidate);
+            }
+        }
+    }
+    if request
+        .header
+        .as_ref()
+        .is_some_and(|(name, _)| header_requires_official_only(name))
+    {
+        routes.retain(|route| !route.is_mirror);
+    }
+    deduplicate_download_routes(&mut routes);
+    if routes.is_empty() {
+        routes.push(official_route(&request.url, request.resource));
+    }
+    routes
+}
+
 async fn download_to_path_inner(
     request: DownloadRequest,
     destination: &Path,
@@ -5540,45 +5582,8 @@ async fn download_to_path_inner(
         "Acquired destination download lock"
     );
     let mode = source_mode_for_resource(request.resource);
-    let mut routes = {
-        let mut urls = Vec::with_capacity(request.candidate_urls.len() + 1);
-        urls.push(request.url.clone());
-        urls.extend(request.candidate_urls.iter().cloned());
-        let mut routes = Vec::new();
-        for (index, url) in urls.into_iter().enumerate() {
-            let mut candidates =
-                resolve_download_routes_for(&url, request.resource, mode);
-            if index > 0 {
-                for candidate in &mut candidates {
-                    if !candidate.is_mirror {
-                        candidate.source = DownloadRouteSource::Alternate;
-                        candidate.allow_sensitive_headers = false;
-                    }
-                }
-            }
-            for candidate in candidates {
-                if !routes.iter().any(|existing: &DownloadRoute| {
-                    existing.url == candidate.url
-                        && existing.proxy == candidate.proxy
-                }) {
-                    routes.push(candidate);
-                }
-            }
-        }
-        routes
-    };
+    let mut routes = build_download_routes(&request, mode);
     let credentials: Option<crate::state::ModrinthCredentials> = None;
-    if request
-        .header
-        .as_ref()
-        .is_some_and(|(name, _)| header_requires_official_only(name))
-    {
-        routes.retain(|route| !route.is_mirror);
-    }
-    deduplicate_download_routes(&mut routes);
-    if routes.is_empty() {
-        routes.push(official_route(&request.url, request.resource));
-    }
     let part_path = suffixed_path(destination, ".part");
 
     if !request.integrity.is_empty()
