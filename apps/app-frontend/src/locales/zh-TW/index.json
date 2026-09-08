@@ -9869,6 +9869,30 @@
   "minecraft-account.third-party-profile.title": {
     "message": "選擇角色"
   },
+  "minecraft-login.browser": {
+    "message": "使用瀏覽器登入"
+  },
+  "minecraft-login.device-code": {
+    "message": "使用裝置代碼"
+  },
+  "minecraft-login.device-description": {
+    "message": "請在任何裝置上開啟下方頁面，再輸入此代碼。"
+  },
+  "minecraft-login.device-expired": {
+    "message": "此裝置代碼已過期。請重新開始以取得新代碼。"
+  },
+  "minecraft-login.device-starting": {
+    "message": "正在要求裝置代碼……"
+  },
+  "minecraft-login.open-verification": {
+    "message": "開啟驗證頁面"
+  },
+  "minecraft-login.title": {
+    "message": "登入 Minecraft"
+  },
+  "minecraft-login.trouble": {
+    "message": "遇到問題？"
+  },
   "project.description.title": {
     "message": "簡介"
   },

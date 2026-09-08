@@ -10205,6 +10205,30 @@
   "minecraft-account.third-party-profile.title": {
     "message": "选择角色"
   },
+  "minecraft-login.browser": {
+    "message": "使用浏览器登录"
+  },
+  "minecraft-login.device-code": {
+    "message": "使用设备代码"
+  },
+  "minecraft-login.device-description": {
+    "message": "请在任意设备上打开下方页面，然后输入此代码。"
+  },
+  "minecraft-login.device-expired": {
+    "message": "此设备代码已过期。请重新开始以获取新代码。"
+  },
+  "minecraft-login.device-starting": {
+    "message": "正在请求设备代码……"
+  },
+  "minecraft-login.open-verification": {
+    "message": "打开验证页面"
+  },
+  "minecraft-login.title": {
+    "message": "登录 Minecraft"
+  },
+  "minecraft-login.trouble": {
+    "message": "遇到问题？"
+  },
   "project.actions.view-dependents": {
     "message": "查看依赖项目"
   },

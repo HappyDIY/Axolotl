@@ -163,6 +163,7 @@
 			</div>
 		</div>
 	</Accordion>
+	<MinecraftLoginModal ref="minecraftLoginModal" @complete="onMicrosoftLogin" />
 	<ModalWrapper ref="offlineAccountModal" :header="formatMessage(messages.offlineModalTitle)">
 		<div class="flex min-w-[22rem] flex-col gap-4">
 			<p class="m-0 text-secondary">{{ formatMessage(messages.offlineModalDescription) }}</p>
@@ -358,12 +359,14 @@ import {
 	useVIntl,
 } from '@modrinth/ui'
 import { useQueryClient } from '@tanstack/vue-query'
+import { listen } from '@tauri-apps/api/event'
 import type { Ref } from 'vue'
 import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import axolotlLogo from '@/assets/axolotl.png'
 import steveSkinTexture from '@/assets/skins/steve.png?inline'
+import MinecraftLoginModal from '@/components/ui/MinecraftLoginModal.vue'
 import ModalWrapper from '@/components/ui/modal/ModalWrapper.vue'
 import { useNetworkStatus } from '@/composables/useNetworkStatus'
 import { compareMinecraftAccounts } from '@/helpers/accounts'
@@ -376,7 +379,7 @@ import {
 	get_default_user,
 	get_yggdrasil_password,
 	list_yggdrasil_saved_logins,
-	login as login_flow,
+	login as loginToMinecraft,
 	remove_user,
 	set_default_user,
 	set_yggdrasil_password,
@@ -463,6 +466,7 @@ const accountHeadTextureKeyCache = ref(new Map<string, string>())
 let refreshGeneration = 0
 let headRefreshTimer: ReturnType<typeof setTimeout> | undefined
 let defaultUserUpdateQueue = Promise.resolve()
+const minecraftLoginModal = ref<InstanceType<typeof MinecraftLoginModal> | null>(null)
 const offlineAccountModal = ref<InstanceType<typeof ModalWrapper> | null>(null)
 const offlineUsername = ref('')
 const offlineCustomUuid = ref(false)
@@ -625,6 +629,15 @@ function setLoginDisabled(value: boolean) {
 	loginDisabled.value = value
 }
 
+defineExpose({
+	accountChangeRevision,
+	login,
+	refreshValues,
+	setEquippedSkin,
+	setLoginDisabled,
+	loginDisabled,
+})
+
 await refreshValues()
 
 watch(offline, async () => {
@@ -640,14 +653,6 @@ function notifyAccountChange() {
 	accountChangeRevision.value += 1
 	emit('change')
 }
-
-defineExpose({
-	accountChangeRevision,
-	refreshValues,
-	setEquippedSkin,
-	setLoginDisabled,
-	loginDisabled,
-})
 
 const duplicateAccountNames = computed(() => {
 	const counts = new Map<string, number>()
@@ -760,16 +765,31 @@ async function setAccount(account: MinecraftCredential) {
 
 async function login() {
 	if (offline.value) return
-
 	loginDisabled.value = true
-	const loggedIn = await login_flow().catch(handleSevereError)
-
-	if (loggedIn) {
-		await setAccount(loggedIn)
+	try {
+		const account = await loginToMinecraft({
+			trouble: formatMessage(messages.loginTrouble),
+			browserLogin: formatMessage(messages.loginBrowser),
+			deviceCode: formatMessage(messages.loginDeviceCode),
+		})
+		if (account) await onMicrosoftLogin(account)
+	} catch (error) {
+		handleSevereError(error)
+	} finally {
+		loginDisabled.value = false
 	}
+}
 
-	trackEvent('AccountLogIn')
-	loginDisabled.value = false
+async function onMicrosoftLogin(account: MinecraftCredential) {
+	loginDisabled.value = true
+	try {
+		await setAccount(account)
+		trackEvent('AccountLogIn')
+	} catch (error) {
+		handleSevereError(error)
+	} finally {
+		loginDisabled.value = false
+	}
 }
 
 function showOfflineAccountModal() {
@@ -1011,10 +1031,14 @@ const unlisten = await process_listener(async (e) => {
 		await refreshValues()
 	}
 })
+const unlistenDeviceLogin = await listen('minecraft-device-login-requested', () => {
+	minecraftLoginModal.value?.showDeviceLogin()
+})
 
 onUnmounted(() => {
 	clearHeadRefreshRetry()
 	unlisten()
+	unlistenDeviceLogin()
 })
 
 const messages = defineMessages({
@@ -1196,6 +1220,18 @@ const messages = defineMessages({
 	signInToMinecraft: {
 		id: 'minecraft-account.sign-in',
 		defaultMessage: 'Sign in to Minecraft',
+	},
+	loginTrouble: {
+		id: 'minecraft-login.trouble',
+		defaultMessage: 'Having trouble?',
+	},
+	loginBrowser: {
+		id: 'minecraft-login.browser',
+		defaultMessage: 'Use browser login',
+	},
+	loginDeviceCode: {
+		id: 'minecraft-login.device-code',
+		defaultMessage: 'Use device code',
 	},
 })
 </script>

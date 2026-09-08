@@ -10199,6 +10199,30 @@
   "minecraft-account.third-party-profile.title": {
     "message": "Select a profile"
   },
+  "minecraft-login.browser": {
+    "message": "Use browser login"
+  },
+  "minecraft-login.device-code": {
+    "message": "Use device code"
+  },
+  "minecraft-login.device-description": {
+    "message": "Open the page below on any device, then enter this code."
+  },
+  "minecraft-login.device-expired": {
+    "message": "This device code expired. Start again to receive a new code."
+  },
+  "minecraft-login.device-starting": {
+    "message": "Requesting a device code..."
+  },
+  "minecraft-login.open-verification": {
+    "message": "Open verification page"
+  },
+  "minecraft-login.title": {
+    "message": "Sign in to Minecraft"
+  },
+  "minecraft-login.trouble": {
+    "message": "Having trouble?"
+  },
   "project.actions.view-dependents": {
     "message": "View dependents"
   },

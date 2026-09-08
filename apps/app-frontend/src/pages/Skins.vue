@@ -32,8 +32,7 @@ import type AccountsCard from '@/components/ui/AccountsCard.vue'
 import EditSkinModal from '@/components/ui/skin/EditSkinModal.vue'
 import VirtualSkinSectionList from '@/components/ui/skin/VirtualSkinSectionList.vue'
 import { useNetworkStatus } from '@/composables/useNetworkStatus'
-import { trackEvent } from '@/helpers/analytics'
-import { check_reachable, get_default_user, login as login_flow, users } from '@/helpers/auth'
+import { check_reachable, get_default_user, users } from '@/helpers/auth'
 import type { RenderResult } from '@/helpers/rendering/batch-skin-renderer.ts'
 import { skinBlobUrlMap } from '@/helpers/rendering/batch-skin-renderer.ts'
 import type { Cape, Skin, SkinTextureUrl } from '@/helpers/skins.ts'
@@ -51,7 +50,6 @@ import {
 	save_custom_skin,
 	set_custom_skin_order,
 } from '@/helpers/skins.ts'
-import { handleSevereError } from '@/store/error'
 import { useTheming } from '@/store/state'
 
 async function generateSkinPreviews(skins: Skin[], capes: Cape[]) {
@@ -803,16 +801,7 @@ function getBakedSkinTextures(skin: Skin): RenderResult | undefined {
 
 async function login() {
 	if (offline.value) return
-
-	accountsCard.value.setLoginDisabled(true)
-	const loggedIn = await login_flow().catch(handleSevereError)
-
-	if (loggedIn && accountsCard) {
-		await accountsCard.value.refreshValues()
-	}
-
-	trackEvent('AccountLogIn')
-	accountsCard.value.setLoginDisabled(false)
+	accountsCard.value?.login()
 }
 
 function openAddSkinFileBrowser() {

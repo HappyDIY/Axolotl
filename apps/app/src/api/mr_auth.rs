@@ -52,13 +52,14 @@ pub async fn modrinth_login<R: Runtime>(
             )
         })?;
 
-    let Some(auth_code) = auth_code.await.unwrap()? else {
+    let Some(auth_reply) = auth_code.await.unwrap()? else {
         return Err(TheseusSerializableError::Theseus(
             theseus::ErrorKind::OtherError("Login canceled".into()).into(),
         ));
     };
 
-    let credentials = mr_auth::authenticate_finish_flow(&auth_code).await?;
+    let credentials =
+        mr_auth::authenticate_finish_flow(&auth_reply.code).await?;
 
     if let Some(main_window) = app.get_window("main") {
         main_window.set_focus().ok();

@@ -1,9 +1,14 @@
 use crate::api::Result;
+use crate::api::oauth_utils;
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::time::Duration as StdDuration;
 use tauri::plugin::TauriPlugin;
-use tauri::{Manager, Runtime, UserAttentionType};
+use tauri::{Emitter, Manager, Runtime, UserAttentionType};
+use tauri_plugin_opener::OpenerExt;
 use theseus::prelude::*;
+use tokio::sync::{mpsc, oneshot};
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
     tauri::plugin::Builder::<R>::new("auth")
@@ -12,6 +17,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
             check_mojang_services,
             set_mojang_auth_use_mirror,
             login,
+            browser_login,
+            begin_device_login,
+            poll_device_login,
             begin_yggdrasil_login,
             finish_yggdrasil_login,
             list_yggdrasil_saved_logins,
@@ -54,11 +62,23 @@ pub async fn set_mojang_auth_use_mirror(
     )
 }
 
-/// Authenticate a user with Hydra - part 1
-/// This begins the authentication flow quasi-synchronously, returning a URL to visit (that the user will sign in at)
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MinecraftLoginTroubleLinks {
+    trouble: String,
+    browser_login: String,
+    device_code: String,
+}
+
+enum MinecraftLoginAlternative {
+    Browser,
+    DeviceCode,
+}
+
 #[tauri::command]
 pub async fn login<R: Runtime>(
     app: tauri::AppHandle<R>,
+    trouble_links: MinecraftLoginTroubleLinks,
 ) -> Result<Option<Credentials>> {
     let flow = minecraft_auth::begin_login().await?;
 
@@ -68,6 +88,52 @@ pub async fn login<R: Runtime>(
         window.close()?;
     }
 
+    let (alternative_tx, mut alternative_rx) = mpsc::unbounded_channel();
+    let trouble_links =
+        serde_json::to_string(&trouble_links).map_err(|error| {
+            theseus::ErrorKind::OtherError(format!(
+                "Failed to serialize Minecraft sign-in help links: {error}"
+            ))
+            .as_error()
+        })?;
+    let help_bar_script = format!(
+        r#"
+        (() => {{
+            const labels = {trouble_links};
+            const addHelpBar = () => {{
+                if (document.getElementById('axolotl-minecraft-login-help')) return;
+
+                const bar = document.createElement('div');
+                bar.id = 'axolotl-minecraft-login-help';
+                bar.style.cssText = 'box-sizing:border-box;position:sticky;top:0;z-index:2147483647;display:flex;align-items:center;gap:8px;width:100%;min-height:36px;padding:8px 16px;background:#fff;color:#1f1f1f;border-bottom:1px solid #d1d1d1;font:13px/20px system-ui,sans-serif;';
+                const trouble = document.createElement('span');
+                trouble.textContent = labels.trouble;
+                bar.append(trouble);
+
+                const createLink = (label, destination) => {{
+                    const link = document.createElement('a');
+                    link.href = destination;
+                    link.textContent = label;
+                    link.style.cssText = 'color:#0067b8;text-decoration:underline;cursor:pointer;';
+                    return link;
+                }};
+
+                bar.append(createLink(labels.browserLogin, 'axolotl-auth://browser'));
+                const separator = document.createElement('span');
+                separator.textContent = '|';
+                bar.append(separator);
+                bar.append(createLink(labels.deviceCode, 'axolotl-auth://device-code'));
+                document.body.prepend(bar);
+            }};
+
+            if (document.readyState === 'loading') {{
+                document.addEventListener('DOMContentLoaded', addHelpBar, {{ once: true }});
+            }} else {{
+                addHelpBar();
+            }}
+        }})();
+        "#,
+    );
     let window = tauri::WebviewWindowBuilder::new(
         &app,
         "signin",
@@ -83,34 +149,150 @@ pub async fn login<R: Runtime>(
     .title("Sign into Axolotl Launcher")
     .always_on_top(true)
     .center()
+    .initialization_script(help_bar_script)
+    .on_navigation(move |url| {
+        let alternative = match url.host_str() {
+            Some("browser") if url.scheme() == "axolotl-auth" => {
+                Some(MinecraftLoginAlternative::Browser)
+            }
+            Some("device-code") if url.scheme() == "axolotl-auth" => {
+                Some(MinecraftLoginAlternative::DeviceCode)
+            }
+            _ => None,
+        };
+
+        if let Some(alternative) = alternative {
+            let _ = alternative_tx.send(alternative);
+            return false;
+        }
+
+        true
+    })
     .build()?;
 
     window.request_user_attention(Some(UserAttentionType::Critical))?;
 
     while (Utc::now() - start) < Duration::minutes(10) {
+        tokio::select! {
+            Some(alternative) = alternative_rx.recv() => {
+                window.close()?;
+                return match alternative {
+                    MinecraftLoginAlternative::Browser => browser_login(app).await,
+                    MinecraftLoginAlternative::DeviceCode => {
+                        app.emit("minecraft-device-login-requested", ())?;
+                        Ok(None)
+                    }
+                };
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+        }
+
         if window.title().is_err() {
             // user closed window, cancelling flow
             return Ok(None);
         }
 
-        if window
-            .url()?
+        let callback_url = window.url()?;
+        if callback_url
             .as_str()
             .starts_with("https://login.live.com/oauth20_desktop.srf")
             && let Some((_, code)) =
-                window.url()?.query_pairs().find(|x| x.0 == "code")
+                callback_url.query_pairs().find(|x| x.0 == "code")
         {
+            let state = callback_url
+                .query_pairs()
+                .find(|x| x.0 == "state")
+                .map(|(_, state)| state.into_owned())
+                .ok_or_else(|| {
+                    theseus::ErrorKind::InputError(
+                        "Microsoft sign-in response did not include state"
+                            .into(),
+                    )
+                    .as_error()
+                })?;
             window.close()?;
-            let val = minecraft_auth::finish_login(&code.clone(), flow).await?;
+            let val = minecraft_auth::finish_login(&code, &state, flow).await?;
 
             return Ok(Some(val));
         }
-
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 
     window.close()?;
     Ok(None)
+}
+
+#[tauri::command]
+pub async fn browser_login<R: Runtime>(
+    app: tauri::AppHandle<R>,
+) -> Result<Option<Credentials>> {
+    let (listen_socket_tx, listen_socket) = oneshot::channel();
+    let callback_address =
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53682);
+    let auth_code = tokio::spawn(oauth_utils::auth_code_reply::listen_fixed(
+        callback_address,
+        listen_socket_tx,
+    ));
+    listen_socket.await.unwrap()?;
+
+    let flow = minecraft_auth::begin_browser_login().await?;
+    if let Err(error) =
+        app.opener().open_url(&flow.auth_request_uri, None::<&str>)
+    {
+        oauth_utils::auth_code_reply::stop_listeners();
+        return Err(crate::api::TheseusSerializableError::Theseus(
+            theseus::ErrorKind::OtherError(format!(
+                "Failed to open browser sign-in: {error}"
+            ))
+            .into(),
+        ));
+    }
+
+    let auth_code =
+        tokio::time::timeout(StdDuration::from_secs(10 * 60), auth_code)
+            .await
+            .map_err(|_| {
+                oauth_utils::auth_code_reply::stop_listeners();
+                theseus::ErrorKind::OtherError(
+                    "Browser sign-in timed out".into(),
+                )
+                .as_error()
+            })?;
+    let auth_code = auth_code.map_err(|error| {
+        theseus::ErrorKind::OtherError(format!(
+            "Browser sign-in listener stopped unexpectedly: {error}"
+        ))
+        .as_error()
+    })?;
+    let Some(reply) = auth_code? else {
+        return Ok(None);
+    };
+
+    let state = reply.state.ok_or_else(|| {
+        theseus::ErrorKind::InputError(
+            "Microsoft sign-in response did not include state".into(),
+        )
+        .as_error()
+    })?;
+    let credentials =
+        minecraft_auth::finish_login(&reply.code, &state, flow).await?;
+    if let Some(main_window) = app.get_webview_window("main") {
+        main_window.set_focus().ok();
+    }
+
+    Ok(Some(credentials))
+}
+
+#[tauri::command]
+pub async fn begin_device_login()
+-> Result<minecraft_auth::MinecraftDeviceLoginFlow> {
+    Ok(minecraft_auth::begin_device_login().await?)
+}
+
+#[tauri::command]
+pub async fn poll_device_login(
+    device_code: String,
+) -> Result<minecraft_auth::MinecraftDeviceLoginPoll> {
+    Ok(minecraft_auth::poll_device_login(&device_code).await?)
 }
 
 #[tauri::command]
