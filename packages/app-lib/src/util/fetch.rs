@@ -371,8 +371,8 @@ static IN_FLIGHT_DOWNLOADS: LazyLock<
 > = LazyLock::new(dashmap::DashMap::new);
 
 use super::download::route_health::{
-    resource_family, ROUTE_HEALTH, ResourceFamily, RouteHealth, RouteHealthKey,
-    TASK_PROBE_STATES, TaskProbeGuard, TaskProbeKey,
+    ROUTE_HEALTH, ResourceFamily, RouteHealth, RouteHealthKey,
+    TASK_PROBE_STATES, TaskProbeGuard, TaskProbeKey, resource_family,
 };
 
 pub(crate) fn url_authority(url: &str) -> Option<String> {
@@ -5621,7 +5621,6 @@ async fn download_to_path_inner(
     );
     let mode = source_mode_for_resource(request.resource);
     let mut routes = build_download_routes(&request, mode);
-    let credentials: Option<crate::state::ModrinthCredentials> = None;
     let part_path = suffixed_path(destination, ".part");
 
     if let Some(result) =
@@ -5649,7 +5648,7 @@ async fn download_to_path_inner(
     // Prefer one stream on a healthy shared HTTP/2 connection when the file
     // size and transport reputation justify it. Larger or slow H2 transfers
     // fall through to independent HTTP/1.1 range connections.
-    let mut h2_failed_nonofficial = if let Some((h2_route, h2_policy)) =
+    let h2_failed_nonofficial = if let Some((h2_route, h2_policy)) =
         select_h2_download_route(&request, &routes, &part_path).await
     {
         match try_h2_download(
@@ -5671,6 +5670,28 @@ async fn download_to_path_inner(
         None
     };
 
+    run_native_download_attempts(
+        request,
+        destination,
+        semaphore,
+        progress,
+        routes,
+        part_path,
+        h2_failed_nonofficial,
+    )
+    .await
+}
+
+async fn run_native_download_attempts(
+    request: DownloadRequest,
+    destination: &Path,
+    semaphore: &FetchSemaphore,
+    mut progress: Option<&mut FetchProgressFn<'_>>,
+    mut routes: Vec<DownloadRoute>,
+    part_path: PathBuf,
+    mut h2_failed_nonofficial: Option<String>,
+) -> crate::Result<DownloadResult> {
+    let credentials: Option<crate::state::ModrinthCredentials> = None;
     let mut official_integrity_retry = h2_failed_nonofficial.is_some();
     if let Some(failed_route) = h2_failed_nonofficial.take() {
         routes.retain(|route| route.url != failed_route);
@@ -6828,7 +6849,6 @@ async fn download_to_path_inner(
         file_attempt_budget,
     ))
 }
-
 /// Posts a JSON to a URL
 #[tracing::instrument(skip_all)]
 pub async fn post_json(
