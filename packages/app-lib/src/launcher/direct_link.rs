@@ -12,7 +12,8 @@ use daedalus::minecraft::{
 use daedalus::modded::normalize_loader_libraries;
 
 use super::local_version::{
-    HmclVersionSettings, LinkedLibrary, MergedVersion, load_version_for_dialect,
+    HmclVersionSettings, LinkedLibrary, MergedVersion, discover_version_json,
+    load_version_for_dialect,
 };
 use crate::state::{Instance, MemorySettings, ModLoader, WindowSize};
 
@@ -127,7 +128,7 @@ impl DirectLinkedLaunch {
     pub(crate) fn from_external_version_dir(
         version_dir: &Path,
     ) -> crate::Result<Option<Self>> {
-        let Some(version_id) =
+        let Some(folder_name) =
             version_dir.file_name().and_then(|name| name.to_str())
         else {
             return Ok(None);
@@ -144,12 +145,28 @@ impl DirectLinkedLaunch {
         else {
             return Ok(None);
         };
-        let version_json = version_dir.join(version_id.to_string() + ".json");
+        // Older externally-created records contain only `game_dir_override`.
+        // Do not assume their display folder and manifest stem match: PCL and
+        // copied installations commonly keep a user-facing folder name while
+        // the actual JSON is named after the version ID. Resolving the exact
+        // manifest here keeps those rows on the external runtime adapter,
+        // instead of later falling back to Axolotl's managed libraries.
+        let version_json = discover_version_json(dot_minecraft, folder_name)?;
+        let version_id = version_json
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .filter(|stem| !stem.is_empty())
+            .ok_or_else(|| {
+                crate::ErrorKind::InputError(format!(
+                    "Version JSON has no usable file stem: {}",
+                    version_json.display()
+                ))
+            })?;
         Ok(Some(Self {
             dot_minecraft: crate::util::io::canonicalize(dot_minecraft)?,
             launcher_root: None,
             version_id: version_id.to_string(),
-            version_json: Some(version_json),
+            version_json: Some(crate::util::io::canonicalize(version_json)?),
             dialect: LinkedLauncherDialect::Generic,
             game_dir_mode: Some(ExternalGameDirMode::Isolated),
         }))
@@ -1913,6 +1930,39 @@ mod tests {
             LinkedLauncherDialect::PclCe
         );
         assert!(LinkedLauncherDialect::parse("unknown").is_err());
+    }
+
+    #[test]
+    fn legacy_external_version_override_uses_the_actual_manifest_stem() {
+        let root = tempfile::tempdir().unwrap();
+        let version_dir = root.path().join("versions").join("My Instance");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("1.20.1-fabric.json"),
+            serde_json::to_vec(&json!({
+                "id": "1.20.1-fabric",
+                "mainClass": "net.minecraft.client.main.Main"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let direct =
+            DirectLinkedLaunch::from_external_version_dir(&version_dir)
+                .unwrap()
+                .expect("a conventional versions directory is external");
+
+        assert_eq!(direct.version_id, "1.20.1-fabric");
+        assert_eq!(
+            direct.version_json,
+            Some(
+                version_dir
+                    .join("1.20.1-fabric.json")
+                    .canonicalize()
+                    .unwrap()
+            )
+        );
+        assert_eq!(direct.dot_minecraft, root.path().canonicalize().unwrap());
     }
 
     #[test]

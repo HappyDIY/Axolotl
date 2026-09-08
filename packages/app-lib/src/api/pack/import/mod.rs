@@ -327,17 +327,25 @@ async fn get_axolotl_instances(
 async fn get_generic_instances(
     base_path: &Path,
 ) -> crate::Result<Vec<ImportableInstance>> {
-    let mut instances: Vec<ImportableInstance> =
-        scan_instances_at(base_path, None)
-            .await
-            .into_iter()
-            .map(|(n, p)| ImportableInstance {
-                name: n,
-                path: p.to_string_lossy().to_string(),
-                compatible_mode: false,
-                version_path: None,
-            })
-            .collect();
+    let mut scanned = scan_instances_at(base_path, None).await;
+    // A folder import commonly targets a launcher or pack directory whose
+    // game files live one level below it in `.minecraft`. Treat that nested
+    // root exactly like a directly selected `.minecraft` folder, preserving
+    // the version-directory path so the importer can resolve its metadata.
+    if base_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_none_or(|name| !name.eq_ignore_ascii_case(".minecraft"))
+    {
+        scanned.extend(
+            scan_instances_at(&base_path.join(".minecraft"), None).await,
+        );
+    }
+    let mut collector = InstanceCollector::new();
+    for (name, path) in scanned {
+        collector.push(name, path);
+    }
+    let mut instances = collector.instances;
 
     if instances.is_empty() && base_path.is_dir() {
         let mut dir = io::read_dir(base_path).await?;
@@ -1664,5 +1672,33 @@ mod import_game_root_tests {
         fs::create_dir_all(empty.join("mods")).unwrap();
         fs::write(empty.join("mods/mod.jar"), "mod").unwrap();
         assert!(!dir_has_game_body(&empty));
+    }
+}
+
+#[cfg(test)]
+mod generic_instance_scan_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn finds_versions_inside_a_selected_folders_minecraft_directory() {
+        let folder = tempdir().unwrap();
+        let version_dir = folder
+            .path()
+            .join(".minecraft")
+            .join("versions")
+            .join("1.20.1-fabric");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("1.20.1-fabric.json"),
+            r#"{"id":"1.20.1-fabric","inheritsFrom":"1.20.1"}"#,
+        )
+        .unwrap();
+
+        let instances = get_generic_instances(folder.path()).await.unwrap();
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].name, "versions/1.20.1-fabric");
+        assert_eq!(instances[0].path, version_dir.to_string_lossy());
     }
 }

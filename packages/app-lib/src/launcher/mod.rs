@@ -1547,6 +1547,23 @@ pub async fn launch_minecraft(
     let runtime =
         InstanceRuntimeAdapter::for_instance(instance, &state.directories)?;
     let direct_launch = runtime.direct_link().cloned();
+    if direct_launch.is_some() && !instance.is_direct_linked() {
+        // Instances created before direct-link metadata was introduced retain
+        // their external `game_dir_override`. Their adapter above already
+        // launches them in place; persist the resolved identity now so future
+        // launches, content scans, and settings all use the same external
+        // runtime. A persistence failure must not make an otherwise valid
+        // existing instance unlaunchable.
+        if let Err(error) =
+            promote_external_instance_link(instance, &state).await
+        {
+            tracing::warn!(
+                %error,
+                instance = %instance.id,
+                "Could not persist the migrated external instance link"
+            );
+        }
+    }
     let mut resolved_linked = direct_launch
         .as_ref()
         .map(DirectLinkedLaunch::resolve)
