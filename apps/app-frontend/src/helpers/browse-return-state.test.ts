@@ -14,13 +14,13 @@ import {
 
 test('consumes a matching browse snapshot only once', () => {
 	const url = '/browse/mod?m=100&o=100'
-	saveBrowseReturnSnapshot({ url, scrollTop: 480, state: { hits: ['a'] } })
+	saveBrowseReturnSnapshot({ url, scrollTop: 480, state: { currentPage: 2, hits: ['a'] } })
 	assert.equal(prepareBrowseReturnNavigation(url, '/project/sodium'), true)
 
 	assert.deepEqual(consumeBrowseReturnSnapshot(url), {
 		url,
 		scrollTop: 480,
-		state: { hits: ['a'] },
+		state: { currentPage: 2, hits: ['a'] },
 	})
 	assert.equal(consumeBrowseReturnSnapshot(url), null)
 	assert.equal(isBrowseReturnNavigation(url), true)

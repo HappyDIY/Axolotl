@@ -1011,7 +1011,7 @@ onBeforeRouteLeave((to) => {
 		saveBrowseReturnSnapshot({
 			url: route.fullPath,
 			scrollTop: viewport?.scrollTop ?? 0,
-			state: {},
+			state: { currentPage: searchState.currentPage.value },
 		})
 	}
 
@@ -2594,7 +2594,11 @@ const lockedFilterMessages = computed(() => ({
 	),
 }))
 
-const browseReturnSnapshot = consumeBrowseReturnSnapshot(route.fullPath)
+type BrowseReturnState = {
+	currentPage: number
+}
+
+const browseReturnSnapshot = consumeBrowseReturnSnapshot<BrowseReturnState>(route.fullPath)
 
 const displayMode = ref<BrowseDisplayMode>(getLastBrowseContentDisplayMode())
 
@@ -2633,6 +2637,12 @@ const searchState = useBrowseSearch({
 	}),
 	displayMode,
 })
+
+function restoreBrowseReturnPage() {
+	if (!browseReturnSnapshot || !Number.isInteger(browseReturnSnapshot.state.currentPage)) return
+
+	searchState.currentPage.value = Math.max(1, browseReturnSnapshot.state.currentPage)
+}
 
 const NON_FILTER_BROWSE_QUERY_PARAMS = new Set([
 	'i',
@@ -2950,7 +2960,9 @@ onMounted(() => {
 	const initialSearchDependencies = [initialInstanceFilterPromise]
 	if (instanceHideInstalled.value) initialSearchDependencies.push(initialInstalledProjectsPromise)
 	void Promise.allSettled(initialSearchDependencies).then(() => {
-		if (!isUnmounted) void searchState.refreshSearch()
+		if (isUnmounted) return
+		restoreBrowseReturnPage()
+		void searchState.refreshSearch()
 	})
 
 	instance_listener(async (event: { event: string; instance_id: string }) => {
