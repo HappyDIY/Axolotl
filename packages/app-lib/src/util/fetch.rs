@@ -5552,6 +5552,30 @@ fn build_download_routes(
     routes
 }
 
+async fn select_h2_download_route(
+    request: &DownloadRequest,
+    routes: &[DownloadRoute],
+    part_path: &Path,
+) -> Option<(DownloadRoute, crate::util::download::native::NativeH2Policy)> {
+    if !request.allow_segmented_download
+        || part_resume_expected(part_path).await
+        || request.url.starts_with("http://")
+    {
+        return None;
+    }
+    let h2_route = first_h2_route(routes)?;
+    let policy = if request.h2_range_concurrency.is_some() {
+        crate::util::download::native::explicit_h2_policy(&h2_route)
+    } else {
+        crate::util::download::native::h2_policy(
+            &h2_route,
+            request.integrity.size,
+        )
+        .await
+    }?;
+    Some((h2_route, policy))
+}
+
 async fn download_to_path_inner(
     request: DownloadRequest,
     destination: &Path,
@@ -5650,27 +5674,8 @@ async fn download_to_path_inner(
     // size and transport reputation justify it. Larger or slow H2 transfers
     // fall through to independent HTTP/1.1 range connections.
     let mut h2_failed_nonofficial = None;
-    let h2_selection = if request.allow_segmented_download
-        && !part_resume_expected(&part_path).await
-        && !request.url.starts_with("http://")
-    {
-        if let Some(h2_route) = first_h2_route(&routes) {
-            if request.h2_range_concurrency.is_some() {
-                crate::util::download::native::explicit_h2_policy(&h2_route)
-            } else {
-                crate::util::download::native::h2_policy(
-                    &h2_route,
-                    request.integrity.size,
-                )
-                .await
-            }
-            .map(|policy| (h2_route, policy))
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let h2_selection =
+        select_h2_download_route(&request, &routes, &part_path).await;
     if let Some((h2_route, h2_policy)) = h2_selection {
         let h2_permit =
             tokio::time::timeout(RESOURCE_WAIT_TIMEOUT, semaphore.0.acquire())
