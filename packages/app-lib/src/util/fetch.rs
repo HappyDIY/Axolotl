@@ -43,7 +43,6 @@ use url::Url;
 fn is_safe_redirect_location(location: &str) -> bool {
     location.len() <= MAX_REDIRECT_LOCATION_BYTES && location.is_ascii()
 }
-use uuid::Uuid;
 
 pub const DOWNLOAD_META_HEADER: &str = "modrinth-download-meta";
 
@@ -371,107 +370,10 @@ static IN_FLIGHT_DOWNLOADS: LazyLock<
     dashmap::DashMap<String, Weak<AsyncMutex<()>>>,
 > = LazyLock::new(dashmap::DashMap::new);
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum ResourceFamily {
-    Minecraft,
-    Loader,
-    Modrinth,
-    CurseForge,
-    Other,
-}
-
-impl ResourceFamily {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Minecraft => "minecraft",
-            Self::Loader => "loader",
-            Self::Modrinth => "modrinth",
-            Self::CurseForge => "curseforge",
-            Self::Other => "other",
-        }
-    }
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct RouteHealthKey {
-    family: ResourceFamily,
-    authority: String,
-}
-
-#[derive(Clone, Debug, Default)]
-struct RouteHealth {
-    success_samples: u32,
-    ttfb_ms: Option<f64>,
-    throughput_bps: Option<f64>,
-    consecutive_failures: u32,
-    cooldown_until: Option<Instant>,
-}
-
-static ROUTE_HEALTH: LazyLock<Mutex<HashMap<RouteHealthKey, RouteHealth>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-static ROUTE_EFFECTIVE_AUTHORITIES: LazyLock<Mutex<HashMap<String, String>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-enum TaskProbeKey {
-    Job(Uuid, u64),
-    Anonymous(u64),
-}
-
-#[derive(Default)]
-struct TaskProbeState {
-    families: Mutex<HashMap<ResourceFamily, FamilyProbeState>>,
-}
-
-impl TaskProbeState {
-    fn has_in_flight(&self) -> bool {
-        self.families
-            .lock()
-            .values()
-            .any(|family| family.in_flight.is_some())
-    }
-}
-
-#[derive(Default)]
-struct FamilyProbeState {
-    last_probed: Option<Instant>,
-    in_flight: Option<Arc<Notify>>,
-}
-
-struct TaskProbeGuard {
-    state: Arc<TaskProbeState>,
-    family: ResourceFamily,
-    notify: Arc<Notify>,
-    armed: bool,
-}
-
-impl TaskProbeGuard {
-    fn disarm(&mut self) {
-        self.armed = false;
-    }
-}
-
-impl Drop for TaskProbeGuard {
-    fn drop(&mut self) {
-        if !self.armed {
-            return;
-        }
-        let mut families = self.state.families.lock();
-        if let Some(entry) = families.get_mut(&self.family)
-            && entry
-                .in_flight
-                .as_ref()
-                .is_some_and(|in_flight| Arc::ptr_eq(in_flight, &self.notify))
-        {
-            entry.in_flight = None;
-            entry.last_probed = None;
-        }
-    }
-}
-
-static TASK_PROBE_STATES: LazyLock<
-    Mutex<HashMap<TaskProbeKey, Arc<TaskProbeState>>>,
-> = LazyLock::new(|| Mutex::new(HashMap::new()));
+use super::download::route_health::{
+    ROUTE_HEALTH, ResourceFamily, RouteHealth, RouteHealthKey,
+    TASK_PROBE_STATES, TaskProbeGuard, TaskProbeKey,
+};
 
 pub(crate) fn url_authority(url: &str) -> Option<String> {
     let url = Url::parse(url).ok()?;
@@ -487,52 +389,19 @@ fn original_route_authority(route: &DownloadRoute) -> Option<String> {
 }
 
 fn effective_route_authority(route: &DownloadRoute) -> Option<String> {
-    let authority = original_route_authority(route)?;
-    ROUTE_EFFECTIVE_AUTHORITIES
-        .lock()
-        .get(&route.url)
-        .cloned()
-        .or(Some(authority))
+    super::download::route_health::effective_route_authority(route)
 }
 
 fn remember_effective_route_authority(route: &DownloadRoute, final_url: &str) {
-    let (Some(original), Some(effective)) =
-        (original_route_authority(route), url_authority(final_url))
-    else {
-        return;
-    };
-    let mut authorities = ROUTE_EFFECTIVE_AUTHORITIES.lock();
-    if original == effective {
-        let removed = authorities.remove(&route.url).is_some();
-        drop(authorities);
-        if removed {
-            tracing::debug!(
-                original,
-                "Cleared stale effective download authority"
-            );
-        }
-        return;
-    }
-    let changed = authorities.get(&route.url) != Some(&effective);
-    authorities.insert(route.url.clone(), effective.clone());
-    drop(authorities);
-    if changed {
-        tracing::debug!(
-            original,
-            effective,
-            "Recorded effective download authority"
-        );
-    }
+    super::download::route_health::remember_effective_route_authority(
+        route, final_url,
+    )
 }
 
 fn forget_effective_route_authority(route: &DownloadRoute, failed_url: &Url) {
-    let Some(failed) = url_authority(failed_url.as_str()) else {
-        return;
-    };
-    let mut authorities = ROUTE_EFFECTIVE_AUTHORITIES.lock();
-    if authorities.get(&route.url) == Some(&failed) {
-        authorities.remove(&route.url);
-    }
+    super::download::route_health::forget_effective_route_authority(
+        route, failed_url,
+    )
 }
 
 fn deduplicate_download_routes(routes: &mut Vec<DownloadRoute>) {
@@ -558,37 +427,11 @@ fn routes_share_effective_authority(
         })
 }
 
-fn resource_family(
-    route: &DownloadRoute,
-    resource: ResourceClass,
-) -> ResourceFamily {
-    match resource {
-        ResourceClass::MinecraftLibrary
-            if uses_mirror_first_loader_routes(&route.url, resource) =>
-        {
-            ResourceFamily::Loader
-        }
-        ResourceClass::Metadata
-        | ResourceClass::MinecraftAsset
-        | ResourceClass::MinecraftLibrary
-        | ResourceClass::Java => ResourceFamily::Minecraft,
-        ResourceClass::Loader => ResourceFamily::Loader,
-        ResourceClass::Modrinth | ResourceClass::Modpack => {
-            ResourceFamily::Modrinth
-        }
-        ResourceClass::CurseForge => ResourceFamily::CurseForge,
-        ResourceClass::Other => ResourceFamily::Other,
-    }
-}
-
 fn route_health_key(
     route: &DownloadRoute,
     resource: ResourceClass,
 ) -> Option<RouteHealthKey> {
-    Some(RouteHealthKey {
-        family: resource_family(route, resource),
-        authority: range_splitting_authority(route)?,
-    })
+    super::download::route_health::route_health_key(route, resource)
 }
 
 fn update_ewma(current: &mut Option<f64>, sample: f64) {
@@ -599,19 +442,7 @@ fn persisted_route_health(
     key: &RouteHealthKey,
     proxy: ProxyPolicy,
 ) -> RouteHealth {
-    crate::util::download::native_reputation::get(
-        key.family.as_str(),
-        &key.authority,
-        proxy,
-    )
-    .map(|persisted| RouteHealth {
-        success_samples: persisted.success_samples,
-        ttfb_ms: persisted.ttfb_ms,
-        throughput_bps: persisted.throughput_bps,
-        consecutive_failures: persisted.consecutive_failures,
-        cooldown_until: None,
-    })
-    .unwrap_or_default()
+    super::download::route_health::persisted_route_health(key, proxy)
 }
 
 fn modrinth_request_kind(url: &str) -> Option<&'static str> {
@@ -1695,7 +1526,9 @@ static RANGE_SPLITTING_PROTOCOL_FAILURES: LazyLock<
 static RANGE_SPLITTING_SUPPORTED: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
-fn range_splitting_authority(route: &DownloadRoute) -> Option<String> {
+pub(crate) fn range_splitting_authority(
+    route: &DownloadRoute,
+) -> Option<String> {
     effective_route_authority(route)
 }
 
