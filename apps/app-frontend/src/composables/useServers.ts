@@ -3,11 +3,14 @@ import { injectNotificationManager } from '@modrinth/ui'
 import { computed, reactive, ref } from 'vue'
 
 import {
+	base64ToBytes,
 	serverEventListener,
 	type ServerExitReason,
 	type ServerInfoData,
 	servers,
 } from '@/helpers/servers'
+
+import { ServerConsoleBuffer } from './server-console-buffer'
 
 const LOG_CAPACITY = 5000
 
@@ -32,6 +35,9 @@ const serverList = ref<ServerInfoData[]>([])
 const logLines = reactive<Record<string, string[]>>({})
 const isRefreshing = ref(false)
 let listenerPromise: Promise<() => void> | null = null
+const consoleOutputListeners = new Map<string, Set<(data: Uint8Array) => void>>()
+const consoleOutputBuffers = new Map<string, ServerConsoleBuffer>()
+const CONSOLE_OUTPUT_CAPACITY = 64 * 1024
 
 export interface ServerView extends ServerInfoData {
 	status: ServerStatus
@@ -59,15 +65,40 @@ async function ensureListener() {
 		listenerPromise = serverEventListener((serverId, payload) => {
 			if (payload.event === 'log') {
 				void appendLog(serverId, payload.line)
+			} else if (payload.event === 'console_output') {
+				const data = base64ToBytes(payload.data)
+				const buffer =
+					consoleOutputBuffers.get(serverId) ?? new ServerConsoleBuffer(CONSOLE_OUTPUT_CAPACITY)
+				buffer.push(data)
+				consoleOutputBuffers.set(serverId, buffer)
+				for (const listener of consoleOutputListeners.get(serverId) ?? []) {
+					listener(data)
+				}
 			} else if (payload.event === 'started') {
 				void refresh()
 			} else if (payload.event === 'stopped') {
+				consoleOutputBuffers.delete(serverId)
 				void refresh()
 				if (payload.reason) exitReasonHandler?.(serverId, payload.reason)
 			}
 		})
 	}
 	return listenerPromise
+}
+
+export function subscribeServerConsoleOutput(
+	serverId: string,
+	listener: (data: Uint8Array) => void,
+): () => void {
+	const listeners = consoleOutputListeners.get(serverId) ?? new Set()
+	listeners.add(listener)
+	consoleOutputListeners.set(serverId, listeners)
+	for (const data of consoleOutputBuffers.get(serverId)?.values() ?? []) listener(data)
+	void ensureListener()
+	return () => {
+		listeners.delete(listener)
+		if (listeners.size === 0) consoleOutputListeners.delete(serverId)
+	}
 }
 
 export async function hydrateLog(serverId: string) {

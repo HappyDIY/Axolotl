@@ -6065,6 +6065,9 @@
   "app.servers.card.type": {
     "message": "{type} · {version}"
   },
+  "app.servers.console.forge-command-placeholder": {
+    "message": "Send a command - Tab completion supported"
+  },
   "app.servers.console.not-running": {
     "message": "The server is not running"
   },

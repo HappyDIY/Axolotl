@@ -3,12 +3,19 @@ import {
 	ConsolePageLayout,
 	createConsoleState,
 	defineMessages,
+	JLineCommandInput,
 	provideConsoleManager,
 	useVIntl,
 } from '@modrinth/ui'
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
-import { hydrateLog, type ServerView, useServers } from '@/composables/useServers'
+import { ServerConsoleBuffer } from '@/composables/server-console-buffer'
+import {
+	hydrateLog,
+	type ServerView,
+	subscribeServerConsoleOutput,
+	useServers,
+} from '@/composables/useServers'
 import { servers } from '@/helpers/servers'
 
 const props = defineProps<{
@@ -17,6 +24,10 @@ const props = defineProps<{
 
 const { formatMessage } = useVIntl()
 const messages = defineMessages({
+	forgeCommandPlaceholder: {
+		id: 'app.servers.console.forge-command-placeholder',
+		defaultMessage: 'Send a command - Tab completion supported',
+	},
 	notRunning: {
 		id: 'app.servers.console.not-running',
 		defaultMessage: 'The server is not running',
@@ -27,12 +38,37 @@ const { logLines, sendCommand } = useServers()
 const consoleState = createConsoleState()
 const loading = ref(true)
 const hasLogs = computed(() => consoleState.output.value.length > 0)
+const isForge = computed(() => props.server.serverType === 'forge')
+const jlineInput = ref<InstanceType<typeof JLineCommandInput> | null>(null)
 let consumedLines = 0
 // Guards the live length-watcher from double-appending while we rebuild the
 // console from the buffer during (re)hydration. Without it, the async
 // hydrate fetch and the streamed `logLines` updates race, dropping or
 // duplicating the earliest startup lines.
 let hydrating = false
+let unsubscribeConsoleOutput: (() => void) | null = null
+const PENDING_CONSOLE_OUTPUT_CAPACITY = 64 * 1024
+let pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
+
+function flushConsoleOutput() {
+	for (const data of pendingConsoleOutput.values()) jlineInput.value?.write(data)
+	pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
+}
+
+watch(
+	() => props.server.id,
+	(serverId) => {
+		unsubscribeConsoleOutput?.()
+		unsubscribeConsoleOutput = subscribeServerConsoleOutput(serverId, (data) => {
+			if (jlineInput.value) {
+				jlineInput.value.write(data)
+			} else {
+				pendingConsoleOutput.push(data)
+			}
+		})
+	},
+	{ immediate: true },
+)
 
 async function hydrateAndDisplay() {
 	hydrating = true
@@ -71,12 +107,16 @@ function stopSync() {
 }
 
 onMounted(async () => {
+	flushConsoleOutput()
 	await hydrateAndDisplay()
 	loading.value = false
 	startSync()
 })
 
-onUnmounted(stopSync)
+onUnmounted(() => {
+	stopSync()
+	unsubscribeConsoleOutput?.()
+})
 
 watch(
 	() => (logLines[props.server.id] ?? []).length,
@@ -113,7 +153,13 @@ const consoleLayout = ref<InstanceType<typeof ConsolePageLayout> | null>(null)
 watch(
 	() => props.server.running,
 	async (running, previousRunning) => {
-		if (!running || previousRunning) return
+		if (!running) {
+			pendingConsoleOutput = new ServerConsoleBuffer(PENDING_CONSOLE_OUTPUT_CAPACITY)
+			return
+		}
+		if (previousRunning) return
+		await nextTick()
+		flushConsoleOutput()
 		consoleState.clear()
 		consumedLines = 0
 		// Drop the previous run's lines from the shared buffer too; the backend
@@ -150,6 +196,17 @@ provideConsoleManager({
 		class="flex flex-col pb-3"
 		:class="hasLogs ? 'h-[calc(100dvh-80px)] shrink-0' : 'h-full min-h-[240px]'"
 	>
-		<ConsolePageLayout ref="consoleLayout" />
+		<ConsolePageLayout ref="consoleLayout" :custom-command-input="isForge">
+			<template #command-input="{ disabled }">
+				<JLineCommandInput
+					ref="jlineInput"
+					:disabled="disabled"
+					:placeholder="formatMessage(messages.forgeCommandPlaceholder)"
+					:send-command="handleSendCommand"
+					:send-input="(data) => servers.sendConsoleInput(server.id, data)"
+					:resize-console="(cols, rows) => servers.resizeConsole(server.id, cols, rows)"
+				/>
+			</template>
+		</ConsolePageLayout>
 	</div>
 </template>
