@@ -46,6 +46,7 @@ const nativeDecorations = ref(true)
 const isMaximized = ref(false)
 const os = ref('')
 const unlistenResize = ref(null)
+let resizeTimer
 
 const alwaysShowAppControls = computed(() => themeStore.getFeatureFlag('always_show_app_controls'))
 
@@ -67,12 +68,22 @@ onMounted(async () => {
 
 	isMaximized.value = await getCurrentWindow().isMaximized()
 
-	unlistenResize.value = await getCurrentWindow().onResized(async () => {
-		isMaximized.value = await getCurrentWindow().isMaximized()
+	unlistenResize.value = await getCurrentWindow().onResized(() => {
+		// Windows emits a burst of resize events while a game changes display mode.
+		if (resizeTimer) clearTimeout(resizeTimer)
+		resizeTimer = setTimeout(async () => {
+			resizeTimer = undefined
+			try {
+				isMaximized.value = await getCurrentWindow().isMaximized()
+			} catch (error) {
+				console.warn('Failed to refresh maximized state after resize', error)
+			}
+		}, 100)
 	})
 })
 
 onUnmounted(() => {
+	if (resizeTimer) clearTimeout(resizeTimer)
 	if (unlistenResize.value) {
 		unlistenResize.value()
 	}

@@ -386,6 +386,8 @@ let allowWindowClose = false
 let unlistenCloseRequested: (() => void) | undefined
 let unlistenLightweightModeError: (() => void) | undefined
 let unlistenSystemAccentColor: (() => void) | undefined
+let maximizedStateTimer: ReturnType<typeof setTimeout> | undefined
+let unlistenWindowResize: (() => void) | undefined
 const minecraftCrashModal = ref()
 const javaDownloadConfirmationModal = ref()
 const pendingUpdateAnnouncementVersion = ref(null)
@@ -557,6 +559,8 @@ function startDirectLinkSync() {
 }
 
 onUnmounted(async () => {
+	if (maximizedStateTimer) clearTimeout(maximizedStateTimer)
+	unlistenWindowResize?.()
 	window.removeEventListener('keydown', handleGlobalKeydown, true)
 	unlistenCloseRequested?.()
 	unlistenLightweightModeError?.()
@@ -1131,8 +1135,18 @@ async function setupApp() {
 
 	isMaximized.value = await getCurrentWindow().isMaximized()
 
-	await getCurrentWindow().onResized(async () => {
-		isMaximized.value = await getCurrentWindow().isMaximized()
+	unlistenWindowResize = await getCurrentWindow().onResized(() => {
+		// Display mode/DPI changes can emit a burst of resize events. Coalesce
+		// them so WebView2 does not receive one IPC request per event.
+		if (maximizedStateTimer) clearTimeout(maximizedStateTimer)
+		maximizedStateTimer = setTimeout(async () => {
+			maximizedStateTimer = undefined
+			try {
+				isMaximized.value = await getCurrentWindow().isMaximized()
+			} catch (error) {
+				console.warn('Failed to refresh maximized state after resize', error)
+			}
+		}, 100)
 	})
 
 	if (!dev) document.addEventListener('contextmenu', (event) => event.preventDefault())
