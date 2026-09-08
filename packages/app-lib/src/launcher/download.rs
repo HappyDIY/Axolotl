@@ -658,20 +658,20 @@ pub(crate) fn needs_java_artifact(library: &Library) -> bool {
     }
     // Legacy pure-native libraries carry a natives map but no downloads.artifact;
     // their main JAR is not downloaded by the original installer either.
-    let artifact = library
-        .downloads
-        .as_ref()
-        .and_then(|downloads| downloads.artifact.as_ref());
-    let legacy_url =
-        library.url.as_deref().filter(|url| !url.trim().is_empty());
     if library.natives.is_some()
-        && artifact.is_none_or(|artifact| artifact.url.trim().is_empty())
-        && legacy_url.is_none()
+        && library
+            .downloads
+            .as_ref()
+            .and_then(|downloads| downloads.artifact.as_ref())
+            .is_none_or(|artifact| artifact.url.trim().is_empty())
+        && library
+            .url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
     {
         return false;
     }
-    artifact.is_some_and(|artifact| !artifact.url.trim().is_empty())
-        || legacy_url.is_some()
+    library.include_in_classpath
 }
 
 fn java_artifact_applies(
@@ -2832,6 +2832,25 @@ mod tests {
         .unwrap();
 
         assert!(needs_java_artifact(&library));
+    }
+
+    #[test]
+    fn legacy_launchwrapper_without_download_metadata_is_downloaded() {
+        let library: Library = serde_json::from_value(serde_json::json!({
+            "name": "net.minecraft:launchwrapper:1.12"
+        }))
+        .unwrap();
+
+        let artifact_path = d::get_path_from_artifact(&library.name).unwrap();
+        assert!(needs_java_artifact(&library));
+        assert_eq!(
+            legacy_library_download_urls(
+                library.url.as_deref(),
+                &artifact_path
+            )
+            .unwrap(),
+            vec![format!("{LIBRARIES_MAVEN}/{artifact_path}")]
+        );
     }
 
     #[test]
