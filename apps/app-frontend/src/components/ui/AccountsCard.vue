@@ -456,6 +456,7 @@ const accounts: Ref<MinecraftCredential[]> = ref([])
 const loginDisabled = ref(false)
 const defaultUser = ref<string | undefined>()
 const equippedSkin = ref<Skin | null>(null)
+const accountChangeRevision = ref(0)
 const headUrlCache = ref(new Map<string, string>())
 const accountHeadUrlCache = ref(new Map<string, string>())
 const accountHeadTextureKeyCache = ref(new Map<string, string>())
@@ -624,23 +625,29 @@ function setLoginDisabled(value: boolean) {
 	loginDisabled.value = value
 }
 
-defineExpose({
-	refreshValues,
-	setEquippedSkin,
-	setLoginDisabled,
-	loginDisabled,
-})
-
 await refreshValues()
 
 watch(offline, async () => {
 	await refreshValues()
-	emit('change')
+	notifyAccountChange()
 })
 
 const selectedAccount = computed(() =>
 	accounts.value.find((account) => account.profile.id === defaultUser.value),
 )
+
+function notifyAccountChange() {
+	accountChangeRevision.value += 1
+	emit('change')
+}
+
+defineExpose({
+	accountChangeRevision,
+	refreshValues,
+	setEquippedSkin,
+	setLoginDisabled,
+	loginDisabled,
+})
 
 const duplicateAccountNames = computed(() => {
 	const counts = new Map<string, number>()
@@ -748,7 +755,7 @@ async function setAccount(account: MinecraftCredential) {
 	await persistDefaultUser(userId)
 	if (defaultUser.value !== userId) return
 	await refreshValues()
-	if (defaultUser.value === userId) emit('change')
+	if (defaultUser.value === userId) notifyAccountChange()
 }
 
 async function login() {
@@ -986,7 +993,7 @@ async function logout(account: MinecraftCredential) {
 	if (!selectedAccount.value && accounts.value.length > 0) {
 		await setAccount(accounts.value[0])
 	} else {
-		emit('change')
+		notifyAccountChange()
 	}
 	trackEvent('AccountLogOut')
 }
