@@ -7,3 +7,4 @@ pub(crate) mod install_mcbbs;
 pub(crate) mod install_mmc_zip;
 pub mod install_mrpack;
 pub(crate) mod install_plain_archive;
+pub(crate) mod parallel_minecraft_install;

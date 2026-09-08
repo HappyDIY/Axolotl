@@ -4104,6 +4104,15 @@ pub async fn install_modpack_from_local_archive_with_reporter(
     )
     .await?;
 
+    let minecraft_install = (completion_policy
+        == crate::launcher::InstanceCompletionPolicy::DeferToInstallJob)
+        .then(|| {
+            crate::api::pack::parallel_minecraft_install::ParallelMinecraftInstall::start(
+                instance_id.clone(),
+                reporter.clone(),
+            )
+        });
+
     let content = install_local_manifest_files(
         &instance_id,
         manifest.files.clone(),
@@ -4116,6 +4125,9 @@ pub async fn install_modpack_from_local_archive_with_reporter(
     .await?;
 
     if !content.manual_downloads.is_empty() {
+        if let Some(minecraft_install) = minecraft_install {
+            minecraft_install.abort().await;
+        }
         return Ok(CurseForgeModpackInstallResult {
             content,
             overrides_written: 0,
@@ -4148,13 +4160,17 @@ pub async fn install_modpack_from_local_archive_with_reporter(
         )
         .await?;
 
-    crate::launcher::install_minecraft_for_instance_id_with_reporter(
-        &instance_id,
-        false,
-        Some(reporter.clone()),
-        completion_policy,
-    )
-    .await?;
+    if let Some(minecraft_install) = minecraft_install {
+        minecraft_install.join().await?;
+    } else {
+        crate::launcher::install_minecraft_for_instance_id_with_reporter(
+            &instance_id,
+            false,
+            Some(reporter.clone()),
+            completion_policy,
+        )
+        .await?;
+    }
     reporter.clear_context().await?;
 
     Ok(CurseForgeModpackInstallResult {

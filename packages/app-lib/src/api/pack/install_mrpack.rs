@@ -44,12 +44,12 @@ use std::sync::{
 use std::time::Duration;
 
 use super::install_from::{CreatePack, CreatePackFile, PackFormat};
+use super::parallel_minecraft_install::ParallelMinecraftInstall;
 use crate::data::ProjectType;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Semaphore};
-use tokio_util::sync::CancellationToken;
 
 type ExtractProgressFn<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>>
     + Send
@@ -72,15 +72,6 @@ pub(crate) enum MrpackInstallOutcome {
     #[allow(dead_code)]
     Completed(String),
     WaitingForUser(InstallPauseReason),
-}
-
-/// Owns the concurrent Minecraft core install that runs while modpack content
-/// downloads. Cancels the background task on drop, so error exits never leak
-/// it; the happy path joins it explicitly and the user-pause path aborts and
-/// waits for a clean stop before returning.
-struct ParallelMinecraftInstall {
-    cancel: CancellationToken,
-    task: Option<tokio::task::JoinHandle<crate::Result<()>>>,
 }
 
 #[derive(Clone)]
@@ -113,32 +104,6 @@ fn override_extraction_groups(
         }
     }
     groups
-}
-
-impl ParallelMinecraftInstall {
-    async fn abort(mut self) {
-        self.cancel.cancel();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-
-    /// Waits for the parallel Minecraft install to finish naturally. Unlike
-    /// [`Self::abort`] this never cancels: when the modpack content has
-    /// already finished, the Minecraft core download must still run to
-    /// completion before the job is reported done.
-    async fn join(mut self) -> crate::Result<()> {
-        if let Some(task) = self.task.take() {
-            task.await??;
-        }
-        Ok(())
-    }
-}
-
-impl Drop for ParallelMinecraftInstall {
-    fn drop(&mut self) {
-        self.cancel.cancel();
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1047,31 +1012,8 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     // download so both progress bars advance at once. The Minecraft install
     // reports on the parallel track (phase + bytes); content stays the main
     // phase. It is aborted if the content flow pauses for the user or fails.
-    let minecraft_cancel = CancellationToken::new();
-    let task_cancel = minecraft_cancel.clone();
-    let minecraft_parallel_reporter = reporter.clone().with_parallel_output();
-    let minecraft_instance_id = instance_id.clone();
-    let minecraft_task = tokio::spawn(async move {
-        tokio::select! {
-            _ = task_cancel.cancelled() => {
-                tracing::debug!(
-                    instance_id = %minecraft_instance_id,
-                    "Parallel Minecraft install aborted before completion"
-                );
-                Ok(())
-            }
-            result = crate::launcher::install_minecraft_for_instance_id_with_reporter(
-                &minecraft_instance_id,
-                false,
-                Some(minecraft_parallel_reporter),
-                crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
-            ) => result,
-        }
-    });
-    let minecraft_install = ParallelMinecraftInstall {
-        cancel: minecraft_cancel,
-        task: Some(minecraft_task),
-    };
+    let minecraft_install =
+        ParallelMinecraftInstall::start(instance_id.clone(), reporter.clone());
     let pack_files = pack.files;
     let mut retry_indices = (0..pack_files.len()).collect::<Vec<_>>();
     let mut required_file_failures = Vec::new();

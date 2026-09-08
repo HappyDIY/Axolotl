@@ -296,6 +296,12 @@ pub(crate) async fn install_hmcl_pack_with_reporter(
     )
     .await?;
 
+    let minecraft_install =
+        super::parallel_minecraft_install::ParallelMinecraftInstall::start(
+            instance_id.clone(),
+            reporter.clone(),
+        );
+
     reporter
         .update(
             InstallPhaseId::ExtractingOverrides,
@@ -314,13 +320,7 @@ pub(crate) async fn install_hmcl_pack_with_reporter(
     )
     .await?;
 
-    crate::launcher::install_minecraft_for_instance_id_with_reporter(
-        &instance_id,
-        false,
-        Some(reporter.clone()),
-        crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
-    )
-    .await?;
+    minecraft_install.join().await?;
 
     if let Some(lite_loader_version) = lite_loader_as_adjunct {
         super::install_mcbbs::install_liteloader_component(

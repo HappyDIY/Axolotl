@@ -346,6 +346,12 @@ pub(crate) async fn install_mcbbs_pack_with_reporter(
     )
     .await?;
 
+    let minecraft_install =
+        super::parallel_minecraft_install::ParallelMinecraftInstall::start(
+            instance_id.clone(),
+            reporter.clone(),
+        );
+
     let curse_files = manifest
         .files
         .iter()
@@ -396,13 +402,7 @@ pub(crate) async fn install_mcbbs_pack_with_reporter(
     )
     .await?;
 
-    crate::launcher::install_minecraft_for_instance_id_with_reporter(
-        &instance_id,
-        false,
-        Some(reporter.clone()),
-        crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
-    )
-    .await?;
+    minecraft_install.join().await?;
 
     if let Some(lite_loader_version) = lite_loader_as_adjunct {
         install_liteloader_component(
