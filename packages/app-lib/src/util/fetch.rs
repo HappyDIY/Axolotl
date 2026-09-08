@@ -7127,13 +7127,18 @@ mod tests {
     static H2_FALLBACK_TEST_LOCK: LazyLock<std::sync::Mutex<()>> =
         LazyLock::new(|| std::sync::Mutex::new(()));
 
-    async fn spawn_range_server(
-        data: Arc<Vec<u8>>,
+    #[derive(Clone, Copy, Debug, Default)]
+    struct RangeServerBehavior {
         wrong_content_range: bool,
         ignore_range: bool,
         slow_body: bool,
         fail_first_range: bool,
         stall_first_range: bool,
+    }
+
+    async fn spawn_range_server(
+        data: Arc<Vec<u8>>,
+        behavior: RangeServerBehavior,
     ) -> (
         String,
         Arc<AtomicUsize>,
@@ -7184,7 +7189,7 @@ mod tests {
                         .lines()
                         .find_map(|line| line.strip_prefix("range: bytes="));
                     let (headers, body) = if let Some(range) =
-                        requested_range.filter(|_| !ignore_range)
+                        requested_range.filter(|_| !behavior.ignore_range)
                     {
                         let Some((start, end)) = range.split_once('-') else {
                             return;
@@ -7201,7 +7206,7 @@ mod tests {
                             end
                         };
                         let body = &data[start as usize..=end as usize];
-                        let reported_start = if wrong_content_range {
+                        let reported_start = if behavior.wrong_content_range {
                             start.saturating_add(1)
                         } else {
                             start
@@ -7230,14 +7235,14 @@ mod tests {
                         return;
                     }
                     if requested_range.is_some()
-                        && stall_first_range
+                        && behavior.stall_first_range
                         && !stalled_range.swap(true, Ordering::Relaxed)
                     {
                         tokio::time::sleep(time::Duration::from_secs(1)).await;
                         return;
                     }
                     if requested_range.is_some()
-                        && fail_first_range
+                        && behavior.fail_first_range
                         && !failed_range.swap(true, Ordering::Relaxed)
                     {
                         let midpoint = body.len() / 2;
@@ -7248,7 +7253,7 @@ mod tests {
                         if stream.write_all(chunk).await.is_err() {
                             return;
                         }
-                        if slow_body {
+                        if behavior.slow_body {
                             tokio::time::sleep(time::Duration::from_millis(
                                 100,
                             ))
@@ -7355,20 +7360,46 @@ mod tests {
         )
     }
 
-    async fn spawn_http_fixture(
-        status_line: &str,
-        extra_headers: &str,
-        body: impl Into<Vec<u8>>,
+    struct HttpFixture {
+        status_line: &'static str,
+        extra_headers: &'static str,
+        body: Vec<u8>,
         response_delay: Duration,
+    }
+
+    impl HttpFixture {
+        fn new(status_line: &'static str, body: impl Into<Vec<u8>>) -> Self {
+            Self {
+                status_line,
+                extra_headers: "",
+                body: body.into(),
+                response_delay: Duration::ZERO,
+            }
+        }
+
+        fn with_headers(mut self, headers: &'static str) -> Self {
+            self.extra_headers = headers;
+            self
+        }
+
+        fn with_delay(mut self, delay: Duration) -> Self {
+            self.response_delay = delay;
+            self
+        }
+    }
+
+    async fn spawn_http_fixture(
+        fixture: HttpFixture,
     ) -> (String, Arc<AtomicUsize>, tokio::task::JoinHandle<()>) {
         let listener =
             tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let requests = Arc::new(AtomicUsize::new(0));
         let request_count = Arc::clone(&requests);
-        let status_line = status_line.to_string();
-        let extra_headers = extra_headers.to_string();
-        let body = Arc::new(body.into());
+        let status_line = fixture.status_line.to_string();
+        let extra_headers = fixture.extra_headers.to_string();
+        let body = Arc::new(fixture.body);
+        let response_delay = fixture.response_delay;
         let handle = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
@@ -7719,7 +7750,7 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let (url, requests, normal_requests, server) =
-            spawn_range_server(data, false, false, false, false, false).await;
+            spawn_range_server(data, RangeServerBehavior::default()).await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("batch.bin");
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -7747,10 +7778,10 @@ mod tests {
     #[tokio::test]
     async fn file_download_drops_a_missing_route_before_later_rounds() {
         let (missing_url, missing_requests, missing_server) =
-            spawn_http_fixture("404 Not Found", "", Vec::new(), Duration::ZERO)
+            spawn_http_fixture(HttpFixture::new("404 Not Found", Vec::new()))
                 .await;
         let (fallback_url, fallback_requests, fallback_server) =
-            spawn_http_fixture("200 OK", "", b"done", Duration::ZERO).await;
+            spawn_http_fixture(HttpFixture::new("200 OK", b"done")).await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("fallback.bin");
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -7778,12 +7809,10 @@ mod tests {
 
     #[tokio::test]
     async fn file_download_bounds_server_error_retries_to_three_rounds() {
-        let (url, requests, server) = spawn_http_fixture(
+        let (url, requests, server) = spawn_http_fixture(HttpFixture::new(
             "503 Service Unavailable",
-            "",
             Vec::new(),
-            Duration::ZERO,
-        )
+        ))
         .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("unavailable.bin");
@@ -7808,14 +7837,12 @@ mod tests {
     async fn rate_limited_route_cools_down_and_switches_without_waiting() {
         let (limited_url, limited_requests, limited_server) =
             spawn_http_fixture(
-                "429 Too Many Requests",
-                "Retry-After: 60\r\n",
-                Vec::new(),
-                Duration::ZERO,
+                HttpFixture::new("429 Too Many Requests", Vec::new())
+                    .with_headers("Retry-After: 60\r\n"),
             )
             .await;
         let (fallback_url, fallback_requests, fallback_server) =
-            spawn_http_fixture("200 OK", "", b"done", Duration::ZERO).await;
+            spawn_http_fixture(HttpFixture::new("200 OK", b"done")).await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("rate-limit-fallback.bin");
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -7847,18 +7874,15 @@ mod tests {
     async fn metadata_hedging_returns_the_first_valid_response() {
         let (primary_url, primary_requests, primary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                br#"{"source":"primary"}"#,
-                Duration::from_millis(300),
+                HttpFixture::new("200 OK", br#"{"source":"primary"}"#)
+                    .with_headers("Content-Type: application/json\r\n")
+                    .with_delay(Duration::from_millis(300)),
             )
             .await;
         let (secondary_url, secondary_requests, secondary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                br#"{"source":"secondary"}"#,
-                Duration::ZERO,
+                HttpFixture::new("200 OK", br#"{"source":"secondary"}"#)
+                    .with_headers("Content-Type: application/json\r\n"),
             )
             .await;
         let routes = [
@@ -7896,18 +7920,14 @@ mod tests {
     async fn metadata_hedging_rejects_a_fast_invalid_primary() {
         let (primary_url, primary_requests, primary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                b"not-json",
-                Duration::ZERO,
+                HttpFixture::new("200 OK", b"not-json")
+                    .with_headers("Content-Type: application/json\r\n"),
             )
             .await;
         let (secondary_url, secondary_requests, secondary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                br#"{"valid":true}"#,
-                Duration::ZERO,
+                HttpFixture::new("200 OK", br#"{"valid":true}"#)
+                    .with_headers("Content-Type: application/json\r\n"),
             )
             .await;
         let routes = [
@@ -7942,18 +7962,14 @@ mod tests {
     async fn metadata_hedging_does_not_start_a_loser_for_a_fast_primary() {
         let (primary_url, primary_requests, primary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                br#"{"valid":true}"#,
-                Duration::ZERO,
+                HttpFixture::new("200 OK", br#"{"valid":true}"#)
+                    .with_headers("Content-Type: application/json\r\n"),
             )
             .await;
         let (secondary_url, secondary_requests, secondary_server) =
             spawn_http_fixture(
-                "200 OK",
-                "Content-Type: application/json\r\n",
-                br#"{"valid":false}"#,
-                Duration::ZERO,
+                HttpFixture::new("200 OK", br#"{"valid":false}"#)
+                    .with_headers("Content-Type: application/json\r\n"),
             )
             .await;
         let routes = [
@@ -8652,7 +8668,7 @@ mod tests {
     async fn route_probe_selects_a_faster_distinct_authority() {
         let data = Arc::new(vec![7_u8; ROUTE_PROBE_BYTES as usize * 2]);
         let (url, requests, _, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let current = route(
             "https://route-probe-current.invalid/file.jar".to_string(),
@@ -8756,9 +8772,14 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
-        let (url, requests, normal_requests, server) =
-            spawn_range_server(data.clone(), false, false, true, false, false)
-                .await;
+        let (url, requests, normal_requests, server) = spawn_range_server(
+            data.clone(),
+            RangeServerBehavior {
+                slow_body: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let route = DownloadRoute {
             url: url.clone(),
             source: DownloadRouteSource::Alternate,
@@ -8830,8 +8851,14 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
-        let (url, requests, _, server) =
-            spawn_range_server(data, false, false, false, false, true).await;
+        let (url, requests, _, server) = spawn_range_server(
+            data,
+            RangeServerBehavior {
+                stall_first_range: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let route = DownloadRoute {
             url: url.clone(),
             source: DownloadRouteSource::Alternate,
@@ -8901,7 +8928,14 @@ mod tests {
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (target_url, range_requests, normal_requests, range_server) =
-            spawn_range_server(data, false, false, false, true, false).await;
+            spawn_range_server(
+                data,
+                RangeServerBehavior {
+                    fail_first_range: true,
+                    ..Default::default()
+                },
+            )
+            .await;
         let (redirect_url, redirect_requests, redirect_server) =
             spawn_redirect_server(target_url, Duration::from_millis(50)).await;
         let route = DownloadRoute {
@@ -8958,8 +8992,14 @@ mod tests {
                 .collect::<Vec<_>>(),
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
-        let (url, requests, _, server) =
-            spawn_range_server(data, false, false, false, true, false).await;
+        let (url, requests, _, server) = spawn_range_server(
+            data,
+            RangeServerBehavior {
+                fail_first_range: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let route = DownloadRoute {
             url: url.clone(),
             source: DownloadRouteSource::Alternate,
@@ -9008,9 +9048,14 @@ mod tests {
         let _guard = RANGE_SPLITTING_TEST_LOCK.lock().await;
         RANGE_SPLITTING_PROTOCOL_FAILURES.lock().clear();
         let data = Arc::new(vec![7_u8; 1024 * 1024]);
-        let (url, _, _, server) =
-            spawn_range_server(data.clone(), true, false, false, false, false)
-                .await;
+        let (url, _, _, server) = spawn_range_server(
+            data.clone(),
+            RangeServerBehavior {
+                wrong_content_range: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let route = DownloadRoute {
             url: url.clone(),
             source: DownloadRouteSource::Alternate,
@@ -9086,9 +9131,14 @@ mod tests {
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>(),
         );
-        let (url, requests, normal_requests, server) =
-            spawn_range_server(data.clone(), false, true, false, false, false)
-                .await;
+        let (url, requests, normal_requests, server) = spawn_range_server(
+            data.clone(),
+            RangeServerBehavior {
+                ignore_range: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("ignored-range.bin");
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -9124,8 +9174,14 @@ mod tests {
         RANGE_SPLITTING_PROTOCOL_FAILURES.lock().clear();
         let size = (SEGMENTED_DOWNLOAD_THRESHOLD * 4) as usize;
         let data = Arc::new(vec![13_u8; size]);
-        let (url, _, _, server) =
-            spawn_range_server(data, false, false, true, false, false).await;
+        let (url, _, _, server) = spawn_range_server(
+            data,
+            RangeServerBehavior {
+                slow_body: true,
+                ..Default::default()
+            },
+        )
+        .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("canceled-segments.bin");
         let destination_for_task = destination.clone();
@@ -9166,7 +9222,7 @@ mod tests {
         let data = Arc::new(b"already complete".to_vec());
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (url, requests, _, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("existing.bin");
@@ -9198,7 +9254,7 @@ mod tests {
         let data = Arc::new(b"correct content".to_vec());
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (url, requests, _, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("stale.bin");
@@ -9237,11 +9293,7 @@ mod tests {
             let data = Arc::new(vec![11_u8; 1024]);
             let (url, requests, normal_requests, server) = spawn_range_server(
                 data.clone(),
-                false,
-                false,
-                false,
-                false,
-                false,
+                RangeServerBehavior::default(),
             )
             .await;
             let directory = tempfile::tempdir().unwrap();
@@ -9278,7 +9330,7 @@ mod tests {
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (url, requests, normal_requests, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("resumed.bin");
@@ -9328,7 +9380,7 @@ mod tests {
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (url, _, _, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("stale.bin");
@@ -9368,7 +9420,7 @@ mod tests {
         let stale = Arc::new(vec![0xAB_u8; size - 4096]);
         let hash = sha1_smol::Sha1::from(&expected[..]).hexdigest();
         let (stale_url, stale_requests, stale_normal_requests, stale_server) =
-            spawn_range_server(stale, false, false, false, false, false).await;
+            spawn_range_server(stale, RangeServerBehavior::default()).await;
         let (
             official_url,
             official_requests,
@@ -9376,11 +9428,7 @@ mod tests {
             official_server,
         ) = spawn_range_server(
             expected.clone(),
-            false,
-            false,
-            false,
-            false,
-            false,
+            RangeServerBehavior::default(),
         )
         .await;
         let directory = tempfile::tempdir().unwrap();
@@ -9427,7 +9475,7 @@ mod tests {
         );
         let hash = sha1_smol::Sha1::from(&data[..]).hexdigest();
         let (url, requests, normal_requests, server) =
-            spawn_range_server(data.clone(), false, false, false, false, false)
+            spawn_range_server(data.clone(), RangeServerBehavior::default())
                 .await;
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("fallback-resume.bin");
