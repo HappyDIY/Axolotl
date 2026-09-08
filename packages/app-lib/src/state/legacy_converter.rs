@@ -619,6 +619,7 @@ where
         custom_env_vars: input.custom_env_vars,
         memory: input.memory,
         force_fullscreen: input.force_fullscreen,
+        maximize_window: None,
         game_resolution: input.game_resolution,
         launch_preparation_timeout: None,
         hooks: input.hooks,

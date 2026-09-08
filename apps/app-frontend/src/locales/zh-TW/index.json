@@ -6530,6 +6530,15 @@
   "app.settings.defaults.fullscreen-description": {
     "message": "啟動時覆寫 options.txt 檔案，使遊戲以全螢幕模式執行。"
   },
+  "app.settings.defaults.maximize-window": {
+    "message": "最大化視窗"
+  },
+  "app.settings.defaults.maximize-window-description": {
+    "message": "啟動時最大化 Minecraft 視窗。"
+  },
+  "app.settings.defaults.maximize-window.unsupported": {
+    "message": "目前的作業系統暫不支援。"
+  },
   "app.settings.defaults.height": {
     "message": "高度"
   },
@@ -8668,6 +8677,15 @@
   },
   "instance.settings.tabs.window.fullscreen.description": {
     "message": "使遊戲啟動時進入全螢幕模式（透過 options.txt）。"
+  },
+  "instance.settings.tabs.window.maximize-window": {
+    "message": "最大化視窗"
+  },
+  "instance.settings.tabs.window.maximize-window.description": {
+    "message": "啟動時最大化 Minecraft 視窗。"
+  },
+  "instance.settings.tabs.window.maximize-window.unsupported": {
+    "message": "目前的作業系統暫不支援。"
   },
   "instance.settings.tabs.window.height": {
     "message": "高度"

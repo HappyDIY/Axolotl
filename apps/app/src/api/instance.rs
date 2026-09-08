@@ -135,6 +135,7 @@ pub struct Instance {
     pub custom_env_vars: Option<Vec<(String, String)>>,
     pub memory: Option<MemorySettings>,
     pub force_fullscreen: Option<bool>,
+    pub maximize_window: Option<bool>,
     pub game_resolution: Option<WindowSize>,
     pub launch_preparation_timeout: Option<u64>,
     pub hooks: Hooks,
@@ -258,6 +259,12 @@ pub struct EditInstance {
         skip_serializing_if = "Option::is_none",
         with = "serde_with::rust::double_option"
     )]
+    pub maximize_window: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
     pub game_resolution: Option<Option<WindowSize>>,
     #[serde(
         default,
@@ -307,6 +314,7 @@ impl From<InstanceMetadata> for Instance {
             custom_env_vars: metadata.launch_overrides.custom_env_vars,
             memory: metadata.launch_overrides.memory,
             force_fullscreen: metadata.launch_overrides.force_fullscreen,
+            maximize_window: metadata.launch_overrides.maximize_window,
             game_resolution: metadata.launch_overrides.game_resolution,
             launch_preparation_timeout: metadata
                 .launch_overrides
@@ -458,6 +466,7 @@ fn edit_to_core(edit_instance: EditInstance) -> Result<CoreEditInstance> {
             custom_env_vars: edit_instance.custom_env_vars,
             memory: edit_instance.memory,
             force_fullscreen: edit_instance.force_fullscreen,
+            maximize_window: edit_instance.maximize_window,
             game_resolution: edit_instance.game_resolution,
             launch_preparation_timeout: edit_instance
                 .launch_preparation_timeout,

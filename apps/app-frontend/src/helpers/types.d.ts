@@ -41,6 +41,7 @@ export type GameInstance = {
 
 	memory?: MemorySettings
 	force_fullscreen?: boolean
+	maximize_window?: boolean
 	game_resolution?: [number, number]
 	launch_preparation_timeout?: number | null
 	hooks: Hooks
@@ -226,6 +227,7 @@ type AppSettings = {
 	custom_env_vars: [string, string][]
 	memory: MemorySettings
 	force_fullscreen: boolean
+	maximize_window: boolean
 	game_resolution: [number, number]
 	hide_on_process_start: boolean
 	enter_lightweight_mode_on_game_launch: boolean

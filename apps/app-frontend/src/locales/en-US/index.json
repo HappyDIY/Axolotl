@@ -1,16 +1,4 @@
 {
-  "app.settings.developer.announcement-preview": {"message":"Announcement preview"},
-  "app.settings.developer.announcement-preview-description": {"message":"Preview the real announcement components using local sample content, without fetching or marking real announcements as read."},
-  "app.settings.developer.preview-with-action": {"message":"Include an optional external-link button"},
-  "app.settings.developer.preview-announcement-modal": {"message":"Preview startup modal"},
-  "app.settings.developer.preview-announcement-popup": {"message":"Preview Popup notification"},
-  "app.remote-announcements.preview-title": {"message":"Announcement style preview"},
-  "app.remote-announcements.preview-summary": {"message":"This is a local preview. Select View announcement to preview the full Markdown content."},
-  "app.remote-announcements.preview-action": {"message":"Visit website"},
-  "app.remote-announcements.preview-content": {"message":"## Announcement preview\n\nThis is **sample content**, not a published announcement.\n\n- Supports headings, lists, and links\n- Close buttons are always available\n\n> Previewing does not change real announcement read status.\n\n| Type | Display |\n| --- | --- |\n| Modal | Full Markdown content |\n| Popup | Summary, then full content |\n\n[Visit the website](https://axlmc.org)"},
-  "app.remote-announcements.view": { "message": "View announcement" },
-  "app.remote-announcements.unread": { "message": "Unread" },
-  "app.remote-announcements.read-all": { "message": "Mark all announcements as read" },
   "app.account.signed-in-as": {
     "message": "Signed in as"
   },
@@ -22,18 +10,6 @@
   },
   "app.action-bar.downloads": {
     "message": "Downloads"
-  },
-  "app.action-bar.notifications": {
-    "message": "Notifications"
-  },
-  "app.action-bar.notifications.clear": {
-    "message": "Clear all"
-  },
-  "app.action-bar.notifications.dismiss": {
-    "message": "Dismiss notification"
-  },
-  "app.action-bar.notifications.empty": {
-    "message": "No notifications"
   },
   "app.action-bar.exporting-modpack": {
     "message": "Exporting modpack"
@@ -154,6 +130,18 @@
   },
   "app.action-bar.no-instances-running": {
     "message": "No instances running"
+  },
+  "app.action-bar.notifications": {
+    "message": "Notifications"
+  },
+  "app.action-bar.notifications.clear": {
+    "message": "Clear all"
+  },
+  "app.action-bar.notifications.dismiss": {
+    "message": "Dismiss notification"
+  },
+  "app.action-bar.notifications.empty": {
+    "message": "No notifications"
   },
   "app.action-bar.offline": {
     "message": "Offline"
@@ -1169,6 +1157,9 @@
   "app.curseforge.network-download-failed.notification-title": {
     "message": "Could not download from CurseForge"
   },
+  "app.direct-link-sync.issues-title": {
+    "message": "External Minecraft instances need attention"
+  },
   "app.downloads.action-needed": {
     "message": "Action needed"
   },
@@ -1265,11 +1256,20 @@
   "app.downloads.item-status.completed": {
     "message": "Completed"
   },
+  "app.downloads.item-status.connecting": {
+    "message": "Connecting"
+  },
   "app.downloads.item-status.downloading": {
     "message": "Downloading"
   },
   "app.downloads.item-status.failed": {
     "message": "Failed"
+  },
+  "app.downloads.item-status.finalizing": {
+    "message": "Finalizing"
+  },
+  "app.downloads.item-status.metadata": {
+    "message": "Loading metadata"
   },
   "app.downloads.item-status.pending-verification": {
     "message": "Pending verification"
@@ -1279,6 +1279,15 @@
   },
   "app.downloads.item-status.verifying": {
     "message": "Verifying"
+  },
+  "app.downloads.item-status.waiting-for-database": {
+    "message": "Waiting for database"
+  },
+  "app.downloads.item-status.waiting-for-resource": {
+    "message": "Waiting for download resources"
+  },
+  "app.downloads.item-status.worker-started": {
+    "message": "Starting"
   },
   "app.downloads.item-status.writing": {
     "message": "Writing"
@@ -4515,7 +4524,7 @@
     "message": "Deep underground"
   },
   "app.lab.seed-map.elevation.shallow-underground": {
-    "message": "Underground"
+    "message": "Shallow underground"
   },
   "app.lab.seed-map.elevation.surface": {
     "message": "Surface"
@@ -5130,7 +5139,7 @@
     "message": "No log content was found to share or analyze. Make sure the instance has logs generated in the last few minutes."
   },
   "app.minecraft-crash.preparation-timed-out": {
-    "message": "Launch preparation did not finish within the configured timeout and was cancelled. Check the Java path, launch hooks, wrapper command, and network connection, then try again."
+    "message": "Launch preparation did not finish within 60 seconds and was cancelled. Check the Java path, launch hooks, wrapper command, and network connection, then try again."
   },
   "app.minecraft-crash.preview-instance": {
     "message": "Minecraft test instance"
@@ -6020,6 +6029,27 @@
   "app.project.versions.start-server": {
     "message": "Create server"
   },
+  "app.remote-announcements.preview-action": {
+    "message": "Visit website"
+  },
+  "app.remote-announcements.preview-content": {
+    "message": "## Announcement preview\n\nThis is **sample content**, not a published announcement.\n\n- Supports headings, lists, and links\n- Close buttons are always available\n\n> Previewing does not change real announcement read status.\n\n| Type | Display |\n| --- | --- |\n| Modal | Full Markdown content |\n| Popup | Summary, then full content |\n\n[Visit the website](https://axlmc.org)"
+  },
+  "app.remote-announcements.preview-summary": {
+    "message": "This is a local preview. Select View announcement to preview the full Markdown content."
+  },
+  "app.remote-announcements.preview-title": {
+    "message": "Announcement style preview"
+  },
+  "app.remote-announcements.read-all": {
+    "message": "Mark all announcements as read"
+  },
+  "app.remote-announcements.unread": {
+    "message": "Unread"
+  },
+  "app.remote-announcements.view": {
+    "message": "View announcement"
+  },
   "app.restarting": {
     "message": "Restarting..."
   },
@@ -6654,7 +6684,7 @@
     "message": "Click to open a hidden Mini Game"
   },
   "app.settings.about.easteregg.contributors-title": {
-    "message": "Contributors' mini game"
+    "message": "贡献者彩蛋"
   },
   "app.settings.about.easteregg.game-title": {
     "message": "Mini Game"
@@ -6812,6 +6842,15 @@
   "app.settings.defaults.java-arguments-placeholder": {
     "message": "Enter Java arguments..."
   },
+  "app.settings.defaults.maximize-window": {
+    "message": "Maximize window"
+  },
+  "app.settings.defaults.maximize-window-description": {
+    "message": "Maximize the Minecraft window when it starts."
+  },
+  "app.settings.defaults.maximize-window.unsupported": {
+    "message": "Not supported on this operating system."
+  },
   "app.settings.defaults.memory": {
     "message": "Memory allocated"
   },
@@ -6862,6 +6901,21 @@
   },
   "app.settings.developer-mode-enabled": {
     "message": "Developer mode enabled."
+  },
+  "app.settings.developer.announcement-preview": {
+    "message": "Announcement preview"
+  },
+  "app.settings.developer.announcement-preview-description": {
+    "message": "Preview the real announcement components using local sample content, without fetching or marking real announcements as read."
+  },
+  "app.settings.developer.preview-announcement-modal": {
+    "message": "Preview startup modal"
+  },
+  "app.settings.developer.preview-announcement-popup": {
+    "message": "Preview Popup notification"
+  },
+  "app.settings.developer.preview-with-action": {
+    "message": "Include an optional external-link button"
   },
   "app.settings.downloading": {
     "message": "Downloading v{version}"
@@ -6983,6 +7037,9 @@
   "app.settings.privacy.telemetry-description": {
     "message": "Send one anonymous daily activity signal to improve usage statistics. Minecraft logs and account credentials are never uploaded."
   },
+  "app.settings.resources.add-minecraft-directory": {
+    "message": "Add .minecraft directory"
+  },
   "app.settings.resources.app-cache": {
     "message": "App cache"
   },
@@ -6992,32 +7049,14 @@
   "app.settings.resources.app-directory": {
     "message": "App directory"
   },
-  "app.settings.resources.axolotl-data-directory": {
-    "message": "Axolotl data directory"
-  },
   "app.settings.resources.app-directory-description": {
     "message": "The directory where the launcher stores all of its files. Changes apply after restarting the launcher."
   },
   "app.settings.resources.app-directory-description-portable": {
     "message": "You are currently running in portable mode. The app directory is fixed and cannot be changed."
   },
-  "app.settings.resources.minecraft-directories": {
-    "message": "Minecraft directories"
-  },
-  "app.settings.resources.minecraft-directories-description": {
-    "message": "Add one or more .minecraft folders for instances that use an external game directory. These folders are kept separate from Axolotl data."
-  },
-  "app.settings.resources.add-minecraft-directory": {
-    "message": "Add .minecraft directory"
-  },
-  "app.settings.resources.select-minecraft-directory": {
-    "message": "Select a .minecraft directory"
-  },
-  "app.settings.resources.remove-minecraft-directory": {
-    "message": "Remove .minecraft directory"
-  },
-  "app.settings.resources.minecraft-directory-must-end-with": {
-    "message": "The selected folder must be named .minecraft."
+  "app.settings.resources.axolotl-data-directory": {
+    "message": "Axolotl data directory"
   },
   "app.settings.resources.concurrency.manual": {
     "message": "Manual"
@@ -7069,6 +7108,15 @@
   },
   "app.settings.resources.maximum-writes-description": {
     "message": "The maximum number of files the launcher can write to disk at once. Use a lower value if you frequently get I/O errors. An app restart is required."
+  },
+  "app.settings.resources.minecraft-directories": {
+    "message": "Minecraft directories"
+  },
+  "app.settings.resources.minecraft-directories-description": {
+    "message": "Add one or more .minecraft folders for instances that use an external game directory. These folders are kept separate from Axolotl data."
+  },
+  "app.settings.resources.minecraft-directory-must-end-with": {
+    "message": "The selected folder must be named .minecraft."
   },
   "app.settings.resources.minecraft-file-source": {
     "message": "Minecraft files, loaders, and Java"
@@ -7172,6 +7220,9 @@
   "app.settings.resources.purge-confirm-title": {
     "message": "Are you sure you want to purge the cache?"
   },
+  "app.settings.resources.remove-minecraft-directory": {
+    "message": "Remove .minecraft directory"
+  },
   "app.settings.resources.reset-import-directory": {
     "message": "Use system Downloads folder"
   },
@@ -7180,6 +7231,9 @@
   },
   "app.settings.resources.select-import-directory": {
     "message": "Select monitored folder"
+  },
+  "app.settings.resources.select-minecraft-directory": {
+    "message": "Select a .minecraft directory"
   },
   "app.settings.resources.source.automatic": {
     "message": "Automatic (recommended)"
@@ -7392,7 +7446,7 @@
     "message": "Copy database"
   },
   "app.settings.updates.channel.copy-database-description": {
-    "message": "To prevent potential issues, the Beta version will use separate data storage so as not to affect the proper functioning of the official version. It seems this is your first time using the Beta version. Would you like to copy the data from the stable version to the Beta version? This action cannot be automatically undone."
+    "message": "Would you like to copy your Release database into the Beta channel? This cannot be undone automatically."
   },
   "app.settings.updates.channel.copy-database-title": {
     "message": "Copy Release data to Beta?"
@@ -7486,6 +7540,9 @@
   },
   "app.settings.updates.database-operation.release-to-beta": {
     "message": "Copy Release to Beta"
+  },
+  "app.settings.updates.database-operation.success": {
+    "message": "{source} database was copied to {target} successfully."
   },
   "app.settings.updates.disabled": {
     "message": "Updates are disabled in this build."
@@ -7931,14 +7988,8 @@
   "app.update-announcement.version": {
     "message": "Version {version}"
   },
-  "app.update-popup.apt-update": {
-    "message": "Update"
-  },
   "app.update-popup.body.download-complete": {
     "message": "Axolotl Launcher v{version} has finished downloading. Reload to update now, or automatically when you close Axolotl Launcher."
-  },
-  "app.update-popup.body.linux": {
-    "message": "Axolotl Launcher v{version} is available. Use your package manager to update for the latest features and fixes!"
   },
   "app.update-popup.body.metered": {
     "message": "Axolotl Launcher v{version} is available now! Since you're on a metered network, we didn't automatically download it."
@@ -8333,14 +8384,11 @@
   "app.worlds.title": {
     "message": "Worlds"
   },
-  "create.back": {
-    "message": "Back to Library"
-  },
-  "create.pcl-hmcl-hint": {
-    "message": "Using PCL / HMCL?"
-  },
   "create.add-minecraft-folder": {
     "message": "Add .minecraft folder"
+  },
+  "create.back": {
+    "message": "Back to Library"
   },
   "create.import.description": {
     "message": "Import instances from other launchers or install a modpack."
@@ -8353,6 +8401,9 @@
   },
   "create.new.title": {
     "message": "Start Fresh"
+  },
+  "create.pcl-hmcl-hint": {
+    "message": "Using PCL / HMCL?"
   },
   "create.subtitle": {
     "message": "Start a new adventure or bring your existing worlds"
@@ -8801,14 +8852,14 @@
   "instance.settings.tabs.general.game-dir.description": {
     "message": "Uses a separate folder as the working directory for this instance. The game reads mods, saves, configs, and resource packs from that folder instead of the managed instance folder."
   },
+  "instance.settings.tabs.general.game-dir.external-note": {
+    "message": "This instance uses an external .minecraft folder managed in place."
+  },
   "instance.settings.tabs.general.game-dir.isolated": {
     "message": "Version isolated (stored in versions/)"
   },
   "instance.settings.tabs.general.game-dir.managed-note": {
     "message": "This instance uses the Axolotl-managed folder."
-  },
-  "instance.settings.tabs.general.game-dir.external-note": {
-    "message": "This instance uses an external .minecraft folder and manages files in place."
   },
   "instance.settings.tabs.general.game-dir.move-note": {
     "message": "Switching isolation only updates the launcher path. Move the mods, saves, and config folders yourself to match."
@@ -8965,6 +9016,15 @@
   },
   "instance.settings.tabs.window.height.enter": {
     "message": "Enter height..."
+  },
+  "instance.settings.tabs.window.maximize-window": {
+    "message": "Maximize window"
+  },
+  "instance.settings.tabs.window.maximize-window.description": {
+    "message": "Maximize the Minecraft window when launched."
+  },
+  "instance.settings.tabs.window.maximize-window.unsupported": {
+    "message": "Not supported on this operating system."
   },
   "instance.settings.tabs.window.width": {
     "message": "Width"

@@ -1,13 +1,19 @@
 {
-  "app.settings.developer.announcement-preview": {"message":"公告样式预览"},
-  "app.settings.developer.announcement-preview-description": {"message":"使用本地示例预览真实公告组件，不请求远端公告，也不改变真实公告的已读状态。"},
-  "app.settings.developer.preview-with-action": {"message":"显示可选的外部链接按钮"},
-  "app.settings.developer.preview-announcement-modal": {"message":"预览启动弹窗"},
-  "app.settings.developer.preview-announcement-popup": {"message":"预览 Popup 通知"},
-  "app.remote-announcements.preview-title": {"message":"公告样式预览"},
-  "app.remote-announcements.preview-summary": {"message":"这是一条本地预览通知，点击“查看公告”可查看完整 Markdown 正文。"},
-  "app.remote-announcements.preview-action": {"message":"访问官网"},
-  "app.remote-announcements.preview-content": {"message":"## 公告预览\n\n这是**示例正文**，不是已发布公告。\n\n- 支持标题、列表和链接\n- 默认自带关闭按钮\n\n> 预览不会影响真实公告的已读状态。\n\n| 类型 | 展示方式 |\n| --- | --- |\n| 启动弹窗 | 完整 Markdown 正文 |\n| Popup 通知 | 先显示摘要，再查看全文 |\n\n[访问官网](https://axlmc.org)"},
+  "app.settings.developer.announcement-preview": { "message": "公告样式预览" },
+  "app.settings.developer.announcement-preview-description": {
+    "message": "使用本地示例预览真实公告组件，不请求远端公告，也不改变真实公告的已读状态。"
+  },
+  "app.settings.developer.preview-with-action": { "message": "显示可选的外部链接按钮" },
+  "app.settings.developer.preview-announcement-modal": { "message": "预览启动弹窗" },
+  "app.settings.developer.preview-announcement-popup": { "message": "预览 Popup 通知" },
+  "app.remote-announcements.preview-title": { "message": "公告样式预览" },
+  "app.remote-announcements.preview-summary": {
+    "message": "这是一条本地预览通知，点击“查看公告”可查看完整 Markdown 正文。"
+  },
+  "app.remote-announcements.preview-action": { "message": "访问官网" },
+  "app.remote-announcements.preview-content": {
+    "message": "## 公告预览\n\n这是**示例正文**，不是已发布公告。\n\n- 支持标题、列表和链接\n- 默认自带关闭按钮\n\n> 预览不会影响真实公告的已读状态。\n\n| 类型 | 展示方式 |\n| --- | --- |\n| 启动弹窗 | 完整 Markdown 正文 |\n| Popup 通知 | 先显示摘要，再查看全文 |\n\n[访问官网](https://axlmc.org)"
+  },
   "app.remote-announcements.view": { "message": "查看公告" },
   "app.remote-announcements.unread": { "message": "未读" },
   "app.remote-announcements.read-all": { "message": "将所有公告标为已读" },
@@ -1169,6 +1175,9 @@
   "app.curseforge.network-download-failed.notification-title": {
     "message": "CurseForge 下载失败"
   },
+  "app.direct-link-sync.issues-title": {
+    "message": "外部 Minecraft 实例需要处理"
+  },
   "app.downloads.action-needed": {
     "message": "需要操作"
   },
@@ -1265,11 +1274,20 @@
   "app.downloads.item-status.completed": {
     "message": "已完成"
   },
+  "app.downloads.item-status.connecting": {
+    "message": "连接中"
+  },
   "app.downloads.item-status.downloading": {
     "message": "下载中"
   },
   "app.downloads.item-status.failed": {
     "message": "失败"
+  },
+  "app.downloads.item-status.finalizing": {
+    "message": "正在完成"
+  },
+  "app.downloads.item-status.metadata": {
+    "message": "正在加载元数据"
   },
   "app.downloads.item-status.pending-verification": {
     "message": "待检查"
@@ -1279,6 +1297,15 @@
   },
   "app.downloads.item-status.verifying": {
     "message": "校验中"
+  },
+  "app.downloads.item-status.waiting-for-database": {
+    "message": "正在等待数据库"
+  },
+  "app.downloads.item-status.waiting-for-resource": {
+    "message": "正在等待下载资源"
+  },
+  "app.downloads.item-status.worker-started": {
+    "message": "正在启动"
   },
   "app.downloads.item-status.writing": {
     "message": "写入中"
@@ -6788,6 +6815,15 @@
   "app.settings.defaults.fullscreen-description": {
     "message": "启动时覆盖 options.txt 文件，使游戏以全屏模式运行。"
   },
+  "app.settings.defaults.maximize-window": {
+    "message": "最大化窗口"
+  },
+  "app.settings.defaults.maximize-window-description": {
+    "message": "启动时最大化 Minecraft 窗口。"
+  },
+  "app.settings.defaults.maximize-window.unsupported": {
+    "message": "当前操作系统暂不支持。"
+  },
   "app.settings.defaults.height": {
     "message": "高度"
   },
@@ -8977,6 +9013,15 @@
   },
   "instance.settings.tabs.window.fullscreen.description": {
     "message": "以全屏模式启动游戏（使用options.txt）。"
+  },
+  "instance.settings.tabs.window.maximize-window": {
+    "message": "最大化窗口"
+  },
+  "instance.settings.tabs.window.maximize-window.description": {
+    "message": "启动时最大化 Minecraft 窗口。"
+  },
+  "instance.settings.tabs.window.maximize-window.unsupported": {
+    "message": "当前操作系统暂不支持。"
   },
   "instance.settings.tabs.window.height": {
     "message": "高度"

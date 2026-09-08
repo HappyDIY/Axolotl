@@ -191,6 +191,7 @@ impl ProcessManager {
         instance_name: &str,
         mut mc_command: Command,
         post_exit_command: Option<String>,
+        maximize_window: bool,
         game_dir: PathBuf,
         logs_folder: PathBuf,
         xml_logging: bool,
@@ -213,6 +214,8 @@ impl ProcessManager {
         let mut process = Process {
             metadata: ProcessMetadata {
                 uuid: Uuid::new_v4(),
+                pid: mc_proc.id().unwrap_or_default(),
+                maximize_window,
                 start_time: Utc::now(),
                 instance_id: instance_id.to_string(),
                 instance_path: instance_path.to_string(),
@@ -369,12 +372,16 @@ impl ProcessManager {
             logs_folder,
             post_exit_command,
             metadata.uuid,
+            metadata.pid,
+            metadata.maximize_window,
             crash_reports_before,
         ));
 
         emit_process(
             instance_id,
             metadata.uuid,
+            metadata.pid,
+            metadata.maximize_window,
             ProcessPayloadType::Launched,
             "Launched Minecraft",
             None,
@@ -443,6 +450,8 @@ impl ProcessManager {
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcessMetadata {
     pub uuid: Uuid,
+    pub pid: u32,
+    pub maximize_window: bool,
     pub instance_id: String,
     pub instance_path: String,
     pub instance_name: String,
@@ -932,6 +941,8 @@ impl Process {
         logs_folder: PathBuf,
         post_exit_command: Option<String>,
         uuid: Uuid,
+        pid: u32,
+        _maximize_window: bool,
         crash_reports_before: Option<CrashReportSnapshot>,
     ) -> crate::Result<()> {
         async fn update_playtime(
@@ -1102,6 +1113,8 @@ impl Process {
         emit_process(
             &instance_id,
             uuid,
+            pid,
+            false,
             ProcessPayloadType::Finished,
             "Exited process",
             Some(!mc_exit_status.success() && !manually_killed),

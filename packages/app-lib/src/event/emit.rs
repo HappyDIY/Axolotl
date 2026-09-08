@@ -324,6 +324,8 @@ pub async fn emit_command(command: CommandPayload) -> crate::Result<()> {
 pub async fn emit_process(
     instance_id: &str,
     uuid: Uuid,
+    pid: u32,
+    maximize_window: bool,
     event: ProcessPayloadType,
     message: &str,
     crashed: Option<bool>,
@@ -338,6 +340,8 @@ pub async fn emit_process(
                 ProcessPayload {
                     instance_id: instance_id.to_string(),
                     uuid,
+                    pid,
+                    maximize_window,
                     event,
                     message: message.to_string(),
                     crashed,

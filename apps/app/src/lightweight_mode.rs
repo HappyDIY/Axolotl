@@ -250,6 +250,9 @@ impl LightweightMode {
             None if payload.event == "launched" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    if payload.maximize_window {
+                        maximize_minecraft_window(payload.pid).await;
+                    }
                     let settings = match theseus::settings::get().await {
                         Ok(settings) => settings,
                         Err(error) => {
@@ -325,11 +328,76 @@ impl LightweightMode {
 struct ProcessEventPayload {
     instance_id: String,
     uuid: String,
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    maximize_window: bool,
     event: String,
     crashed: Option<bool>,
     #[serde(default)]
     lightweight_replay: bool,
 }
+
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+#[cfg(target_os = "windows")]
+static MAXIMIZE_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static MAXIMIZE_WINDOW_FOUND: AtomicBool = AtomicBool::new(false);
+#[cfg(target_os = "windows")]
+static MAXIMIZE_WINDOW_ENUMERATION: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn maximize_if_owned_by_process(
+    hwnd: windows::Win32::Foundation::HWND,
+    _: windows::Win32::Foundation::LPARAM,
+) -> windows::core::BOOL {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowThreadProcessId, IsWindowVisible, SW_MAXIMIZE, ShowWindow,
+    };
+    use windows::core::BOOL;
+
+    let mut window_pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+    if window_pid == MAXIMIZE_PROCESS_ID.load(Ordering::Relaxed)
+        && unsafe { IsWindowVisible(hwnd).as_bool() }
+    {
+        let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
+        MAXIMIZE_WINDOW_FOUND.store(true, Ordering::Relaxed);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+#[cfg(target_os = "windows")]
+async fn maximize_minecraft_window(pid: u32) {
+    if pid == 0 {
+        return;
+    }
+
+    for _ in 0..20 {
+        let found = {
+            let _guard = MAXIMIZE_WINDOW_ENUMERATION.lock();
+            MAXIMIZE_PROCESS_ID.store(pid, Ordering::Relaxed);
+            MAXIMIZE_WINDOW_FOUND.store(false, Ordering::Relaxed);
+            unsafe {
+                use windows::Win32::Foundation::LPARAM;
+                use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+                let _ =
+                    EnumWindows(Some(maximize_if_owned_by_process), LPARAM(0));
+            }
+            MAXIMIZE_WINDOW_FOUND.load(Ordering::Relaxed)
+        };
+        if found {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn maximize_minecraft_window(_pid: u32) {}
 
 #[tauri::command]
 pub fn lightweight_mode_frontend_ready(

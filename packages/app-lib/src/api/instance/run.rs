@@ -229,6 +229,10 @@ async fn run_credentials(
         .launch_overrides
         .game_resolution
         .unwrap_or(settings.game_resolution);
+    let maximize_window = context
+        .launch_overrides
+        .maximize_window
+        .unwrap_or(settings.maximize_window);
     let env_args = context
         .launch_overrides
         .custom_env_vars
@@ -351,6 +355,7 @@ async fn run_credentials(
         &wrapper,
         &memory,
         &resolution,
+        maximize_window,
         credentials,
         post_exit_hook,
         &context,
