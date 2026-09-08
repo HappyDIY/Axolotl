@@ -5457,6 +5457,43 @@ async fn prepare_partial_download(
     .await
 }
 
+async fn try_xmcl_download(
+    request: &DownloadRequest,
+    destination: &Path,
+    routes: &[DownloadRoute],
+    semaphore: &FetchSemaphore,
+    part_path: &Path,
+    progress: Option<&mut FetchProgressFn<'_>>,
+) -> Option<crate::Result<DownloadResult>> {
+    if crate::util::download::active_engine()
+        != crate::util::download::DownloadEngine::XmclCompat
+    {
+        return None;
+    }
+    if let Some(first_route) = routes.first() {
+        record_install_download_started(
+            request,
+            first_route,
+            0,
+            routes.len().saturating_mul(3).max(1),
+        )
+        .await;
+    }
+    record_install_download_stage(request, DownloadItemStatus::Downloading)
+        .await;
+    Some(
+        crate::util::download::xmcl::download_to_path(
+            request,
+            destination,
+            routes,
+            semaphore,
+            part_path,
+            progress,
+        )
+        .await,
+    )
+}
+
 async fn download_to_path_inner(
     request: DownloadRequest,
     destination: &Path,
@@ -5498,32 +5535,17 @@ async fn download_to_path_inner(
         return Ok(result);
     }
     prepare_partial_download(&routes, &part_path, &request.integrity).await?;
-    if crate::util::download::active_engine()
-        == crate::util::download::DownloadEngine::XmclCompat
+    if let Some(result) = try_xmcl_download(
+        &request,
+        destination,
+        &routes,
+        semaphore,
+        &part_path,
+        progress.as_deref_mut(),
+    )
+    .await
     {
-        if let Some(first_route) = routes.first() {
-            record_install_download_started(
-                &request,
-                first_route,
-                0,
-                routes.len().saturating_mul(3).max(1),
-            )
-            .await;
-        }
-        record_install_download_stage(
-            &request,
-            DownloadItemStatus::Downloading,
-        )
-        .await;
-        return crate::util::download::xmcl::download_to_path(
-            &request,
-            destination,
-            &routes,
-            semaphore,
-            &part_path,
-            progress,
-        )
-        .await;
+        return result;
     }
 
     prepare_native_download_routes(&request, &mut routes, semaphore).await;
