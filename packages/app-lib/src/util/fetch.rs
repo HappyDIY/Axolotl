@@ -371,7 +371,7 @@ static IN_FLIGHT_DOWNLOADS: LazyLock<
 > = LazyLock::new(dashmap::DashMap::new);
 
 use super::download::route_health::{
-    ROUTE_HEALTH, RouteHealth, RouteHealthKey,
+    ROUTE_HEALTH, ResourceFamily, RouteHealth, RouteHealthKey,
     TASK_PROBE_STATES, TaskProbeGuard, TaskProbeKey,
 };
 
