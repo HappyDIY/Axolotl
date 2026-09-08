@@ -3,6 +3,7 @@ use super::download::modrinth_redirect::{
     is_official_redirect as is_official_modrinth_cdn_redirect,
     repair_official_redirect as repair_official_cdn_redirect,
 };
+use super::download::route_policy;
 use super::download_dns::DownloadDnsResolver;
 use super::download_manager::{DownloadSpeedTracker, SpeedSnapshot};
 use super::io::{self, IOError};
@@ -1078,25 +1079,11 @@ fn route_host(route: &DownloadRoute) -> Option<String> {
 }
 
 pub(crate) fn is_official_modrinth_download_url(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| {
-        matches!(
-            url.host_str(),
-            Some(
-                "api.modrinth.com"
-                    | "cdn.modrinth.com"
-                    | "cdn-alt.modrinth.com"
-            )
-        )
-    })
+    route_policy::is_official_modrinth_download_url(url)
 }
 
 fn is_official_version_manifest_url(url: &str) -> bool {
-    Url::parse(url).is_ok_and(|url| {
-        matches!(
-            url.host_str(),
-            Some("piston-meta.mojang.com" | "launchermeta.mojang.com")
-        ) && url.path().contains("version_manifest")
-    })
+    route_policy::is_official_version_manifest_url(url)
 }
 
 fn order_auto_routes(
@@ -1173,31 +1160,7 @@ fn order_auto_routes(
 /// tried before the official repository, which stays available as a final
 /// fallback for content the mirrors have not synced yet.
 fn uses_mirror_first_loader_routes(url: &str, resource: ResourceClass) -> bool {
-    if !matches!(
-        resource,
-        ResourceClass::MinecraftLibrary | ResourceClass::Loader
-    ) {
-        return false;
-    }
-
-    let Ok(url) = Url::parse(url) else {
-        return false;
-    };
-    if matches!(
-        url.host_str(),
-        Some(
-            "maven.minecraftforge.net"
-                | "maven.fabricmc.net"
-                | "maven.neoforged.net"
-        )
-    ) {
-        return true;
-    }
-
-    let path = url.path().to_ascii_lowercase();
-    ["minecraftforge", "fabricmc", "neoforged"]
-        .iter()
-        .any(|loader| path.contains(loader))
+    route_policy::uses_mirror_first_loader_routes(url, resource)
 }
 
 pub fn resolve_download_routes_for(
