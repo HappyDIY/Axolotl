@@ -643,7 +643,9 @@ pub(crate) fn is_native_library(library: &Library) -> bool {
 }
 
 /// Whether this library carries a Java artifact (regular JAR) that must be
-/// downloaded and placed on the classpath. A library can have both a Java
+/// downloaded. Processor dependencies are represented by libraries with
+/// `include_in_classpath` set to false, so that flag cannot be used to decide
+/// whether the artifact is needed. A library can also have both a Java
 /// artifact and native classifiers after manifest merging (LWJGL is the
 /// canonical example); the two are independent and must not be treated as
 /// mutually exclusive.
@@ -671,7 +673,16 @@ pub(crate) fn needs_java_artifact(library: &Library) -> bool {
     {
         return false;
     }
-    library.include_in_classpath
+    library
+        .downloads
+        .as_ref()
+        .and_then(|downloads| downloads.artifact.as_ref())
+        .is_some_and(|artifact| !artifact.url.trim().is_empty())
+        || library
+            .url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+        || library.include_in_classpath
 }
 
 fn java_artifact_applies(
@@ -2834,6 +2845,23 @@ mod tests {
         .unwrap();
 
         assert!(needs_java_artifact(&library));
+    }
+
+    #[test]
+    fn processor_dependency_without_classpath_flag_keeps_java_artifact_task() {
+        let library: Library = serde_json::from_value(serde_json::json!({
+            "name": "net.neoforged.installertools:installertools:2.1.2",
+            "downloads": {"artifact": {
+                "url": "https://maven.neoforged.net/releases/net/neoforged/installertools/installertools/2.1.2/installertools-2.1.2.jar",
+                "sha1": "", "size": 1
+            }},
+            "include_in_classpath": false,
+            "downloadable": true
+        }))
+        .unwrap();
+
+        assert!(needs_java_artifact(&library));
+        assert!(java_artifact_applies(&library, "x86_64", true));
     }
 
     #[test]
