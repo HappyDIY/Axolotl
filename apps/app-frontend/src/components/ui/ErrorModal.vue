@@ -94,6 +94,18 @@ const messages = defineMessages({
 		defaultMessage: 'first. When that is complete, return here and sign in.',
 	},
 	tryAgain: { id: 'app.error.try-sign-in-again', defaultMessage: 'Try signing in again' },
+	loginTrouble: {
+		id: 'minecraft-login.trouble',
+		defaultMessage: 'Having trouble?',
+	},
+	loginBrowser: {
+		id: 'minecraft-login.browser',
+		defaultMessage: 'Use browser login',
+	},
+	loginDeviceCode: {
+		id: 'minecraft-login.device-code',
+		defaultMessage: 'Use device code',
+	},
 	permissionsTitle: {
 		id: 'app.error.permissions-title',
 		defaultMessage: 'Change directory permissions',
@@ -235,7 +247,11 @@ const loadingMinecraft = ref(false)
 async function loginMinecraft() {
 	try {
 		loadingMinecraft.value = true
-		const loggedIn = await login_flow()
+		const loggedIn = await login_flow({
+			trouble: formatMessage(messages.loginTrouble),
+			browserLogin: formatMessage(messages.loginBrowser),
+			deviceCode: formatMessage(messages.loginDeviceCode),
+		})
 
 		if (loggedIn) {
 			await set_default_user(loggedIn.profile.id).catch(handleError)
