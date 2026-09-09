@@ -33,6 +33,67 @@ export const ANNOUNCEMENT_CHANGE_TYPES: readonly AnnouncementChangeType[] = [
 
 export const launcherAnnouncements: readonly LauncherAnnouncement[] = [
 	{
+		id: 'launcher-1.9.6-beta.4',
+		version: '1.9.6-beta.4',
+		publishedAt: '2026-09-09',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.4',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.4',
+		},
+		changes: {
+			added: [
+				{
+					'en-US': 'Supports hiding added mods on the content page.',
+					'zh-CN': '支持在内容页隐藏已添加的 Mod。',
+				},
+				{
+					'en-US': 'Minecraft can now launch in a maximized window on Windows.',
+					'zh-CN': 'Windows 平台现在可使 Minecraft 以最大化窗口的方式启动。',
+				},
+			],
+			changed: [
+				{
+					'en-US': 'Add close buttons to certain modal dialogs.',
+					'zh-CN': '为部分模态框添加关闭按钮。',
+				},
+				{
+					'en-US': 'Add the native context menu (Copy, Paste, etc.) to input fields.',
+					'zh-CN': '为输入框添加原生右键菜单（复制、粘贴等）。',
+				},
+			],
+			fixed: [
+				{
+					'en-US':
+						'Fixed an issue in version 1.6.4 where resource files (languages and sounds) could not be loaded properly.',
+					'zh-CN': '修复了 1.6.4 版本无法正常加载资源文件（语言、声音）的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where content page tabs were displayed incorrectly when translation was enabled.',
+					'zh-CN': '修复了启用翻译时内容页选项卡显示不正确的问题。',
+				},
+				{
+					'en-US': 'Fixed logic issues related to loader handling.',
+					'zh-CN': '修复了与加载器处理相关的逻辑问题。',
+				},
+				{
+					'en-US': 'Fixed an issue where CurseForge modpacks did not use dual-progress downloads.',
+					'zh-CN': '修复了 Curseforge 整合包不使用双进度下载的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where clicking the sign-in prompt dialog that appears when launching a world without being signed in to any account caused an error.',
+					'zh-CN': '修复了启动世界且未登录任何账户时弹出的提示登录对话框点击导致出错的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where installations using the Beta package initially incorrectly used the Release database.',
+					'zh-CN': '修复了使用首次 Beta 安装包安装却使用 Release 数据库的问题。',
+				},
+			],
+		},
+	},
+	{
 		id: 'launcher-1.9.6-beta.3',
 		version: '1.9.6-beta.3',
 		publishedAt: '2026-09-08',
