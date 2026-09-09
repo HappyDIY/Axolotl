@@ -9,14 +9,12 @@ import LoadingIndicator from '#ui/components/base/LoadingIndicator.vue'
 import NavTabs from '#ui/components/base/NavTabs.vue'
 import Pagination from '#ui/components/base/Pagination.vue'
 import PopoutMenu from '#ui/components/base/PopoutMenu.vue'
-import ScrollToTopButton from '#ui/components/base/ScrollToTopButton.vue'
 import StyledInput from '#ui/components/base/StyledInput.vue'
 import ProjectCard from '#ui/components/project/card/ProjectCard.vue'
 import ProjectCardList from '#ui/components/project/ProjectCardList.vue'
 import SearchFilterControl from '#ui/components/search/SearchFilterControl.vue'
 import { defineMessages, useVIntl } from '#ui/composables/i18n'
 import { useStickyObserver } from '#ui/composables/sticky-observer'
-import { injectPageContext } from '#ui/providers/page-context'
 import { commonMessages, formatProjectTypeSentence } from '#ui/utils/common-messages'
 import type { SortType } from '#ui/utils/search'
 
@@ -25,7 +23,6 @@ import BrowseInstallHeader from './header.vue'
 import { injectBrowseManager } from './providers/browse-manager'
 
 const ctx = injectBrowseManager()
-const pageContext = injectPageContext()
 const { formatMessage } = useVIntl()
 const lockedMessages = computed(() => toValue(ctx.lockedFilterMessages))
 const stickyInstallHeaderRef = ref<HTMLElement | null>(null)
@@ -414,5 +411,4 @@ const selectedDisplayMode = computed(() =>
 	</div>
 
 	<slot name="after" />
-	<ScrollToTopButton v-if="pageContext?.showScrollTop?.value ?? true" />
 </template>
