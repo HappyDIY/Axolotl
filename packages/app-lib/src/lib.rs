@@ -31,9 +31,10 @@ pub use event::{
 };
 pub use logger::start_logger;
 pub use state::db::{
-    backup_current_app_db_for_update, beta_database_exists,
+    UpdateChannelState, backup_current_app_db_for_update, beta_database_exists,
     copy_database_between_channels, copy_release_database_to_beta,
     current_app_database_path, default_update_channel,
+    read_update_channel_state, update_channel_state_file_path,
 };
 pub use state::{DirectoryInfo, State};
 pub use storage::*;
