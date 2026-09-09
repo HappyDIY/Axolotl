@@ -4226,6 +4226,9 @@
   "ui.confirm-leave-modal.title": {
     "defaultMessage": "离开页面？"
   },
+  "ui.scroll-to-top.tooltip": {
+    "defaultMessage": "返回顶部"
+  },
   "ui.stacked-admonitions.alert-count": {
     "defaultMessage": "{count} 个警报"
   },

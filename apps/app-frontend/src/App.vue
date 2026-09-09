@@ -45,6 +45,7 @@ import {
 	provideNotificationManager,
 	providePageContext,
 	providePopupNotificationManager,
+	ScrollToTopButton,
 	useDebugLogger,
 	useFormatBytes,
 	useVIntl,
@@ -481,6 +482,56 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 	if (isFindShortcut || isBlockedDevtoolsShortcut) {
 		event.preventDefault()
 		event.stopPropagation()
+	}
+
+	handleScrollShortcutKey(event)
+}
+
+/**
+ * Home/End/PageUp/PageDown quick scrolling for the launcher's single scroll
+ * container (`.app-viewport`). The WebView window itself never scrolls, so
+ * the browser's native handling for these keys does nothing; route them to
+ * the container explicitly. Editing controls keep their native behaviour.
+ */
+function handleScrollShortcutKey(event: KeyboardEvent) {
+	if (event.ctrlKey || event.metaKey || event.altKey) return
+
+	const target = event.target
+	if (
+		target instanceof HTMLInputElement ||
+		target instanceof HTMLTextAreaElement ||
+		target instanceof HTMLSelectElement ||
+		(target instanceof HTMLElement && target.isContentEditable)
+	) {
+		return
+	}
+
+	const viewport = document.querySelector<HTMLElement>('.app-viewport')
+	if (!viewport) return
+
+	switch (event.key) {
+		case 'Home':
+			event.preventDefault()
+			viewport.scrollTo({ top: 0, behavior: 'smooth' })
+			break
+		case 'End':
+			event.preventDefault()
+			viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+			break
+		case 'PageUp':
+			// Immediate scrolling keeps rapid key repeats responsive.
+			event.preventDefault()
+			viewport.scrollTop = Math.max(0, viewport.scrollTop - viewport.clientHeight * 0.9)
+			break
+		case 'PageDown':
+			event.preventDefault()
+			viewport.scrollTop = Math.min(
+				viewport.scrollHeight,
+				viewport.scrollTop + viewport.clientHeight * 0.9,
+			)
+			break
+		default:
+			break
 	}
 }
 
@@ -2585,6 +2636,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 					</Transition>
 				</RouterView>
 			</div>
+			<ScrollToTopButton />
 		</div>
 		<div
 			class="app-sidebar mt-px shrink-0 flex flex-col border-0 border-l-[1px] border-[--brand-gradient-border] border-solid"

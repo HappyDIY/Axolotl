@@ -2,7 +2,16 @@
 import { ChevronUpIcon } from '@modrinth/assets'
 import { onBeforeUnmount, onMounted, ref } from 'vue'
 
+import { defineMessages, useVIntl } from '../../composables/i18n'
 import ButtonStyled from './ButtonStyled.vue'
+
+const { formatMessage } = useVIntl()
+const messages = defineMessages({
+	tooltip: {
+		id: 'ui.scroll-to-top.tooltip',
+		defaultMessage: 'Scroll to top',
+	},
+})
 
 const visible = ref(false)
 let scrollContainer: Element | null = null
@@ -33,10 +42,10 @@ onBeforeUnmount(() => {
 		<div v-if="visible" class="scroll-to-top-wrapper">
 			<ButtonStyled circular size="large" color="brand">
 				<button
-					v-tooltip="'Scroll to top'"
+					v-tooltip="formatMessage(messages.tooltip)"
 					class="scroll-to-top-btn"
 					type="button"
-					aria-label="Scroll to top"
+					:aria-label="formatMessage(messages.tooltip)"
 					@click="scrollToTop"
 				>
 					<ChevronUpIcon aria-hidden="true" />

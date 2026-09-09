@@ -4538,6 +4538,9 @@
   "ui.confirm-leave-modal.title": {
     "defaultMessage": "Leave page?"
   },
+  "ui.scroll-to-top.tooltip": {
+    "defaultMessage": "Scroll to top"
+  },
   "ui.stacked-admonitions.alert-count": {
     "defaultMessage": "{count, plural, one {# alert} other {# alerts}}"
   },
