@@ -4845,22 +4845,72 @@ async fn download_segment(
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn try_segmented_download(
-    request: &DownloadRequest,
-    route: &DownloadRoute,
-    candidate_routes: &[DownloadRoute],
+struct SegmentedDownloadContext<'a> {
+    request: &'a DownloadRequest,
+    route: &'a DownloadRoute,
+    candidate_routes: &'a [DownloadRoute],
     size: u64,
-    part_path: &Path,
-    semaphore: &FetchSemaphore,
-    credentials: Option<&crate::state::ModrinthCredentials>,
-    mut progress: Option<&mut FetchProgressFn<'_>>,
-    system_client: &reqwest::Client,
-    direct_client: &reqwest::Client,
+    part_path: &'a Path,
+    semaphore: &'a FetchSemaphore,
+    credentials: Option<&'a crate::state::ModrinthCredentials>,
+    system_client: &'a reqwest::Client,
+    direct_client: &'a reqwest::Client,
     attempt: usize,
     max_attempts: usize,
     allow_low_throughput_abort: bool,
+}
+
+impl<'a> SegmentedDownloadContext<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        request: &'a DownloadRequest,
+        route: &'a DownloadRoute,
+        candidate_routes: &'a [DownloadRoute],
+        size: u64,
+        part_path: &'a Path,
+        semaphore: &'a FetchSemaphore,
+        credentials: Option<&'a crate::state::ModrinthCredentials>,
+        system_client: &'a reqwest::Client,
+        direct_client: &'a reqwest::Client,
+        attempt: usize,
+        max_attempts: usize,
+        allow_low_throughput_abort: bool,
+    ) -> Self {
+        Self {
+            request,
+            route,
+            candidate_routes,
+            size,
+            part_path,
+            semaphore,
+            credentials,
+            system_client,
+            direct_client,
+            attempt,
+            max_attempts,
+            allow_low_throughput_abort,
+        }
+    }
+}
+
+async fn try_segmented_download(
+    context: SegmentedDownloadContext<'_>,
+    mut progress: Option<&mut FetchProgressFn<'_>>,
 ) -> SegmentedDownloadOutcome {
+    let SegmentedDownloadContext {
+        request,
+        route,
+        candidate_routes,
+        size,
+        part_path,
+        semaphore,
+        credentials,
+        system_client,
+        direct_client,
+        attempt,
+        max_attempts,
+        allow_low_throughput_abort,
+    } = context;
     let configured_limit = configured_semaphore_limit(semaphore);
     let concurrency_cap =
         route_segmented_concurrency_cap(route, configured_limit);
@@ -5859,19 +5909,21 @@ async fn run_native_download_attempts(
                 {
                     let size = request.integrity.size.unwrap();
                     match try_segmented_download(
-                        &request,
-                        route,
-                        &routes[route_index + 1..],
-                        size,
-                        &part_path,
-                        semaphore,
-                        credentials.as_ref(),
+                        SegmentedDownloadContext::new(
+                            &request,
+                            route,
+                            &routes[route_index + 1..],
+                            size,
+                            &part_path,
+                            semaphore,
+                            credentials.as_ref(),
+                            &HTTP1_NO_REDIRECT_REQWEST_CLIENT,
+                            &HTTP1_DIRECT_REQWEST_CLIENT,
+                            attempts,
+                            file_attempt_budget,
+                            allow_low_throughput_abort,
+                        ),
                         progress.as_deref_mut(),
-                        &HTTP1_NO_REDIRECT_REQWEST_CLIENT,
-                        &HTTP1_DIRECT_REQWEST_CLIENT,
-                        attempts,
-                        file_attempt_budget,
-                        allow_low_throughput_abort,
                     )
                     .await
                     {
@@ -8722,19 +8774,21 @@ mod tests {
             .unwrap();
         let semaphore = FetchSemaphore(Semaphore::new(8));
         let outcome = try_segmented_download(
-            &request,
-            &route,
-            &[],
-            size as u64,
-            &part_path,
-            &semaphore,
+            SegmentedDownloadContext::new(
+                &request,
+                &route,
+                &[],
+                size as u64,
+                &part_path,
+                &semaphore,
+                None,
+                &client,
+                &client,
+                1,
+                1,
+                false,
+            ),
             None,
-            None,
-            &client,
-            &client,
-            1,
-            1,
-            false,
         )
         .await;
         match outcome {
@@ -8802,19 +8856,21 @@ mod tests {
         let semaphore = FetchSemaphore(Semaphore::new(8));
         let started = Instant::now();
         let outcome = try_segmented_download(
-            &request,
-            &route,
-            &[],
-            size as u64,
-            &part_path,
-            &semaphore,
+            SegmentedDownloadContext::new(
+                &request,
+                &route,
+                &[],
+                size as u64,
+                &part_path,
+                &semaphore,
+                None,
+                &client,
+                &client,
+                1,
+                1,
+                false,
+            ),
             None,
-            None,
-            &client,
-            &client,
-            1,
-            1,
-            false,
         )
         .await;
         assert!(matches!(outcome, SegmentedDownloadOutcome::Success(_)));
@@ -8880,19 +8936,21 @@ mod tests {
             .build()
             .unwrap();
         let outcome = try_segmented_download(
-            &request,
-            &route,
-            &[],
-            size as u64,
-            &part_path,
-            &FetchSemaphore(Semaphore::new(8)),
+            SegmentedDownloadContext::new(
+                &request,
+                &route,
+                &[],
+                size as u64,
+                &part_path,
+                &FetchSemaphore(Semaphore::new(8)),
+                None,
+                &client,
+                &client,
+                1,
+                1,
+                false,
+            ),
             None,
-            None,
-            &client,
-            &client,
-            1,
-            1,
-            false,
         )
         .await;
 
@@ -8941,19 +8999,21 @@ mod tests {
             .build()
             .unwrap();
         let outcome = try_segmented_download(
-            &request,
-            &route,
-            &[],
-            size as u64,
-            &part_path,
-            &FetchSemaphore(Semaphore::new(8)),
+            SegmentedDownloadContext::new(
+                &request,
+                &route,
+                &[],
+                size as u64,
+                &part_path,
+                &FetchSemaphore(Semaphore::new(8)),
+                None,
+                &client,
+                &client,
+                1,
+                1,
+                false,
+            ),
             None,
-            None,
-            &client,
-            &client,
-            1,
-            1,
-            false,
         )
         .await;
 
