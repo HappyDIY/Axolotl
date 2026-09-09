@@ -168,7 +168,7 @@ export const DEFAULT_THEME_STORE: ThemeStore = {
 	closeBehavior: 'ask',
 
 	showScrollTop: true,
-	quickScrollEnabled: true,
+	quickScrollEnabled: false,
 
 	shortcutNavHome: false,
 	shortcutNavWorlds: false,

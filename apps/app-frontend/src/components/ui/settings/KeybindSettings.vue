@@ -38,19 +38,19 @@ const messages = defineMessages({
 			'Jump to a menu item with Ctrl/Cmd + a number. Each shortcut is off until enabled.',
 	},
 	homeDescription: {
-		id: 'app.shortcut-settings.key-home-description',
+		id: 'app.shortcut-settings.home-description',
 		defaultMessage: 'Scroll to the top of the page.',
 	},
 	endDescription: {
-		id: 'app.shortcut-settings.key-end-description',
+		id: 'app.shortcut-settings.end-description',
 		defaultMessage: 'Scroll to the bottom of the page.',
 	},
 	pageUpDescription: {
-		id: 'app.shortcut-settings.key-page-up-description',
+		id: 'app.shortcut-settings.page-up-description',
 		defaultMessage: 'Scroll up by one viewport.',
 	},
 	pageDownDescription: {
-		id: 'app.shortcut-settings.key-page-down-description',
+		id: 'app.shortcut-settings.page-down-description',
 		defaultMessage: 'Scroll down by one viewport.',
 	},
 })

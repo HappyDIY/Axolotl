@@ -12,7 +12,7 @@ export function setShowScrollTop(show: boolean) {
 
 export function getQuickScrollEnabled(): boolean {
 	const value = localStorage.getItem(QUICK_SCROLL_ENABLED_STORAGE_KEY)
-	return value !== 'false'
+	return value === 'true'
 }
 
 export function setQuickScrollEnabled(enabled: boolean) {

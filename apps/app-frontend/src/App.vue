@@ -492,6 +492,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
  * the container explicitly. Editing controls keep their native behaviour.
  */
 function handleScrollShortcutKey(event: KeyboardEvent) {
+	if (event.isComposing) return
 	if (event.ctrlKey || event.metaKey || event.altKey) return
 	if (!themeStore.quickScrollEnabled) return
 
@@ -540,6 +541,7 @@ function handleScrollShortcutKey(event: KeyboardEvent) {
  * Shortcut settings page. Editing controls keep their shortcuts untouched.
  */
 function handleNavShortcutKey(event: KeyboardEvent) {
+	if (event.isComposing) return
 	if (event.shiftKey || event.altKey || (!event.ctrlKey && !event.metaKey)) {
 		return
 	}
