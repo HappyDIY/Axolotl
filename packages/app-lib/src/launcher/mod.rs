@@ -1247,7 +1247,13 @@ async fn install_minecraft_with_local_source(
                         &libraries_dir,
                         &processor.args,
                         data,
-                    )?);
+                    )?)
+                    // Forge's installer processors resolve a few auxiliary
+                    // paths relative to the game root. Running them from the
+                    // launcher process directory can therefore exit
+                    // successfully while leaving the client output jars in
+                    // the wrong place (or not producing them at all).
+                    .current_dir(&instance_path);
                 let child = run_instance_install_command(
                     instance.id.clone(),
                     reporter
