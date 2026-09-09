@@ -1,4 +1,6 @@
 use crate::state::DirectoryInfo;
+use fs4::tokio::AsyncFileExt;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha384};
 use sqlx::migrate::{Migration, Migrator};
 use sqlx::sqlite::{
@@ -12,6 +14,12 @@ static MIGRATOR: Migrator = sqlx::migrate!();
 
 const UPDATE_CHANNEL_STATE_FILE: &str = "update-channel.json";
 const LEGACY_APP_DB_FILE: &str = "app.db";
+// Records an in-flight channel database reconciliation inside the target
+// channel directory; see reconcile_default_channel_database.
+const CHANNEL_RECONCILE_MARKER_FILE: &str = ".channel-reconcile";
+// Serializes concurrent channel database reconciliations across processes
+// (see reconcile_default_channel_database).
+const CHANNEL_RECONCILE_LOCK_FILE: &str = ".channel-reconcile.lock";
 
 const INITIAL_MIGRATION_VERSION: i64 = 20240711194701;
 const COLLIDING_JAVA_DISCOVERY_MIGRATION_VERSION: i64 = 20260722120000;
@@ -89,6 +97,7 @@ pub(crate) async fn connect(
     crate::util::io::create_dir_all(&settings_dir).await?;
 
     migrate_legacy_release_database(&settings_dir).await?;
+    reconcile_default_channel_database(&settings_dir).await?;
     let db_path = app_db_path(&settings_dir).await?;
     let db_dir = db_path.parent().ok_or_else(|| {
         crate::ErrorKind::FSError(format!(
@@ -187,7 +196,7 @@ pub async fn copy_database_between_channels(
         .ok_or(crate::ErrorKind::FSError(
             "Could not find valid config dir".to_string(),
         ))?;
-    let active_channel = read_update_channel(&settings_dir).await?;
+    let active_channel = resolve_update_channel(&settings_dir).await?;
     if target_channel == active_channel {
         return Err(crate::ErrorKind::InputError(
             "The active database cannot be overwritten while Axolotl is running".to_string(),
@@ -238,38 +247,295 @@ pub async fn backup_current_app_db_for_update(
 }
 
 async fn app_db_path(settings_dir: &Path) -> crate::Result<PathBuf> {
-    let channel = read_update_channel(settings_dir).await?;
+    let channel = resolve_update_channel(settings_dir).await?;
     Ok(settings_dir.join(channel).join(LEGACY_APP_DB_FILE))
 }
 
-async fn read_update_channel(
+async fn resolve_update_channel(
     settings_dir: &Path,
 ) -> crate::Result<&'static str> {
-    let path = settings_dir.join(UPDATE_CHANNEL_STATE_FILE);
-    let contents = match tokio::fs::read_to_string(&path).await {
-        Ok(contents) => contents,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok("release");
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let channel = serde_json::from_str::<serde_json::Value>(&contents)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("active_channel")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        });
+    Ok(read_explicit_update_channel(settings_dir)
+        .await?
+        .unwrap_or_else(default_update_channel))
+}
 
-    match channel.as_deref() {
-        Some("beta") => Ok("beta"),
-        Some("release") | None => Ok("release"),
-        Some(other) => Err(crate::ErrorKind::FSError(format!(
-            "Invalid update channel {other:?} in {}",
-            path.display()
+/// Persisted update channel state of the launcher.
+///
+/// Serialized to `update-channel.json` inside the settings directory (see
+/// [`update_channel_state_file_path`]). A missing file, or a file without an
+/// `active_channel` value, means the user has not chosen a channel yet; see
+/// [`default_update_channel`].
+#[derive(Default, Deserialize, Serialize)]
+pub struct UpdateChannelState {
+    pub active_channel: Option<String>,
+    pub immediate_update_fetch: Option<bool>,
+    pub updates_paused: Option<bool>,
+}
+
+/// Path of the update channel state file inside the settings directory.
+pub fn update_channel_state_file_path(settings_dir: &Path) -> PathBuf {
+    settings_dir.join(UPDATE_CHANNEL_STATE_FILE)
+}
+
+/// Reads the persisted update channel state.
+///
+/// A missing file is reported as the default state; malformed contents are
+/// reported as an error so each caller can decide how strictly to treat them.
+pub async fn read_update_channel_state(
+    settings_dir: &Path,
+) -> crate::Result<UpdateChannelState> {
+    let path = update_channel_state_file_path(settings_dir);
+    match tokio::fs::read_to_string(&path).await {
+        Ok(contents) => serde_json::from_str(&contents).map_err(|error| {
+            crate::ErrorKind::OtherError(format!(
+                "Failed to parse update channel state {}: {error}",
+                path.display()
+            ))
+            .into()
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            Ok(UpdateChannelState::default())
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Reads the update channel the user explicitly chose, if any.
+///
+/// Returns `None` when the user has not made a choice yet: either the
+/// `update-channel.json` file is missing, or it carries no `active_channel`
+/// value. This lets fresh installs fall back to the channel of the current
+/// build (see [`default_update_channel`]) instead of always defaulting to the
+/// Release channel. Unreadable or malformed state files are treated as "no
+/// choice" here to keep startup resilient; strict callers can use
+/// [`read_update_channel_state`] directly.
+async fn read_explicit_update_channel(
+    settings_dir: &Path,
+) -> crate::Result<Option<&'static str>> {
+    let Some(channel) = read_update_channel_state(settings_dir)
+        .await
+        .ok()
+        .and_then(|state| state.active_channel)
+    else {
+        return Ok(None);
+    };
+
+    match channel.as_str() {
+        "release" => Ok(Some("release")),
+        "beta" => Ok(Some("beta")),
+        other => {
+            let path = update_channel_state_file_path(settings_dir);
+            Err(crate::ErrorKind::FSError(format!(
+                "Invalid update channel {other:?} in {}",
+                path.display()
+            ))
+            .into())
+        }
+    }
+}
+
+/// Resolves the default update channel for a given app version.
+///
+/// The Release channel is the only stable channel, so any version carrying a
+/// pre-release segment (`-beta`, `-rc`, ...) belongs to a pre-release channel.
+/// The launcher currently ships a single pre-release channel, Beta; additional
+/// channels can be mapped here as they are introduced.
+fn default_update_channel_for(version: &str) -> &'static str {
+    match version.split_once('-') {
+        None => "release",
+        Some(_) => "beta",
+    }
+}
+
+/// Default update channel of the current build, used whenever the user has
+/// not explicitly chosen an update channel.
+///
+/// Derived at compile time from this crate's version (`CARGO_PKG_VERSION`),
+/// which the release workflow keeps in sync with the app version. Untagged
+/// development builds therefore inherit the channel of the most recent tag.
+pub fn default_update_channel() -> &'static str {
+    default_update_channel_for(env!("CARGO_PKG_VERSION"))
+}
+
+/// When the user has not explicitly chosen an update channel, keeps an
+/// existing app database aligned with the update channel of the current
+/// build.
+///
+/// Fresh pre-release builds previously fell back to the Release channel and
+/// created their database under `<settings>/release/app.db`. If such a
+/// database exists while the build's own default channel has none, move it
+/// over so the database follows the build instead of silently starting over
+/// with an empty database in the default channel's directory.
+///
+/// The `-wal` and `-shm` sidecars are moved before the main database, making
+/// the main database rename the commit point of the migration. Because a
+/// crashed attempt leaves those sidecars in the target directory without the
+/// main database - a shape that cannot be told apart from foreign leftover
+/// files by name alone - the migration first records which channel it is
+/// moving from in a marker file inside the target directory. The marker lets
+/// a later startup resume an interrupted migration, while target sidecars
+/// without a matching marker are treated as foreign and stop the migration
+/// before databases of different lineages could be mixed. Nothing is ever
+/// deleted or overwritten except the marker file, which this logic owns.
+async fn reconcile_default_channel_database(
+    settings_dir: &Path,
+) -> crate::Result<()> {
+    if read_explicit_update_channel(settings_dir).await?.is_some() {
+        return Ok(());
+    }
+
+    // Serialize first-run migrations across processes. The OS releases the
+    // lock automatically if we crash mid-migration, and a waiter re-runs the
+    // whole state machine below once it acquires the lock, so an interrupted
+    // attempt by another process is absorbed the same way a crashed one is.
+    let lock_path = settings_dir.join(CHANNEL_RECONCILE_LOCK_FILE);
+    crate::util::io::create_dir_all(settings_dir).await?;
+    let lock_file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .await?;
+    lock_file.lock_exclusive().map_err(|error| {
+        crate::ErrorKind::FSError(format!(
+            "Failed to lock {}: {error}",
+            lock_path.display()
         ))
-        .into()),
+    })?;
+
+    let channel = default_update_channel();
+    let other_channel = if channel == "release" {
+        "beta"
+    } else {
+        "release"
+    };
+
+    let source = settings_dir.join(other_channel).join(LEGACY_APP_DB_FILE);
+    let target_dir = settings_dir.join(channel);
+    let target = target_dir.join(LEGACY_APP_DB_FILE);
+    let marker = target_dir.join(CHANNEL_RECONCILE_MARKER_FILE);
+
+    if target.try_exists()? {
+        // A migration that completed but crashed before removing its marker
+        // leaves both the marker and an empty source directory behind.
+        if !source.try_exists()?
+            && matches!(
+                marker_matches(&marker, other_channel).await,
+                MarkerState::Matches
+            )
+        {
+            remove_reconcile_marker(&marker).await;
+        }
+        return Ok(());
+    }
+    if !source.try_exists()? {
+        return Ok(());
+    }
+
+    crate::util::io::create_dir_all(&target_dir).await?;
+
+    match marker_matches(&marker, other_channel).await {
+        MarkerState::Missing => {
+            // Without a marker there is no way to claim a target sidecar as
+            // ours; it could belong to a different database of the same name,
+            // so refuse to move the main database next to it.
+            for suffix in ["-wal", "-shm"] {
+                if sidecar_path(&target, suffix).try_exists()? {
+                    tracing::warn!(
+                        source = %source.display(),
+                        destination = %target.display(),
+                        "Channel reconciliation aborted: the target channel \
+                         contains an unowned {suffix} file; the existing \
+                         database was left in place"
+                    );
+                    return Ok(());
+                }
+            }
+            write_reconcile_marker(&marker, other_channel).await?;
+        }
+        MarkerState::Mismatched => {
+            tracing::warn!(
+                marker = %marker.display(),
+                expected = other_channel,
+                "Channel reconciliation aborted: the target channel contains \
+                 a reconciliation marker from another migration; the existing \
+                 database was left in place"
+            );
+            return Ok(());
+        }
+        MarkerState::Matches => {}
+    }
+
+    let mut conflict = false;
+    for suffix in ["-wal", "-shm"] {
+        let source_sidecar = sidecar_path(&source, suffix);
+        if !source_sidecar.try_exists()? {
+            // Already moved by an interrupted attempt, or never existed.
+            continue;
+        }
+        let target_sidecar = sidecar_path(&target, suffix);
+        if target_sidecar.try_exists()? {
+            tracing::warn!(
+                source = %source_sidecar.display(),
+                destination = %target_sidecar.display(),
+                "Channel reconciliation aborted: both channels have a \
+                 {suffix} file; leaving the existing database in place"
+            );
+            conflict = true;
+            continue;
+        }
+        tokio::fs::rename(&source_sidecar, &target_sidecar).await?;
+    }
+    if conflict {
+        return Ok(());
+    }
+
+    tokio::fs::rename(&source, &target).await?;
+    remove_reconcile_marker(&marker).await;
+    tracing::info!(
+        source = %source.display(),
+        destination = %target.display(),
+        channel,
+        "Moved the existing app database into the default update channel"
+    );
+    Ok(())
+}
+
+enum MarkerState {
+    Missing,
+    Mismatched,
+    Matches,
+}
+
+async fn marker_matches(marker: &Path, channel: &str) -> MarkerState {
+    match tokio::fs::read_to_string(marker).await {
+        Ok(contents) if contents == channel => MarkerState::Matches,
+        Ok(_) => MarkerState::Mismatched,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            MarkerState::Missing
+        }
+        Err(_) => MarkerState::Mismatched,
+    }
+}
+
+async fn write_reconcile_marker(
+    marker: &Path,
+    channel: &str,
+) -> crate::Result<()> {
+    let temporary_path = marker.with_extension("tmp");
+    tokio::fs::write(&temporary_path, channel).await?;
+    tokio::fs::rename(&temporary_path, marker).await?;
+    Ok(())
+}
+
+async fn remove_reconcile_marker(marker: &Path) {
+    if let Err(error) = tokio::fs::remove_file(marker).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %marker.display(),
+            "Failed to remove channel reconciliation marker: {error}"
+        );
     }
 }
 
@@ -1940,6 +2206,374 @@ mod tests {
                 .await
                 .unwrap();
         assert!(foreign_key_errors.is_empty());
+    }
+
+    #[test]
+    fn default_channel_resolves_from_version() {
+        for (version, expected) in [
+            ("1.9.6", "release"),
+            ("1.9.6.0", "release"),
+            ("1.9.6-beta.3", "beta"),
+            ("1.9.6-rc.1", "beta"),
+            ("1.9.6-alpha.2", "beta"),
+        ] {
+            assert_eq!(
+                default_update_channel_for(version),
+                expected,
+                "unexpected default channel for {version}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn update_channel_falls_back_without_explicit_choice() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        assert_eq!(
+            read_explicit_update_channel(settings_dir).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_update_channel(settings_dir).await.unwrap(),
+            default_update_channel()
+        );
+
+        std::fs::write(
+            settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"immediate_update_fetch":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(settings_dir).await.unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_update_channel(settings_dir).await.unwrap(),
+            default_update_channel()
+        );
+    }
+
+    #[tokio::test]
+    async fn update_channel_honors_explicit_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        std::fs::write(
+            settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"release"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(settings_dir).await.unwrap(),
+            Some("release")
+        );
+        assert_eq!(
+            resolve_update_channel(settings_dir).await.unwrap(),
+            "release"
+        );
+
+        std::fs::write(
+            settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"beta"}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            read_explicit_update_channel(settings_dir).await.unwrap(),
+            Some("beta")
+        );
+        assert_eq!(resolve_update_channel(settings_dir).await.unwrap(), "beta");
+
+        std::fs::write(
+            settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"dev"}"#,
+        )
+        .unwrap();
+        assert!(read_explicit_update_channel(settings_dir).await.is_err());
+        assert!(resolve_update_channel(settings_dir).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn reconcile_moves_database_without_explicit_choice() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        std::fs::write(source_dir.join(LEGACY_APP_DB_FILE), "existing data")
+            .unwrap();
+        std::fs::write(
+            source_dir.join(format!("{LEGACY_APP_DB_FILE}-wal")),
+            "wal",
+        )
+        .unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        let target_dir = settings_dir.join(channel);
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join(LEGACY_APP_DB_FILE))
+                .unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"))
+            )
+            .unwrap(),
+            "wal"
+        );
+        assert!(!source_dir.join(LEGACY_APP_DB_FILE).exists());
+        // The migration marker is removed once the move has completed.
+        assert!(!target_dir.join(CHANNEL_RECONCILE_MARKER_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_never_overwrites_or_deletes() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "untouched").unwrap();
+
+        // An explicit channel choice disables reconciliation entirely.
+        std::fs::write(
+            settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
+            r#"{"active_channel":"release"}"#,
+        )
+        .unwrap();
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+        assert!(source_db.exists());
+        assert!(!settings_dir.join(channel).join(LEGACY_APP_DB_FILE).exists());
+
+        // An existing database in the default channel is left alone.
+        std::fs::remove_file(settings_dir.join(UPDATE_CHANNEL_STATE_FILE))
+            .unwrap();
+        let default_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&default_dir).unwrap();
+        let default_db = default_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&default_db, "default data").unwrap();
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&default_db).unwrap(),
+            "default data"
+        );
+        assert_eq!(std::fs::read_to_string(&source_db).unwrap(), "untouched");
+    }
+
+    #[tokio::test]
+    async fn reconcile_resumes_after_an_interrupted_attempt() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        // A previous attempt crashed after writing its marker and moving the
+        // -wal sidecar; the marker attributes those files to this migration.
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let target_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join(CHANNEL_RECONCILE_MARKER_FILE), other)
+            .unwrap();
+        std::fs::write(
+            target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal")),
+            "wal",
+        )
+        .unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(target_dir.join(LEGACY_APP_DB_FILE))
+                .unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"))
+            )
+            .unwrap(),
+            "wal"
+        );
+        assert!(!source_db.exists());
+        assert!(!target_dir.join(CHANNEL_RECONCILE_MARKER_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_aborts_on_foreign_orphan_sidecar() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        // The target channel holds a WAL file that no migration marker claims;
+        // it may belong to a different database of the same name.
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let target_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let target_wal = target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"));
+        std::fs::write(&target_wal, "foreign wal").unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        // Nothing is moved, created, or deleted.
+        assert_eq!(
+            std::fs::read_to_string(&source_db).unwrap(),
+            "existing data"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target_wal).unwrap(),
+            "foreign wal"
+        );
+        assert!(!target_dir.join(LEGACY_APP_DB_FILE).exists());
+        assert!(!target_dir.join(CHANNEL_RECONCILE_MARKER_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_aborts_on_mismatched_marker() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let target_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join(CHANNEL_RECONCILE_MARKER_FILE), channel)
+            .unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&source_db).unwrap(),
+            "existing data"
+        );
+        assert!(!target_dir.join(LEGACY_APP_DB_FILE).exists());
+        assert_eq!(
+            std::fs::read_to_string(
+                target_dir.join(CHANNEL_RECONCILE_MARKER_FILE)
+            )
+            .unwrap(),
+            channel
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_aborts_when_target_sidecar_appears_mid_flight() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        // The marker matches, but a foreign sidecar appeared next to the one
+        // this migration already moved; do not move the main database.
+        let source_dir = settings_dir.join(other);
+        std::fs::create_dir_all(&source_dir).unwrap();
+        let source_db = source_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&source_db, "existing data").unwrap();
+        let source_wal = source_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"));
+        std::fs::write(&source_wal, "source wal").unwrap();
+        let target_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join(CHANNEL_RECONCILE_MARKER_FILE), other)
+            .unwrap();
+        let target_wal = target_dir.join(format!("{LEGACY_APP_DB_FILE}-wal"));
+        std::fs::write(&target_wal, "target wal").unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&source_db).unwrap(),
+            "existing data"
+        );
+        assert_eq!(std::fs::read_to_string(&source_wal).unwrap(), "source wal");
+        assert_eq!(std::fs::read_to_string(&target_wal).unwrap(), "target wal");
+        assert!(!target_dir.join(LEGACY_APP_DB_FILE).exists());
+        assert!(target_dir.join(CHANNEL_RECONCILE_MARKER_FILE).exists());
+    }
+
+    #[tokio::test]
+    async fn reconcile_cleans_up_marker_after_commit_crash() {
+        let channel = default_update_channel();
+        let other = if channel == "release" {
+            "beta"
+        } else {
+            "release"
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let settings_dir = directory.path();
+
+        // The main database was moved, but the process crashed before the
+        // marker could be removed.
+        let target_dir = settings_dir.join(channel);
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let default_db = target_dir.join(LEGACY_APP_DB_FILE);
+        std::fs::write(&default_db, "default data").unwrap();
+        std::fs::write(target_dir.join(CHANNEL_RECONCILE_MARKER_FILE), other)
+            .unwrap();
+
+        reconcile_default_channel_database(settings_dir)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&default_db).unwrap(),
+            "default data"
+        );
+        assert!(!target_dir.join(CHANNEL_RECONCILE_MARKER_FILE).exists());
     }
 
     fn initial_migration() -> &'static Migration {
