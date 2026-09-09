@@ -367,15 +367,21 @@ async function applyChannel(channel: UpdateChannel, copyDatabase = false) {
 }
 
 async function chooseBetaDatabase(copyDatabase: boolean) {
-	copyDatabaseModal.value?.hide()
 	const channel = pendingChannel.value
 	pendingChannel.value = null
+	copyDatabaseModal.value?.hide()
 	if (channel && (await applyChannel(channel, copyDatabase))) {
 		restoringChannelSelection = true
 		selectedChannel.value = channel
 		await nextTick()
 		restoringChannelSelection = false
 	}
+}
+
+function onCopyDatabaseModalHide() {
+	// Dismissing this choice cancels the pending channel switch. The selected
+	// channel was already restored before the modal was shown.
+	pendingChannel.value = null
 }
 
 async function restartForChannelChange() {
@@ -463,6 +469,10 @@ async function confirmDatabaseOperation() {
 
 function cancelDatabaseOperation() {
 	databaseOperationModal.value?.hide()
+	databaseOperation.value = ''
+}
+
+function onDatabaseOperationModalHide() {
 	databaseOperation.value = ''
 }
 </script>
@@ -661,7 +671,12 @@ function cancelDatabaseOperation() {
 		<UpdateAnnouncementHistory :current-version="currentVersion" />
 	</div>
 
-	<NewModal ref="restartModal" :header="formatMessage(messages.restartTitle)" :closable="false">
+	<NewModal
+		ref="restartModal"
+		:header="formatMessage(messages.restartTitle)"
+		:closable="true"
+		:close-on-click-outside="true"
+	>
 		<p class="m-0">
 			{{
 				formatMessage(
@@ -690,7 +705,9 @@ function cancelDatabaseOperation() {
 	<NewModal
 		ref="copyDatabaseModal"
 		:header="formatMessage(messages.copyDatabaseTitle)"
-		:closable="false"
+		:closable="true"
+		:close-on-click-outside="true"
+		:on-hide="onCopyDatabaseModalHide"
 	>
 		<p class="m-0">{{ formatMessage(messages.copyDatabaseDescription) }}</p>
 		<template #actions>
@@ -714,7 +731,9 @@ function cancelDatabaseOperation() {
 	<NewModal
 		ref="databaseOperationModal"
 		:header="formatMessage(messages.databaseOperationTitle)"
-		:closable="false"
+		:closable="true"
+		:close-on-click-outside="true"
+		:on-hide="onDatabaseOperationModalHide"
 	>
 		<p class="m-0">
 			{{

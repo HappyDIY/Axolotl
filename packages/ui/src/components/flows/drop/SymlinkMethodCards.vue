@@ -3,9 +3,10 @@
 		ref="modal"
 		max-width="920px"
 		:closable="true"
+		:close-on-click-outside="true"
+		:on-hide="onModalHide"
 		hide-header
 		scrollable
-		@hide="onModalHide"
 	>
 		<div class="flex flex-col gap-4 p-6">
 			<div class="flex flex-col gap-1">

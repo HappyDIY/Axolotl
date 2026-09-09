@@ -1445,6 +1445,13 @@ async function applyCloseChoice(choice: 'close' | 'lightweight', remember: boole
 	}
 }
 
+function onCloseChoiceModalHide() {
+	// Closing the choice dialog is a cancellation; it must not trigger either
+	// close behavior and must allow a subsequent close request to show it again.
+	closeChoiceOpen.value = false
+	closeChoiceRemember.value = false
+}
+
 async function handleCloseRequested(event: { preventDefault: () => void }) {
 	if (allowWindowClose) return
 	event.preventDefault()
@@ -2639,7 +2646,10 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 	<NewModal
 		ref="closeChoiceModal"
 		:header="formatMessage(messages.closeLauncherTitle)"
-		:closable="false"
+		:closable="true"
+		:close-on-click-outside="true"
+		:disable-close="closeRequestInProgress"
+		:on-hide="onCloseChoiceModalHide"
 		max-width="30rem"
 	>
 		<div class="grid grid-cols-2 gap-3">
