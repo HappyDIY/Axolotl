@@ -161,14 +161,14 @@ pub(crate) async fn send_path_request_with_clients(
             .into());
         }
         let location = response
-			.headers()
-			.get(header::LOCATION)
-			.map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
-			.ok_or_else(|| {
-				ErrorKind::OtherError(format!(
-					"Redirect from {current} did not include a valid Location header"
-				))
-			})?;
+            .headers()
+            .get(header::LOCATION)
+            .map(|value| String::from_utf8_lossy(value.as_bytes()).into_owned())
+            .ok_or_else(|| {
+                ErrorKind::OtherError(format!(
+                    "Redirect from {current} did not include a valid Location header"
+                ))
+            })?;
         if location.len() > MAX_REDIRECT_LOCATION_BYTES
             || location.chars().any(char::is_control)
         {
