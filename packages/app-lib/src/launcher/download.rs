@@ -1327,7 +1327,9 @@ async fn write_version_info(path: &Path, data: Vec<u8>) -> crate::Result<()> {
 // Bumped when profile merge semantics change. This forces existing loader
 // caches to be regenerated so duplicate Forge/vanilla libraries regain native
 // classifier metadata.
-const DERIVED_VERSION_CACHE_FORMAT: &str = "2";
+// Bump this marker when derived loader metadata changes in a way that requires
+// rebuilding cached versions and re-extracting installer artifacts.
+const DERIVED_VERSION_CACHE_FORMAT: &str = "3";
 
 fn derived_version_cache_marker_path(path: &Path) -> PathBuf {
     path.with_extension("json.axolotl-format")
