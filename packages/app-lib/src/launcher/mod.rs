@@ -2269,6 +2269,8 @@ pub async fn launch_minecraft(
     }
 
     let launch_assets_dir = runtime.assets_dir(&state.directories);
+    let game_assets_dir = runtime
+        .game_assets_dir(&state.directories, version_info.assets == "legacy");
 
     command
         .arg("com.modrinth.theseus.MinecraftLaunch")
@@ -2283,6 +2285,7 @@ pub async fn launch_minecraft(
                 &version_info.asset_index.id,
                 &instance_path,
                 &launch_assets_dir,
+                &game_assets_dir,
                 &launch_version_type,
                 effective_resolution,
                 &java_version.architecture,

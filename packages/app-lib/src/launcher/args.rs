@@ -355,6 +355,7 @@ pub async fn get_minecraft_arguments(
     asset_index_name: &str,
     game_directory: &Path,
     assets_directory: &Path,
+    game_assets_directory: &Path,
     version_type: &VersionType,
     resolution: WindowSize,
     java_arch: &str,
@@ -410,6 +411,7 @@ pub async fn get_minecraft_arguments(
                 asset_index_name,
                 game_directory,
                 assets_directory,
+                game_assets_directory,
                 version_type,
                 resolution,
                 quick_play_type,
@@ -432,6 +434,7 @@ pub async fn get_minecraft_arguments(
                     asset_index_name,
                     game_directory,
                     assets_directory,
+                    game_assets_directory,
                     version_type,
                     resolution,
                     quick_play_type,
@@ -468,6 +471,7 @@ fn parse_minecraft_argument(
     asset_index_name: &str,
     game_directory: &Path,
     assets_directory: &Path,
+    game_assets_directory: &Path,
     version_type: &VersionType,
     resolution: WindowSize,
     quick_play_type: &QuickPlayType,
@@ -512,11 +516,11 @@ fn parse_minecraft_argument(
         )
         .replace(
             "${game_assets}",
-            &canonicalize(assets_directory)
+            &canonicalize(game_assets_directory)
                 .map_err(|_| {
                     crate::ErrorKind::LauncherError(format!(
                         "Specified assets directory {} does not exist",
-                        assets_directory.to_string_lossy()
+                        game_assets_directory.to_string_lossy()
                     ))
                     .as_error()
                 })?
@@ -712,6 +716,7 @@ mod tests {
             "1.12",
             &game_directory,
             &assets_directory,
+            &assets_directory,
             &VersionType::Release,
             WindowSize(854, 480),
             "x86_64",
@@ -807,8 +812,10 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let game_directory = directory.path().join("instance");
         let assets_directory = directory.path().join("assets");
+        let game_assets_directory = directory.path().join("resources");
         std::fs::create_dir_all(&game_directory).unwrap();
         std::fs::create_dir_all(&assets_directory).unwrap();
+        std::fs::create_dir_all(&game_assets_directory).unwrap();
         let credentials = Credentials::offline("Player").unwrap();
 
         // 1.6.4-era Forge profiles repeat `minecraftArguments` verbatim inside
@@ -838,6 +845,7 @@ mod tests {
             "legacy",
             &game_directory,
             &assets_directory,
+            &game_assets_directory,
             &VersionType::Release,
             WindowSize(854, 480),
             "x86_64",
@@ -868,6 +876,16 @@ mod tests {
                 &"cpw.mods.fml.common.launcher.FMLTweaker".to_string()
             )
         );
+        let assets_dir_position = parsed
+            .iter()
+            .position(|argument| argument == "--assetsDir")
+            .unwrap();
+        assert_eq!(
+            parsed[assets_dir_position + 1],
+            canonicalize(&game_assets_directory)
+                .unwrap()
+                .to_string_lossy()
+        );
 
         // Legacy-only options still pass through unchanged.
         let parsed = get_minecraft_arguments(
@@ -878,6 +896,7 @@ mod tests {
             "legacy",
             &game_directory,
             &assets_directory,
+            &game_assets_directory,
             &VersionType::Release,
             WindowSize(854, 480),
             "x86_64",
