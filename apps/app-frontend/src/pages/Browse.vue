@@ -645,6 +645,13 @@ if (route.query.shi) {
 const hiddenServerContentProjectIds = ref<Set<string>>(new Set())
 const hiddenServerContentProjectIdsInitialized = ref(false)
 
+function shouldHideInstalledProject(projectId: string): boolean {
+	if (isServerContext.value) {
+		return serverHideInstalled.value && hiddenServerContentProjectIds.value.has(projectId)
+	}
+	return !!activeInstance.value && instanceHideInstalled.value && allInstalledIds.value.has(projectId)
+}
+
 function syncHiddenServerContentProjectIds() {
 	hiddenServerContentProjectIds.value = new Set(serverContentProjectIds.value)
 	hiddenServerContentProjectIdsInitialized.value = true
@@ -2491,29 +2498,32 @@ async function search(requestParams: string, signal: AbortSignal) {
 		}
 	}
 
-	const hits = (rawResults?.result.hits ?? []).map((hit) => {
-		const mapped = {
-			...hit,
-			title: hit.name,
-			description: hit.summary,
-			provider: 'modrinth' as const,
-		} as unknown as Labrinth.Search.v2.ResultSearchProject & {
-			installed?: boolean
-			provider: 'modrinth' | 'curseforge' | 'mcarchive' | 'planet_minecraft'
-		}
+	const hits = (rawResults?.result.hits ?? [])
+		.map((hit) => {
+			const mapped = {
+				...hit,
+				title: hit.name,
+				description: hit.summary,
+				provider: 'modrinth' as const,
+			} as unknown as Labrinth.Search.v2.ResultSearchProject & {
+				installed?: boolean
+				provider: 'modrinth' | 'curseforge' | 'mcarchive' | 'planet_minecraft'
+			}
 
-		if (activeInstance.value || isServerContext.value) {
-			const installedIds = activeInstance.value
-				? allInstalledIds.value
-				: serverContentProjectIds.value
-			mapped.installed = installedIds.has(hit.project_id)
-		}
+			if (activeInstance.value || isServerContext.value) {
+				const installedIds = activeInstance.value
+					? allInstalledIds.value
+					: serverContentProjectIds.value
+				mapped.installed = installedIds.has(hit.project_id)
+			}
 
-		return applyChineseTranslation(mapped, chineseResolution)
-	})
+			return applyChineseTranslation(mapped, chineseResolution)
+		})
+		.filter((hit) => !shouldHideInstalledProject(hit.project_id))
 
 	const directModrinthHits = rawDirectModrinth
 		.filter((project) => matchesDirectModrinthFilters(project, gameVersion, loader, categoryValues))
+		.filter((project) => !shouldHideInstalledProject(project.id))
 		.slice(0, limit)
 		.map(mapDirectModrinthProject)
 		.map((hit) => applyChineseTranslation(hit, chineseResolution))
@@ -2537,6 +2547,7 @@ async function search(requestParams: string, signal: AbortSignal) {
 	).length
 	const curseForgeHits = (rawCurseForge?.hits ?? [])
 		.map(mapCurseForgeHit)
+		.filter((hit) => !shouldHideInstalledProject(hit.project_id))
 		.map((hit) => {
 			if (activeInstance.value) hit.installed = allInstalledIds.value.has(hit.project_id)
 			return hit
