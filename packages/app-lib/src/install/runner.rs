@@ -1416,6 +1416,7 @@ async fn run_request(
             .await?;
             let reporter =
                 InstallProgressReporter::new(job_id, job_state.clone());
+            let mut parallel_minecraft_install = None;
             if let InstanceLink::CurseForgeModpack {
                 project_id,
                 version_id,
@@ -1439,6 +1440,12 @@ async fn run_request(
                 .await?;
                 emit_instance(&instance_id, InstancePayloadType::Edited)
                     .await?;
+                parallel_minecraft_install = Some(
+                    crate::api::pack::parallel_minecraft_install::ParallelMinecraftInstall::start(
+                        instance_id.clone(),
+                        reporter.clone(),
+                    ),
+                );
                 let result = crate::api::curseforge::install_modpack_with_reporter(
                     crate::api::curseforge::CurseForgeModpackInstallRequest {
                         instance_id: instance_id.clone(),
@@ -1454,35 +1461,44 @@ async fn run_request(
                     &result,
                     &job_state.skipped_missing_content_paths,
                 ) {
+                    if let Some(minecraft_install) =
+                        parallel_minecraft_install.take()
+                    {
+                        minecraft_install.abort().await;
+                    }
                     return Ok(InstallExecutionOutcome::WaitingForUser(reason));
                 }
             }
-            reporter
-                .update(
-                    InstallPhaseId::DownloadingMinecraft,
-                    None,
-                    InstallPhaseDetails::Minecraft {
-                        game_version: game_version.clone(),
-                        loader,
-                    },
+            if let Some(minecraft_install) = parallel_minecraft_install {
+                minecraft_install.join().await?;
+            } else {
+                reporter
+                    .update(
+                        InstallPhaseId::DownloadingMinecraft,
+                        None,
+                        InstallPhaseDetails::Minecraft {
+                            game_version: game_version.clone(),
+                            loader,
+                        },
+                    )
+                    .await?;
+                let context =
+                    crate::state::instances::commands::get_instance_launch_context(
+                        &instance_id,
+                        &state.pool,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        crate::ErrorKind::InputError("Unknown instance".to_string())
+                    })?;
+                crate::launcher::install_minecraft_with_reporter(
+                    &context,
+                    false,
+                    Some(reporter.clone()),
+                    crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
                 )
                 .await?;
-            let context =
-                crate::state::instances::commands::get_instance_launch_context(
-                    &instance_id,
-                    &state.pool,
-                )
-                .await?
-                .ok_or_else(|| {
-                    crate::ErrorKind::InputError("Unknown instance".to_string())
-                })?;
-            crate::launcher::install_minecraft_with_reporter(
-                &context,
-                false,
-                Some(reporter.clone()),
-                crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
-            )
-            .await?;
+            }
             install_adjunct_components(
                 state,
                 &instance_id,
