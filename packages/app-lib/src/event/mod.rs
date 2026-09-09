@@ -271,6 +271,8 @@ pub struct ProcessPayload {
     pub uuid: Uuid,
     pub pid: u32,
     pub maximize_window: bool,
+    #[serde(default)]
+    pub launch_preparation_timeout: Option<u64>,
     pub event: ProcessPayloadType,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]

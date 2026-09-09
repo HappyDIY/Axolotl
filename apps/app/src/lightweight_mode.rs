@@ -251,7 +251,11 @@ impl LightweightMode {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
                     if payload.maximize_window {
-                        maximize_minecraft_window(payload.pid).await;
+                        maximize_minecraft_window(
+                            payload.pid,
+                            payload.launch_preparation_timeout,
+                        )
+                        .await;
                     }
                     let settings = match theseus::settings::get().await {
                         Ok(settings) => settings,
@@ -332,6 +336,8 @@ struct ProcessEventPayload {
     pid: u32,
     #[serde(default)]
     maximize_window: bool,
+    #[serde(default)]
+    launch_preparation_timeout: Option<u64>,
     event: String,
     crashed: Option<bool>,
     #[serde(default)]
@@ -339,12 +345,12 @@ struct ProcessEventPayload {
 }
 
 #[cfg(target_os = "windows")]
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 
 #[cfg(target_os = "windows")]
 static MAXIMIZE_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
 #[cfg(target_os = "windows")]
-static MAXIMIZE_WINDOW_FOUND: AtomicBool = AtomicBool::new(false);
+static MAXIMIZE_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
 #[cfg(target_os = "windows")]
 static MAXIMIZE_WINDOW_ENUMERATION: Mutex<()> = Mutex::new(());
 
@@ -354,42 +360,88 @@ unsafe extern "system" fn maximize_if_owned_by_process(
     _: windows::Win32::Foundation::LPARAM,
 ) -> windows::core::BOOL {
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowThreadProcessId, IsWindowVisible, SW_MAXIMIZE, ShowWindow,
+        GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
     };
     use windows::core::BOOL;
+
+    let mut class_name = [0_u16; 256];
+    let class_name_length = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    let class_name =
+        String::from_utf16_lossy(&class_name[..class_name_length as usize]);
+    if !matches!(class_name.as_str(), "GLFW30" | "LWJGL" | "SunAwtFrame") {
+        return BOOL(1);
+    }
+
+    let mut window_title = [0_u16; 512];
+    let window_title_length =
+        unsafe { GetWindowTextW(hwnd, &mut window_title) };
+    let window_title =
+        String::from_utf16_lossy(&window_title[..window_title_length as usize]);
+    if !(window_title.starts_with("FML")
+        || (window_title != "PopupMessageWindow"
+            && !window_title.starts_with("GLFW")))
+    {
+        return BOOL(1);
+    }
+
+    // FML and Quilt Loader windows are transitional launcher windows. Keep
+    // enumerating until the actual Minecraft window appears.
+    if window_title.starts_with("FML")
+        || window_title.starts_with("Quilt Loader")
+    {
+        return BOOL(1);
+    }
 
     let mut window_pid = 0;
     unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
     if window_pid == MAXIMIZE_PROCESS_ID.load(Ordering::Relaxed)
         && unsafe { IsWindowVisible(hwnd).as_bool() }
     {
-        let _ = unsafe { ShowWindow(hwnd, SW_MAXIMIZE) };
-        MAXIMIZE_WINDOW_FOUND.store(true, Ordering::Relaxed);
+        MAXIMIZE_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
         return BOOL(0);
     }
     BOOL(1)
 }
 
 #[cfg(target_os = "windows")]
-async fn maximize_minecraft_window(pid: u32) {
+async fn maximize_minecraft_window(
+    pid: u32,
+    launch_preparation_timeout: Option<u64>,
+) {
     if pid == 0 {
         return;
     }
 
-    for _ in 0..20 {
+    let timeout = std::time::Duration::from_secs(
+        launch_preparation_timeout.unwrap_or(60),
+    );
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
         let found = {
             let _guard = MAXIMIZE_WINDOW_ENUMERATION.lock();
             MAXIMIZE_PROCESS_ID.store(pid, Ordering::Relaxed);
-            MAXIMIZE_WINDOW_FOUND.store(false, Ordering::Relaxed);
+            MAXIMIZE_WINDOW_HANDLE.store(0, Ordering::Relaxed);
             unsafe {
                 use windows::Win32::Foundation::LPARAM;
                 use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
                 let _ =
                     EnumWindows(Some(maximize_if_owned_by_process), LPARAM(0));
             }
-            MAXIMIZE_WINDOW_FOUND.load(Ordering::Relaxed)
+            MAXIMIZE_WINDOW_HANDLE.load(Ordering::Relaxed)
         };
-        if found {
+        if found != 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let hwnd = windows::Win32::Foundation::HWND(found as *mut _);
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SW_MAXIMIZE, ShowWindow,
+                };
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -397,7 +449,11 @@ async fn maximize_minecraft_window(pid: u32) {
 }
 
 #[cfg(not(target_os = "windows"))]
-async fn maximize_minecraft_window(_pid: u32) {}
+async fn maximize_minecraft_window(
+    _pid: u32,
+    _launch_preparation_timeout: Option<u64>,
+) {
+}
 
 #[tauri::command]
 pub fn lightweight_mode_frontend_ready(
