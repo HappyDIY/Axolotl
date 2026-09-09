@@ -373,7 +373,7 @@ use super::download::diagnostics::{
     DownloadAttemptDiagnostic, attach_download_attempt_history,
     push_download_attempt_diagnostic, record_download_attempt_failure,
 };
-use super::download::integrity::{
+pub(crate) use super::download::integrity::{
     compute_file_integrity, is_integrity_error, validate_file_content,
     verify_computed_integrity, verify_file,
 };
