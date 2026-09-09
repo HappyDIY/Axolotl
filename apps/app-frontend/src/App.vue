@@ -1167,7 +1167,23 @@ async function setupApp() {
 		}, 100)
 	})
 
-	if (!dev) document.addEventListener('contextmenu', (event) => event.preventDefault())
+	if (!dev) {
+		document.addEventListener('contextmenu', (event) => {
+			// Keep the launcher's custom context-menu behavior for regular content,
+			// but let native editing controls and selected text expose copy/paste actions.
+			const target = event.target
+			const hasSelectedText = window.getSelection()?.toString().length > 0
+			if (
+				target instanceof HTMLInputElement ||
+				target instanceof HTMLTextAreaElement ||
+				(target instanceof HTMLElement && target.isContentEditable) ||
+				hasSelectedText
+			) {
+				return
+			}
+			event.preventDefault()
+		})
+	}
 
 	const osType = await getOsType()
 	if (osType === 'macos') {
