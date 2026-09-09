@@ -120,6 +120,13 @@ import { install_create_modpack_instance, install_get_modpack_preview } from '@/
 import { type DirectLinkSyncReport, get as getInstance, run } from '@/helpers/instance'
 import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
+import {
+	getNavShortcutEnabled,
+} from '@/helpers/nav-shortcut-state'
+import {
+	discoverContentTarget,
+	NAV_SHORTCUTS,
+} from '@/helpers/nav-shortcuts'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
 import {
 	getQuickScrollEnabled,
@@ -131,7 +138,6 @@ import {
 	getPrivacySettings,
 	getUpdateChannel,
 	getUpdatePreferences,
-	isBrowseContentProjectType,
 	type PrivacySettings,
 	savePrivacySettings,
 	set as setSettings,
@@ -190,20 +196,7 @@ const onSchematicWorkshopPage = computed(() => route.path === '/lab/schematic-pr
 const isSchematicFile = (path: string) => /\.(litematic|schematic|schem)$/i.test(path)
 const APP_LEFT_NAV_WIDTH = '4rem'
 
-const discoverContentPath = computed(() => {
-	const projectType = route.params.projectType
-	if (
-		!route.query.i &&
-		!route.query.sid &&
-		!route.query.wid &&
-		typeof projectType === 'string' &&
-		isBrowseContentProjectType(projectType)
-	) {
-		return `/browse/${projectType}`
-	}
-
-	return `/browse/${getLastBrowseContentProjectType()}`
-})
+const discoverContentPath = computed(() => discoverContentTarget(route))
 
 function getPageTransitionKey(route: RouteLocationNormalizedLoaded) {
 	const transitionGroup = route.meta.pageTransitionGroup
@@ -489,6 +482,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 	}
 
 	handleScrollShortcutKey(event)
+	handleNavShortcutKey(event)
 }
 
 /**
@@ -538,6 +532,42 @@ function handleScrollShortcutKey(event: KeyboardEvent) {
 		default:
 			break
 	}
+}
+
+/**
+ * Ctrl/Cmd + number (or Ctrl/Cmd + ",") jump to the matching navigation
+ * item. Every shortcut is off by default and enabled individually from the
+ * Shortcut settings page. Editing controls keep their shortcuts untouched.
+ */
+function handleNavShortcutKey(event: KeyboardEvent) {
+	if (event.shiftKey || event.altKey || (!event.ctrlKey && !event.metaKey)) {
+		return
+	}
+
+	const target = event.target
+	if (
+		target instanceof HTMLInputElement ||
+		target instanceof HTMLTextAreaElement ||
+		target instanceof HTMLSelectElement ||
+		(target instanceof HTMLElement && target.isContentEditable)
+	) {
+		return
+	}
+
+	const match = NAV_SHORTCUTS.find((shortcut) => shortcut.key === event.key)
+	if (!match || !themeStore[match.id]) return
+
+	// Respect the same conditions that hide or disable the nav button.
+	if (
+		(match.id === 'shortcutNavWorlds' && !themeStore.featureFlags.worlds_tab) ||
+		((match.id === 'shortcutNavDiscover' || match.id === 'shortcutNavCreate') &&
+			offline.value)
+	) {
+		return
+	}
+
+	event.preventDefault()
+	router.push(match.target(route))
 }
 
 onMounted(async () => {
@@ -1196,6 +1226,9 @@ async function setupApp() {
 	themeStore.quickScrollEnabled = getQuickScrollEnabled()
 	themeStore.devMode = developer_mode
 	themeStore.featureFlags = feature_flags
+	for (const shortcut of NAV_SHORTCUTS) {
+		themeStore[shortcut.id] = getNavShortcutEnabled(shortcut.id)
+	}
 	stateInitialized.value = true
 	if (privacyConsentPending.value) {
 		await nextTick()

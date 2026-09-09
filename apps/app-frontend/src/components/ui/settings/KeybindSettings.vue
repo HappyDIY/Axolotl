@@ -1,6 +1,8 @@
 <script setup lang="ts">
-import { defineMessages, Toggle, useVIntl } from '@modrinth/ui'
+import { defineMessages, SettingsLabel, Toggle, useVIntl } from '@modrinth/ui'
 
+import { getNavShortcutEnabled, setNavShortcutEnabled } from '@/helpers/nav-shortcut-state'
+import { NAV_SHORTCUTS, type NavShortcut } from '@/helpers/nav-shortcuts'
 import { getQuickScrollEnabled, setQuickScrollEnabled } from '@/helpers/scroll-top-state'
 import { useTheming } from '@/store/theme'
 
@@ -11,6 +13,9 @@ const { formatMessage } = useVIntl()
 const themeStore = useTheming()
 
 themeStore.quickScrollEnabled = getQuickScrollEnabled()
+for (const shortcut of NAV_SHORTCUTS) {
+	themeStore[shortcut.id] = getNavShortcutEnabled(shortcut.id)
+}
 
 const messages = defineMessages({
 	title: { id: 'app.shortcut-settings.title', defaultMessage: 'Keyboard shortcuts' },
@@ -22,6 +27,15 @@ const messages = defineMessages({
 	enableDescription: {
 		id: 'app.shortcut-settings.enable-description',
 		defaultMessage: 'Allow Home / End / Page Up / Page Down to scroll the page.',
+	},
+	navTitle: {
+		id: 'app.shortcut-settings.nav-title',
+		defaultMessage: 'Navigation shortcuts',
+	},
+	navDescription: {
+		id: 'app.shortcut-settings.nav-description',
+		defaultMessage:
+			'Jump to a menu item with Ctrl/Cmd + a number. Each shortcut is off until enabled.',
 	},
 	homeDescription: {
 		id: 'app.shortcut-settings.key-home-description',
@@ -41,9 +55,25 @@ const messages = defineMessages({
 	},
 })
 
+function shortcutLabel(shortcut: NavShortcut) {
+	return formatMessage({ id: shortcut.labelKey, defaultMessage: shortcut.labelDefault })
+}
+
+function shortcutDescription(shortcut: NavShortcut) {
+	return formatMessage({
+		id: shortcut.descriptionKey,
+		defaultMessage: shortcut.descriptionDefault,
+	})
+}
+
 function toggleQuickScroll(value: unknown) {
 	themeStore.quickScrollEnabled = !!value
 	setQuickScrollEnabled(themeStore.quickScrollEnabled)
+}
+
+function toggleNavShortcut(shortcut: NavShortcut, value: unknown) {
+	themeStore[shortcut.id] = !!value
+	setNavShortcutEnabled(shortcut.id, themeStore[shortcut.id])
 }
 </script>
 
@@ -73,6 +103,31 @@ function toggleQuickScroll(value: unknown) {
 					/>
 				</template>
 			</SettingsRow>
+
+			<SettingsLabel
+				:title="formatMessage(messages.navTitle)"
+				:description="formatMessage(messages.navDescription)"
+			/>
+			<SettingsRow
+				v-for="shortcut in NAV_SHORTCUTS"
+				:key="shortcut.id"
+				stacked
+			>
+				<template #label>
+					<span :id="`settings-target-shortcuts-nav-${shortcut.id}`" tabindex="-1">
+						{{ shortcutLabel(shortcut) }}
+					</span>
+				</template>
+				<template #description>{{ shortcutDescription(shortcut) }}</template>
+				<template #control>
+					<Toggle
+						:id="`nav-shortcut-${shortcut.id}`"
+						:model-value="themeStore[shortcut.id]"
+						@update:model-value="(value) => toggleNavShortcut(shortcut, value)"
+					/>
+				</template>
+			</SettingsRow>
+
 			<SettingsRow>
 				<template #label>
 					<kbd

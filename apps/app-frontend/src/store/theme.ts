@@ -131,6 +131,17 @@ export type ThemeStore = {
 	showScrollTop: boolean
 	/** Whether quick scrolling shortcuts (Home/End/PageUp/PageDown) are active. */
 	quickScrollEnabled: boolean
+	/** Per-nav-item quick jump shortcuts (Ctrl/Cmd + number), off by default. */
+	shortcutNavHome: boolean
+	shortcutNavWorlds: boolean
+	shortcutNavDiscover: boolean
+	shortcutNavSkins: boolean
+	shortcutNavMultiplayer: boolean
+	shortcutNavLibrary: boolean
+	shortcutNavLab: boolean
+	shortcutNavDownloads: boolean
+	shortcutNavCreate: boolean
+	shortcutNavSettings: boolean
 
 	devMode: boolean
 	featureFlags: FeatureFlags
@@ -158,6 +169,17 @@ export const DEFAULT_THEME_STORE: ThemeStore = {
 
 	showScrollTop: true,
 	quickScrollEnabled: true,
+
+	shortcutNavHome: false,
+	shortcutNavWorlds: false,
+	shortcutNavDiscover: false,
+	shortcutNavSkins: false,
+	shortcutNavMultiplayer: false,
+	shortcutNavLibrary: false,
+	shortcutNavLab: false,
+	shortcutNavDownloads: false,
+	shortcutNavCreate: false,
+	shortcutNavSettings: false,
 
 	devMode: false,
 	featureFlags: DEFAULT_FEATURE_FLAGS,
