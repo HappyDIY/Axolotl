@@ -4860,6 +4860,69 @@ struct SegmentedDownloadContext<'a> {
     allow_low_throughput_abort: bool,
 }
 
+async fn finalize_segmented_output(
+    request: &DownloadRequest,
+    route: &DownloadRoute,
+    size: u64,
+    part_path: &Path,
+    mut progress: Option<&mut FetchProgressFn<'_>>,
+    output: std::sync::Arc<crate::util::download::range_output::RangeOutput>,
+    cleanup_guard: &mut SegmentCleanupGuard,
+    transfer_started: Instant,
+    downloaded: u64,
+    final_url: Option<String>,
+    initial_ttfb: Option<time::Duration>,
+    remote_addr: Option<std::net::SocketAddr>,
+    http_version: Option<reqwest::Version>,
+) -> SegmentedDownloadOutcome {
+    record_install_download_stage(request, DownloadItemStatus::Writing).await;
+    if downloaded != size {
+        let _ = remove_if_exists(part_path).await;
+        return SegmentedDownloadOutcome::FallbackSingle {
+            disable_range: true,
+            reason: "range byte count mismatch",
+        };
+    }
+    drop(output);
+    let computed =
+        match compute_file_integrity(part_path, &request.integrity).await {
+            Ok(computed) => computed,
+            Err(error) => return SegmentedDownloadOutcome::Fatal(error),
+        };
+    record_install_download_stage(request, DownloadItemStatus::Verifying).await;
+    if let Err(error) = verify_computed_integrity(&request.integrity, &computed)
+    {
+        let _ = remove_if_exists(part_path).await;
+        return SegmentedDownloadOutcome::IntegrityFailed(error);
+    }
+    if validate_file_content(part_path, request.integrity.content)
+        .await
+        .is_err()
+    {
+        let _ = remove_if_exists(part_path).await;
+        return SegmentedDownloadOutcome::FallbackSingle {
+            disable_range: true,
+            reason: "segmented content validation failed",
+        };
+    }
+    if downloaded < size
+        && let Some(progress) = progress.as_mut()
+        && let Err(error) = progress(size, size).await
+    {
+        tracing::warn!(%error, "Download progress callback failed");
+    }
+    record_range_splitting_success(route);
+    cleanup_guard.disarm();
+    SegmentedDownloadOutcome::Success(SegmentedDownloadSuccess {
+        size,
+        final_url: final_url.unwrap_or_else(|| route.url.clone()),
+        ttfb: initial_ttfb.unwrap_or_default(),
+        transfer_elapsed: transfer_started.elapsed(),
+        remote_addr,
+        http_version,
+    })
+}
+
 impl<'a> SegmentedDownloadContext<'a> {
     #[allow(clippy::too_many_arguments)]
     fn new(
@@ -5243,52 +5306,22 @@ async fn try_segmented_download(
         };
     }
 
-    record_install_download_stage(request, DownloadItemStatus::Writing).await;
-    if downloaded != size {
-        let _ = remove_if_exists(part_path).await;
-        return SegmentedDownloadOutcome::FallbackSingle {
-            disable_range: true,
-            reason: "range byte count mismatch",
-        };
-    }
-    drop(output);
-    let computed =
-        match compute_file_integrity(part_path, &request.integrity).await {
-            Ok(computed) => computed,
-            Err(error) => return SegmentedDownloadOutcome::Fatal(error),
-        };
-    record_install_download_stage(request, DownloadItemStatus::Verifying).await;
-    if let Err(error) = verify_computed_integrity(&request.integrity, &computed)
-    {
-        let _ = remove_if_exists(part_path).await;
-        return SegmentedDownloadOutcome::IntegrityFailed(error);
-    }
-    if validate_file_content(part_path, request.integrity.content)
-        .await
-        .is_err()
-    {
-        let _ = remove_if_exists(part_path).await;
-        return SegmentedDownloadOutcome::FallbackSingle {
-            disable_range: true,
-            reason: "segmented content validation failed",
-        };
-    }
-    if downloaded < size
-        && let Some(progress) = progress.as_mut()
-        && let Err(error) = progress(size, size).await
-    {
-        tracing::warn!(%error, "Download progress callback failed");
-    }
-    record_range_splitting_success(route);
-    cleanup_guard.disarm();
-    SegmentedDownloadOutcome::Success(SegmentedDownloadSuccess {
+    finalize_segmented_output(
+        request,
+        route,
         size,
-        final_url: final_url.unwrap_or_else(|| route.url.clone()),
-        ttfb: initial_ttfb.unwrap_or_default(),
-        transfer_elapsed: transfer_started.elapsed(),
+        part_path,
+        progress,
+        output,
+        &mut cleanup_guard,
+        transfer_started,
+        downloaded,
+        final_url,
+        initial_ttfb,
         remote_addr,
         http_version,
-    })
+    )
+    .await
 }
 
 pub(crate) async fn record_install_download_started(
@@ -5781,6 +5814,62 @@ async fn download_to_path_inner(
     .await
 }
 
+struct NativeDownloadSession {
+    official_integrity_retry: bool,
+    attempts: usize,
+    last_error: Option<crate::Error>,
+    attempt_history: VecDeque<DownloadAttemptDiagnostic>,
+    fallback_count: usize,
+    partial_route_index: Option<usize>,
+    terminal_routes: HashSet<String>,
+    preferred_route: Option<DownloadRoute>,
+    single_thread_routes: HashSet<String>,
+    busted_for_route: Option<(usize, String)>,
+    file_attempt_budget: usize,
+}
+
+impl NativeDownloadSession {
+    fn new(
+        route_count: usize,
+        h2_failed_nonofficial: Option<String>,
+    ) -> (Self, Option<String>) {
+        let official_integrity_retry = h2_failed_nonofficial.is_some();
+        (
+            Self {
+                official_integrity_retry,
+                attempts: 0,
+                last_error: None,
+                attempt_history: VecDeque::new(),
+                fallback_count: 0,
+                partial_route_index: None,
+                terminal_routes: HashSet::new(),
+                preferred_route: None,
+                single_thread_routes: HashSet::new(),
+                busted_for_route: None,
+                file_attempt_budget: route_count.saturating_mul(3).max(1),
+            },
+            h2_failed_nonofficial,
+        )
+    }
+
+    fn initialize_preferred_route(&mut self, routes: &[DownloadRoute]) {
+        self.preferred_route = self
+            .official_integrity_retry
+            .then(|| official_fallback_route(routes))
+            .flatten();
+    }
+
+    fn take_final_error(&mut self, request: &DownloadRequest) -> crate::Error {
+        self.last_error.take().unwrap_or_else(|| {
+            ErrorKind::OtherError(format!(
+                "Unable to download {} from any source",
+                sanitize_url_for_log(&request.url)
+            ))
+            .into()
+        })
+    }
+}
+
 async fn run_native_download_attempts(
     request: DownloadRequest,
     destination: &Path,
@@ -5788,44 +5877,35 @@ async fn run_native_download_attempts(
     mut progress: Option<&mut FetchProgressFn<'_>>,
     mut routes: Vec<DownloadRoute>,
     part_path: PathBuf,
-    mut h2_failed_nonofficial: Option<String>,
+    h2_failed_nonofficial: Option<String>,
 ) -> crate::Result<DownloadResult> {
     let credentials: Option<crate::state::ModrinthCredentials> = None;
-    let mut official_integrity_retry = h2_failed_nonofficial.is_some();
+    let (mut session, mut h2_failed_nonofficial) =
+        NativeDownloadSession::new(routes.len(), h2_failed_nonofficial);
     if let Some(failed_route) = h2_failed_nonofficial.take() {
         routes.retain(|route| route.url != failed_route);
     }
-    let mut attempts = 0;
-    let mut last_error = None;
-    let mut attempt_history = VecDeque::new();
-    let mut fallback_count = 0;
-    let mut partial_route_index = None;
-    let mut terminal_routes = HashSet::new();
-    let mut preferred_route = official_integrity_retry
-        .then(|| official_fallback_route(&routes))
-        .flatten();
-    let mut single_thread_routes = HashSet::new();
-    let mut busted_for_route: Option<(usize, String)> = None;
-    let file_attempt_budget = routes.len().saturating_mul(3).max(1);
+    session.initialize_preferred_route(&routes);
     for (round, retry_with_single_thread) in
         [false, true, true].into_iter().enumerate()
     {
         let mut attempted_routes = Vec::new();
         for (route_index, route) in routes.iter().enumerate() {
-            if terminal_routes.contains(&route.url) {
+            if session.terminal_routes.contains(&route.url) {
                 continue;
             }
             let has_breaker_alternate = routes.iter().enumerate().any(
                 |(candidate_index, candidate)| {
                     candidate_index != route_index
-                        && !terminal_routes.contains(&candidate.url)
+                        && !session.terminal_routes.contains(&candidate.url)
                         && !crate::util::download::native_breaker::is_open(
                             candidate,
                         )
                 },
             );
-            let recovery_route = preferred_route.as_ref() == Some(route)
-                || single_thread_routes.contains(&route.url);
+            let recovery_route = session.preferred_route.as_ref()
+                == Some(route)
+                || session.single_thread_routes.contains(&route.url);
             if !recovery_route
                 && crate::util::download::native_breaker::should_skip(
                     route,
@@ -5834,14 +5914,15 @@ async fn run_native_download_attempts(
             {
                 continue;
             }
-            if preferred_route
+            if session
+                .preferred_route
                 .as_ref()
                 .is_some_and(|preferred| preferred != route)
             {
                 continue;
             }
-            if preferred_route.as_ref() == Some(route) {
-                preferred_route = None;
+            if session.preferred_route.as_ref() == Some(route) {
+                session.preferred_route = None;
             }
             if attempted_routes.iter().any(|attempted: &&DownloadRoute| {
                 routes_share_effective_authority(attempted, route)
@@ -5851,24 +5932,27 @@ async fn run_native_download_attempts(
             attempted_routes.push(route);
             let log_url = sanitize_url_for_log(&route.url);
             if route_index > 0 {
-                fallback_count += 1;
+                session.fallback_count += 1;
             }
-            if partial_route_index.is_some_and(|index| index != route_index) {
+            if session
+                .partial_route_index
+                .is_some_and(|index| index != route_index)
+            {
                 remove_if_exists(&part_path).await?;
             }
-            partial_route_index = Some(route_index);
+            session.partial_route_index = Some(route_index);
             let can_switch_route = routes.iter().enumerate().any(
                 |(candidate_index, candidate)| {
                     candidate_index != route_index
-                        && !terminal_routes.contains(&candidate.url)
+                        && !session.terminal_routes.contains(&candidate.url)
                 },
             );
             let allow_low_throughput_abort = allow_low_throughput_route_switch(
                 can_switch_route,
                 retry_with_single_thread,
             );
-            while attempts < file_attempt_budget {
-                attempts += 1;
+            while session.attempts < session.file_attempt_budget {
+                session.attempts += 1;
                 tracing::debug!(
                     path = %destination.display(),
                     temporary_path = %part_path.display(),
@@ -5876,8 +5960,8 @@ async fn run_native_download_attempts(
                     source = route.source.as_str(),
                     expected_bytes = request.integrity.size,
                     proxy = ?route.proxy,
-                    attempt = attempts,
-                    max_attempts = file_attempt_budget,
+                    attempt = session.attempts,
+                    max_attempts = session.file_attempt_budget,
                     "Starting file download attempt"
                 );
                 let resumable_part_bytes = match (
@@ -5897,7 +5981,7 @@ async fn run_native_download_attempts(
                 // resuming it over a single connection wastes less transfer.
                 if request.allow_http1_segmented_download
                     && !retry_with_single_thread
-                    && !single_thread_routes.contains(&route.url)
+                    && !session.single_thread_routes.contains(&route.url)
                     && route.supports_range
                     && range_splitting_allowed(route)
                     && request.integrity.size.is_some_and(|size| {
@@ -5919,8 +6003,8 @@ async fn run_native_download_attempts(
                             credentials.as_ref(),
                             &HTTP1_NO_REDIRECT_REQWEST_CLIENT,
                             &HTTP1_DIRECT_REQWEST_CLIENT,
-                            attempts,
-                            file_attempt_budget,
+                            session.attempts,
+                            session.file_attempt_budget,
                             allow_low_throughput_abort,
                         ),
                         progress.as_deref_mut(),
@@ -5962,8 +6046,8 @@ async fn run_native_download_attempts(
                                 dns_candidates = ?route_host(route).map(|host| {
                                     DOWNLOAD_DNS_RESOLVER.resolved_addresses(&host)
                                 }),
-                                attempt = attempts,
-                                max_attempts = file_attempt_budget,
+                                attempt = session.attempts,
+                                max_attempts = session.file_attempt_budget,
                                 "Completed file download"
                             );
                             if let Some(tracking) = &request.install_tracking
@@ -5985,8 +6069,8 @@ async fn run_native_download_attempts(
                                 url: result.final_url,
                                 source: route.source,
                                 size: result.size,
-                                attempts,
-                                fallback_count,
+                                attempts: session.attempts,
+                                fallback_count: session.fallback_count,
                             });
                         }
                         SegmentedDownloadOutcome::FallbackSingle {
@@ -5994,9 +6078,9 @@ async fn run_native_download_attempts(
                             reason,
                         } => {
                             push_download_attempt_diagnostic(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 "range",
                                 "fallback_single",
                                 reason,
@@ -6023,9 +6107,9 @@ async fn run_native_download_attempts(
                             )
                             .into();
                             push_download_attempt_diagnostic(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 "network",
                                 "switch_route_or_retry_round",
                                 error.to_string(),
@@ -6033,13 +6117,13 @@ async fn run_native_download_attempts(
                                 None,
                                 None,
                             );
-                            last_error = Some(error);
+                            session.last_error = Some(error);
                             tracing::warn!(
                                 path = %destination.display(),
                                 url = %log_url,
                                 source = route.source.as_str(),
-                                attempt = attempts,
-                                max_attempts = file_attempt_budget,
+                                attempt = session.attempts,
+                                max_attempts = session.file_attempt_budget,
                                 "Segmented file download failed; retrying or switching source"
                             );
                             break;
@@ -6047,9 +6131,9 @@ async fn run_native_download_attempts(
                         SegmentedDownloadOutcome::IntegrityFailed(error) => {
                             record_route_failure(route, request.resource, None);
                             record_download_attempt_failure(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 &error,
                                 if is_official_route(route) {
                                     "abort"
@@ -6060,38 +6144,40 @@ async fn run_native_download_attempts(
                                 None,
                                 None,
                             );
-                            last_error = Some(error);
-                            terminal_routes.insert(route.url.clone());
+                            session.last_error = Some(error);
+                            session.terminal_routes.insert(route.url.clone());
                             if !is_official_route(route)
                                 && let Some(official) =
                                     official_fallback_route(&routes)
                             {
                                 remove_if_exists(&part_path).await?;
-                                official_integrity_retry = true;
-                                preferred_route = Some(official);
+                                session.official_integrity_retry = true;
+                                session.preferred_route = Some(official);
                                 break;
                             }
-                            if official_integrity_retry {
+                            if session.official_integrity_retry {
                                 return Err(attach_download_attempt_history(
-                                    last_error.take().unwrap(),
-                                    &attempt_history,
-                                    attempts,
-                                    file_attempt_budget,
+                                    session.last_error.take().unwrap(),
+                                    &session.attempt_history,
+                                    session.attempts,
+                                    session.file_attempt_budget,
                                 ));
                             }
                             disable_range_splitting(route);
-                            single_thread_routes.insert(route.url.clone());
-                            terminal_routes.remove(&route.url);
+                            session
+                                .single_thread_routes
+                                .insert(route.url.clone());
+                            session.terminal_routes.remove(&route.url);
                         }
                         SegmentedDownloadOutcome::SwitchRoute(probe) => {
-                            preferred_route = Some(probe.route);
+                            session.preferred_route = Some(probe.route);
                             break;
                         }
                         SegmentedDownloadOutcome::Fatal(error) => {
                             record_download_attempt_failure(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 &error,
                                 "abort",
                                 None,
@@ -6100,9 +6186,9 @@ async fn run_native_download_attempts(
                             );
                             return Err(attach_download_attempt_history(
                                 error,
-                                &attempt_history,
-                                attempts,
-                                file_attempt_budget,
+                                &session.attempt_history,
+                                session.attempts,
+                                session.file_attempt_budget,
                             ));
                         }
                     }
@@ -6132,8 +6218,8 @@ async fn run_native_download_attempts(
                 record_install_download_started(
                     &request,
                     route,
-                    attempts,
-                    file_attempt_budget,
+                    session.attempts,
+                    session.file_attempt_budget,
                 )
                 .await;
                 record_install_download_stage(
@@ -6177,7 +6263,8 @@ async fn run_native_download_attempts(
                 // A truncated or invalid body may be a corrupt edge-cache
                 // object; the retry then uses a cache-busted URL that forces a
                 // fresh origin fetch instead of the same broken copy.
-                let attempt_route = busted_for_route
+                let attempt_route = session
+                    .busted_for_route
                     .as_ref()
                     .filter(|(index, _)| *index == route_index)
                     .map(|(_, url)| {
@@ -6206,9 +6293,9 @@ async fn run_native_download_attempts(
                         record_route_failure(route, request.resource, None);
                         record_native_transfer_failure(route, None);
                         record_download_attempt_failure(
-                            &mut attempt_history,
+                            &mut session.attempt_history,
                             route,
-                            attempts,
+                            session.attempts,
                             &error,
                             "switch_route_or_retry_round",
                             None,
@@ -6219,12 +6306,12 @@ async fn run_native_download_attempts(
                             path = %destination.display(),
                             url = %log_url,
                             source = route.source.as_str(),
-                            attempt = attempts,
-                            max_attempts = file_attempt_budget,
+                            attempt = session.attempts,
+                            max_attempts = session.file_attempt_budget,
                             error = %error,
                             "File download request failed; trying the next source or retry"
                         );
-                        last_error = Some(error);
+                        session.last_error = Some(error);
                         break;
                     }
                     Err(_) => {
@@ -6239,9 +6326,9 @@ async fn run_native_download_attempts(
                         ))
                         .into();
                         record_download_attempt_failure(
-                            &mut attempt_history,
+                            &mut session.attempt_history,
                             route,
-                            attempts,
+                            session.attempts,
                             &error,
                             "switch_route_or_retry_round",
                             None,
@@ -6254,11 +6341,11 @@ async fn run_native_download_attempts(
                             source = route.source.as_str(),
                             no_data_seconds = first_byte_timeout.as_secs_f64(),
                             downloaded_bytes = 0,
-                            attempt = attempts,
-                            max_attempts = file_attempt_budget,
+                            attempt = session.attempts,
+                            max_attempts = session.file_attempt_budget,
                             "File download stalled before receiving a response"
                         );
-                        last_error = Some(error);
+                        session.last_error = Some(error);
                         break;
                     }
                 };
@@ -6289,7 +6376,7 @@ async fn run_native_download_attempts(
                             (status == StatusCode::TOO_MANY_REQUESTS)
                                 .then_some(
                                     response_retry_after.unwrap_or_else(|| {
-                                        fetch_retry_delay(attempts)
+                                        fetch_retry_delay(session.attempts)
                                     }),
                                 ),
                         );
@@ -6313,8 +6400,8 @@ async fn run_native_download_attempts(
                     if status == StatusCode::RANGE_NOT_SATISFIABLE {
                         remove_if_exists(&part_path).await?;
                         disable_range_splitting(route);
-                        single_thread_routes.insert(route.url.clone());
-                        preferred_route = Some(route.clone());
+                        session.single_thread_routes.insert(route.url.clone());
+                        session.preferred_route = Some(route.clone());
                     }
                     let terminal_status = matches!(
                         status,
@@ -6327,14 +6414,15 @@ async fn run_native_download_attempts(
                         == StatusCode::TOO_MANY_REQUESTS
                         && routes.len() > 1;
                     if terminal_status || cooldown_and_switch {
-                        terminal_routes.insert(route.url.clone());
+                        session.terminal_routes.insert(route.url.clone());
                     } else if status == StatusCode::TOO_MANY_REQUESTS
                         && routes.len() == 1
-                        && attempts < file_attempt_budget
+                        && session.attempts < session.file_attempt_budget
                     {
                         tokio::time::sleep(
-                            response_retry_after
-                                .unwrap_or_else(|| fetch_retry_delay(attempts)),
+                            response_retry_after.unwrap_or_else(|| {
+                                fetch_retry_delay(session.attempts)
+                            }),
                         )
                         .await;
                     }
@@ -6351,16 +6439,16 @@ async fn run_native_download_attempts(
                             "retry_next_round"
                         };
                     record_download_attempt_failure(
-                        &mut attempt_history,
+                        &mut session.attempt_history,
                         route,
-                        attempts,
+                        session.attempts,
                         &error,
                         decision,
                         Some(status),
                         remote_addr,
                         Some(http_version),
                     );
-                    last_error = Some(error);
+                    session.last_error = Some(error);
                     break;
                 }
 
@@ -6394,16 +6482,16 @@ async fn run_native_download_attempts(
                                 ))
                                 .into();
                             record_download_attempt_failure(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 &error,
                                 "disable_range_and_switch",
                                 Some(status),
                                 remote_addr,
                                 Some(http_version),
                             );
-                            last_error = Some(error);
+                            session.last_error = Some(error);
                             break;
                         }
                         // Hashing the existing prefix is deferred until the
@@ -6436,16 +6524,16 @@ async fn run_native_download_attempts(
                                     ))
                                     .into();
                                 record_download_attempt_failure(
-                                    &mut attempt_history,
+                                    &mut session.attempt_history,
                                     route,
-                                    attempts,
+                                    session.attempts,
                                     &error,
                                     "clear_partial_and_retry",
                                     Some(status),
                                     remote_addr,
                                     Some(http_version),
                                 );
-                                last_error = Some(error);
+                                session.last_error = Some(error);
                                 break;
                             }
                         }
@@ -6467,16 +6555,16 @@ async fn run_native_download_attempts(
                             remove_if_exists(&part_path).await?;
                             let error: crate::Error = error.into();
                             record_download_attempt_failure(
-                                &mut attempt_history,
+                                &mut session.attempt_history,
                                 route,
-                                attempts,
+                                session.attempts,
                                 &error,
                                 "clear_partial_and_retry",
                                 Some(status),
                                 remote_addr,
                                 Some(http_version),
                             );
-                            last_error = Some(error);
+                            session.last_error = Some(error);
                             break;
                         }
                     }
@@ -6653,7 +6741,7 @@ async fn run_native_download_attempts(
                 drop(activity.take());
 
                 if let Some(probe) = confirmed_switch {
-                    preferred_route = Some(probe.route);
+                    session.preferred_route = Some(probe.route);
                     break;
                 }
 
@@ -6667,9 +6755,9 @@ async fn run_native_download_attempts(
                     )
                     .await?;
                     record_download_attempt_failure(
-                        &mut attempt_history,
+                        &mut session.attempt_history,
                         route,
-                        attempts,
+                        session.attempts,
                         &error,
                         "resume_or_switch",
                         Some(status),
@@ -6680,12 +6768,12 @@ async fn run_native_download_attempts(
                         path = %destination.display(),
                         url = %log_url,
                         source = route.source.as_str(),
-                        attempt = attempts,
-                        max_attempts = file_attempt_budget,
+                        attempt = session.attempts,
+                        max_attempts = session.file_attempt_budget,
                         error = %error,
                         "File download attempt failed; trying the next source or retry"
                     );
-                    last_error = Some(error);
+                    session.last_error = Some(error);
                     break;
                 }
 
@@ -6720,22 +6808,25 @@ async fn run_native_download_attempts(
                     ))
                     .into();
                     record_download_attempt_failure(
-                        &mut attempt_history,
+                        &mut session.attempt_history,
                         route,
-                        attempts,
+                        session.attempts,
                         &error,
                         "resume_or_switch",
                         Some(status),
                         remote_addr,
                         Some(http_version),
                     );
-                    if attempts < file_attempt_budget {
-                        busted_for_route = Some((
+                    if session.attempts < session.file_attempt_budget {
+                        session.busted_for_route = Some((
                             route_index,
-                            cache_busted_download_url(&route.url, attempts),
+                            cache_busted_download_url(
+                                &route.url,
+                                session.attempts,
+                            ),
                         ));
                     }
-                    last_error = Some(error);
+                    session.last_error = Some(error);
                     break;
                 }
                 record_install_download_stage(
@@ -6774,47 +6865,51 @@ async fn run_native_download_attempts(
                         .flatten();
                     let decision = if official.is_some() {
                         "fallback_official"
-                    } else if attempts >= 2
+                    } else if session.attempts >= 2
                         || (is_official_route(route)
-                            && official_integrity_retry)
+                            && session.official_integrity_retry)
                     {
                         "drop_route_after_clean_retry"
                     } else {
                         "clear_partial_and_retry"
                     };
                     record_download_attempt_failure(
-                        &mut attempt_history,
+                        &mut session.attempt_history,
                         route,
-                        attempts,
+                        session.attempts,
                         &error,
                         decision,
                         Some(status),
                         remote_addr,
                         Some(http_version),
                     );
-                    if attempts < file_attempt_budget {
-                        busted_for_route = Some((
+                    if session.attempts < session.file_attempt_budget {
+                        session.busted_for_route = Some((
                             route_index,
-                            cache_busted_download_url(&route.url, attempts),
+                            cache_busted_download_url(
+                                &route.url,
+                                session.attempts,
+                            ),
                         ));
                     }
-                    last_error = Some(error);
+                    session.last_error = Some(error);
                     if let Some(official) = official {
-                        terminal_routes.insert(route.url.clone());
-                        official_integrity_retry = true;
-                        preferred_route = Some(official);
+                        session.terminal_routes.insert(route.url.clone());
+                        session.official_integrity_retry = true;
+                        session.preferred_route = Some(official);
                     } else if (is_official_route(route)
-                        && official_integrity_retry)
-                        || attempts >= 2
+                        && session.official_integrity_retry)
+                        || session.attempts >= 2
                     {
-                        terminal_routes.insert(route.url.clone());
-                        if is_official_route(route) && official_integrity_retry
+                        session.terminal_routes.insert(route.url.clone());
+                        if is_official_route(route)
+                            && session.official_integrity_retry
                         {
                             return Err(attach_download_attempt_history(
-                                last_error.take().unwrap(),
-                                &attempt_history,
-                                attempts,
-                                file_attempt_budget,
+                                session.last_error.take().unwrap(),
+                                &session.attempt_history,
+                                session.attempts,
+                                session.file_attempt_budget,
                             ));
                         }
                     }
@@ -6846,31 +6941,34 @@ async fn run_native_download_attempts(
                     }
                     let decision = if routes.len() > 1 {
                         "clear_partial_and_switch"
-                    } else if attempts >= 2 {
+                    } else if session.attempts >= 2 {
                         "drop_route_after_clean_retry"
                     } else {
                         "clear_partial_and_retry"
                     };
                     record_download_attempt_failure(
-                        &mut attempt_history,
+                        &mut session.attempt_history,
                         route,
-                        attempts,
+                        session.attempts,
                         &error,
                         decision,
                         Some(status),
                         remote_addr,
                         Some(http_version),
                     );
-                    if attempts < file_attempt_budget {
-                        busted_for_route = Some((
+                    if session.attempts < session.file_attempt_budget {
+                        session.busted_for_route = Some((
                             route_index,
-                            cache_busted_download_url(&route.url, attempts),
+                            cache_busted_download_url(
+                                &route.url,
+                                session.attempts,
+                            ),
                         ));
                     }
-                    if routes.len() > 1 || attempts >= 2 {
-                        terminal_routes.insert(route.url.clone());
+                    if routes.len() > 1 || session.attempts >= 2 {
+                        session.terminal_routes.insert(route.url.clone());
                     }
-                    last_error = Some(error);
+                    session.last_error = Some(error);
                     break;
                 }
 
@@ -6916,15 +7014,15 @@ async fn run_native_download_attempts(
                     url: final_url,
                     source: route.source,
                     size: downloaded,
-                    attempts,
-                    fallback_count,
+                    attempts: session.attempts,
+                    fallback_count: session.fallback_count,
                 });
             }
         }
         if round < 2
             && routes
                 .iter()
-                .any(|route| !terminal_routes.contains(&route.url))
+                .any(|route| !session.terminal_routes.contains(&route.url))
         {
             tokio::time::sleep(fetch_retry_delay(round + 1)).await;
         }
@@ -6936,18 +7034,12 @@ async fn run_native_download_attempts(
         any_route_can_resume(&routes),
     )
     .await?;
-    let error = last_error.unwrap_or_else(|| {
-        ErrorKind::OtherError(format!(
-            "Unable to download {} from any source",
-            sanitize_url_for_log(&request.url)
-        ))
-        .into()
-    });
+    let error = session.take_final_error(&request);
     Err(attach_download_attempt_history(
         error,
-        &attempt_history,
-        attempts,
-        file_attempt_budget,
+        &session.attempt_history,
+        session.attempts,
+        session.file_attempt_budget,
     ))
 }
 /// Posts a JSON to a URL
