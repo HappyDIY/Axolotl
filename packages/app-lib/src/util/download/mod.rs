@@ -14,6 +14,7 @@ pub mod h2_pool;
 pub(crate) mod h2_range;
 pub(crate) mod h2_receive;
 pub(crate) mod h2_stream_budget;
+pub(crate) mod integrity;
 pub mod legacy;
 pub mod log;
 pub(crate) mod modrinth_redirect;
