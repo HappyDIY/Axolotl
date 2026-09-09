@@ -116,9 +116,15 @@ const selectedDisplayMode = computed(() =>
 	</template>
 	<SelectedProjectsFloatingBar v-if="ctx.installContext?.value && ctx.variant !== 'web'" />
 
-	<div class="flex items-center justify-between">
-		<NavTabs v-if="ctx.showProjectTypeTabs.value" :links="ctx.selectableProjectTypes.value" />
-		<slot name="nav-tabs-actions" />
+	<div class="flex min-w-0 items-center gap-2">
+		<NavTabs
+			v-if="ctx.showProjectTypeTabs.value"
+			:links="ctx.selectableProjectTypes.value"
+			class="min-w-0 flex-1"
+		/>
+		<div class="shrink-0">
+			<slot name="nav-tabs-actions" />
+		</div>
 	</div>
 
 	<div class="flex items-center gap-2">
