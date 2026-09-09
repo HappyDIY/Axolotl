@@ -19,6 +19,8 @@ export interface PageContext {
 	featureFlags?: {
 		serverRamAsBytesAlwaysOn?: Ref<boolean>
 	}
+	/** Whether the floating "back to top" button should be rendered. */
+	showScrollTop?: Ref<boolean> | ComputedRef<boolean>
 	openExternalUrl: (url: string) => void
 }
 

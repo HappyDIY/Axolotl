@@ -542,6 +542,12 @@
   "app.appearance-settings.show-play-time.title": {
     "message": "Show play time"
   },
+  "app.appearance-settings.show-scroll-top.description": {
+    "message": "Show a floating back-to-top button on scrollable pages."
+  },
+  "app.appearance-settings.show-scroll-top.title": {
+    "message": "Show \u201cback to top\u201d button"
+  },
   "app.appearance-settings.sidebar-instance-count.description": {
     "message": "Maximum number of instances to show in the sidebar. Set to 0 to show all."
   },
@@ -7411,6 +7417,33 @@
   },
   "app.settings.tabs.language-translation": {
     "message": "Language & translation"
+  },
+  "app.settings.tabs.shortcut-settings": {
+    "message": "Shortcut settings"
+  },
+  "app.shortcut-settings.description": {
+    "message": "Browse, home and library screens support quick scrolling keys."
+  },
+  "app.shortcut-settings.enable": {
+    "message": "Enable quick scrolling"
+  },
+  "app.shortcut-settings.enable-description": {
+    "message": "Allow Home / End / Page Up / Page Down to scroll the page."
+  },
+  "app.shortcut-settings.end-description": {
+    "message": "Scroll to the bottom of the page."
+  },
+  "app.shortcut-settings.home-description": {
+    "message": "Scroll to the top of the page."
+  },
+  "app.shortcut-settings.page-down-description": {
+    "message": "Scroll down by one viewport."
+  },
+  "app.shortcut-settings.page-up-description": {
+    "message": "Scroll up by one viewport."
+  },
+  "app.shortcut-settings.title": {
+    "message": "Keyboard shortcuts"
   },
   "app.settings.tabs.launch-defaults": {
     "message": "Launch & instance defaults"

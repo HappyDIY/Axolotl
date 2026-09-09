@@ -122,6 +122,10 @@ import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
 import {
+	getQuickScrollEnabled,
+	getShowScrollTop,
+} from '@/helpers/scroll-top-state'
+import {
 	get as getSettings,
 	getLastBrowseContentProjectType,
 	getPrivacySettings,
@@ -181,6 +185,9 @@ import { AppPopupNotificationManager } from './providers/app-popup-notifications
 const themeStore = useTheming()
 const router = useRouter()
 const route = useRoute()
+// Browse renders its own scroll-to-top button inside the browse tab layout,
+// so the global one must not overlap it there.
+const isBrowseRoute = computed(() => route.path.startsWith('/browse'))
 const onSkinsPage = computed(() => route.path === '/skins')
 const onSchematicWorkshopPage = computed(() => route.path === '/lab/schematic-preview')
 const isSchematicFile = (path: string) => /\.(litematic|schematic|schem)$/i.test(path)
@@ -288,6 +295,7 @@ providePageContext({
 			themeStore.getFeatureFlag('server_ram_as_bytes_always_on'),
 		),
 	},
+	showScrollTop: computed(() => themeStore.showScrollTop),
 	openExternalUrl: (url) => openUrl(url),
 })
 provideModalBehavior({
@@ -495,6 +503,7 @@ function handleGlobalKeydown(event: KeyboardEvent) {
  */
 function handleScrollShortcutKey(event: KeyboardEvent) {
 	if (event.ctrlKey || event.metaKey || event.altKey) return
+	if (!themeStore.quickScrollEnabled) return
 
 	const target = event.target
 	if (
@@ -1187,6 +1196,8 @@ async function setupApp() {
 	themeStore.homeLayout = home_layout
 	themeStore.minimalHomeInstanceId = minimal_home_instance_id
 	themeStore.closeBehavior = close_behavior
+	themeStore.showScrollTop = getShowScrollTop()
+	themeStore.quickScrollEnabled = getQuickScrollEnabled()
 	themeStore.devMode = developer_mode
 	themeStore.featureFlags = feature_flags
 	stateInitialized.value = true
@@ -2636,7 +2647,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 					</Transition>
 				</RouterView>
 			</div>
-			<ScrollToTopButton />
+			<ScrollToTopButton v-if="themeStore.showScrollTop && !isBrowseRoute" />
 		</div>
 		<div
 			class="app-sidebar mt-px shrink-0 flex flex-col border-0 border-l-[1px] border-[--brand-gradient-border] border-solid"

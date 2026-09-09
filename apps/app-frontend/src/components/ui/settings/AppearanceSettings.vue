@@ -24,6 +24,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { exists, mkdir, readFile, remove, writeFile } from '@tauri-apps/plugin-fs'
 import { computed, ref, watch } from 'vue'
 
+import { getShowScrollTop, setShowScrollTop } from '@/helpers/scroll-top-state'
 import { get, set } from '@/helpers/settings.ts'
 import { getOS } from '@/helpers/utils'
 import { useTheming } from '@/store/state'
@@ -53,6 +54,8 @@ const props = withDefaults(
 const themeStore = useTheming()
 const { formatMessage } = useVIntl()
 const { handleError } = injectNotificationManager()
+
+themeStore.showScrollTop = getShowScrollTop()
 
 const skipNonEssentialWarningsFlag: FeatureFlag = 'skip_non_essential_warnings'
 const skipUnknownPackWarningFlag: FeatureFlag = 'skip_unknown_pack_warning'
@@ -335,6 +338,14 @@ const messages = defineMessages({
 	showPlayTimeDescription: {
 		id: 'app.appearance-settings.show-play-time.description',
 		defaultMessage: `Displays how much time you've spent playing an instance.`,
+	},
+	showScrollTopTitle: {
+		id: 'app.appearance-settings.show-scroll-top.title',
+		defaultMessage: 'Show "back to top" button',
+	},
+	showScrollTopDescription: {
+		id: 'app.appearance-settings.show-scroll-top.description',
+		defaultMessage: 'Show a floating back-to-top button on scrollable pages.',
 	},
 	sidebarInstanceCountTitle: {
 		id: 'app.appearance-settings.sidebar-instance-count.title',
@@ -992,6 +1003,26 @@ watch(
 								const newValue = !themeStore.getFeatureFlag(showPlayTimeFlag)
 								themeStore.featureFlags[showPlayTimeFlag] = newValue
 								settings.feature_flags[showPlayTimeFlag] = newValue
+							}
+						"
+					/>
+				</template>
+			</SettingsRow>
+			<SettingsRow>
+				<template #label>
+					<span id="settings-target-appearance-show-scroll-top" tabindex="-1">
+						{{ formatMessage(messages.showScrollTopTitle) }}
+					</span>
+				</template>
+				<template #description>{{ formatMessage(messages.showScrollTopDescription) }}</template>
+				<template #control>
+					<Toggle
+						id="show-scroll-top"
+						:model-value="themeStore.showScrollTop"
+						@update:model-value="
+							(value) => {
+								themeStore.showScrollTop = !!value
+								setShowScrollTop(themeStore.showScrollTop)
 							}
 						"
 					/>

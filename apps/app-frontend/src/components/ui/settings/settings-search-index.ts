@@ -107,6 +107,29 @@ export const settingsSearchEntries: SettingsSearchEntry[] = [
 		),
 	},
 	{
+		id: 'appearance-show-scroll-top',
+		categoryId: 'home-navigation',
+		targetId: 'settings-target-appearance-show-scroll-top',
+		label: message(
+			'app.appearance-settings.show-scroll-top.title',
+			'Show "back to top" button',
+		),
+		description: message(
+			'app.appearance-settings.show-scroll-top.description',
+			'Show a floating back-to-top button on scrollable pages.',
+		),
+	},
+	{
+		id: 'shortcuts-quick-scroll',
+		categoryId: 'shortcut-settings',
+		targetId: 'settings-target-shortcuts-enable',
+		label: message('app.shortcut-settings.enable', 'Enable quick scrolling'),
+		description: message(
+			'app.shortcut-settings.enable-description',
+			'Allow Home / End / Page Up / Page Down to scroll the page.',
+		),
+	},
+	{
 		id: 'appearance-native-decorations',
 		categoryId: 'interface',
 		targetId: 'settings-target-appearance-native-decorations',

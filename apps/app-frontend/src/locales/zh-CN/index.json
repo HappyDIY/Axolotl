@@ -560,6 +560,12 @@
   "app.appearance-settings.show-play-time.title": {
     "message": "显示总游玩时间"
   },
+  "app.appearance-settings.show-scroll-top.description": {
+    "message": "在可滚动页面显示悬浮的返回顶部按钮。"
+  },
+  "app.appearance-settings.show-scroll-top.title": {
+    "message": "显示\u201c回到顶部\u201d按钮"
+  },
   "app.appearance-settings.sidebar-instance-count.description": {
     "message": "侧边栏中显示的最大实例数量。设为 0 则显示全部。"
   },
@@ -7393,6 +7399,33 @@
   },
   "app.settings.tabs.language-translation": {
     "message": "语言与翻译"
+  },
+  "app.settings.tabs.shortcut-settings": {
+    "message": "快捷键管理"
+  },
+  "app.shortcut-settings.description": {
+    "message": "浏览、首页与内容库页面支持快速滚动按键。"
+  },
+  "app.shortcut-settings.enable": {
+    "message": "启用快捷滚动"
+  },
+  "app.shortcut-settings.enable-description": {
+    "message": "允许使用 Home/End/PageUp/PageDown 滚动页面。"
+  },
+  "app.shortcut-settings.end-description": {
+    "message": "滚动到页面底部。"
+  },
+  "app.shortcut-settings.home-description": {
+    "message": "滚动到页面顶部。"
+  },
+  "app.shortcut-settings.page-down-description": {
+    "message": "向下滚动一个视口。"
+  },
+  "app.shortcut-settings.page-up-description": {
+    "message": "向上滚动一个视口。"
+  },
+  "app.shortcut-settings.title": {
+    "message": "键盘快捷键"
   },
   "app.settings.tabs.launch-defaults": {
     "message": "启动与实例默认值"

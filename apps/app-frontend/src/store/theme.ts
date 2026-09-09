@@ -127,6 +127,11 @@ export type ThemeStore = {
 	minimalHomeInstanceId: string | null
 	closeBehavior: CloseBehavior
 
+	/** Whether the floating "back to top" button is shown on scrollable pages. */
+	showScrollTop: boolean
+	/** Whether quick scrolling shortcuts (Home/End/PageUp/PageDown) are active. */
+	quickScrollEnabled: boolean
+
 	devMode: boolean
 	featureFlags: FeatureFlags
 }
@@ -150,6 +155,9 @@ export const DEFAULT_THEME_STORE: ThemeStore = {
 	homeLayout: 'standard',
 	minimalHomeInstanceId: null,
 	closeBehavior: 'ask',
+
+	showScrollTop: true,
+	quickScrollEnabled: true,
 
 	devMode: false,
 	featureFlags: DEFAULT_FEATURE_FLAGS,

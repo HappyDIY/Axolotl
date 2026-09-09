@@ -16,6 +16,7 @@ import ProjectCardList from '#ui/components/project/ProjectCardList.vue'
 import SearchFilterControl from '#ui/components/search/SearchFilterControl.vue'
 import { defineMessages, useVIntl } from '#ui/composables/i18n'
 import { useStickyObserver } from '#ui/composables/sticky-observer'
+import { injectPageContext } from '#ui/providers/page-context'
 import { commonMessages, formatProjectTypeSentence } from '#ui/utils/common-messages'
 import type { SortType } from '#ui/utils/search'
 
@@ -24,6 +25,7 @@ import BrowseInstallHeader from './header.vue'
 import { injectBrowseManager } from './providers/browse-manager'
 
 const ctx = injectBrowseManager()
+const pageContext = injectPageContext()
 const { formatMessage } = useVIntl()
 const lockedMessages = computed(() => toValue(ctx.lockedFilterMessages))
 const stickyInstallHeaderRef = ref<HTMLElement | null>(null)
@@ -412,5 +414,5 @@ const selectedDisplayMode = computed(() =>
 	</div>
 
 	<slot name="after" />
-	<ScrollToTopButton />
+	<ScrollToTopButton v-if="pageContext?.showScrollTop?.value ?? true" />
 </template>
