@@ -1,4 +1,5 @@
 use crate::state::DirectoryInfo;
+use fs4::tokio::AsyncFileExt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha384};
 use sqlx::migrate::{Migration, Migrator};
@@ -16,6 +17,9 @@ const LEGACY_APP_DB_FILE: &str = "app.db";
 // Records an in-flight channel database reconciliation inside the target
 // channel directory; see reconcile_default_channel_database.
 const CHANNEL_RECONCILE_MARKER_FILE: &str = ".channel-reconcile";
+// Serializes concurrent channel database reconciliations across processes
+// (see reconcile_default_channel_database).
+const CHANNEL_RECONCILE_LOCK_FILE: &str = ".channel-reconcile.lock";
 
 const INITIAL_MIGRATION_VERSION: i64 = 20240711194701;
 const COLLIDING_JAVA_DISCOVERY_MIGRATION_VERSION: i64 = 20260722120000;
@@ -192,7 +196,7 @@ pub async fn copy_database_between_channels(
         .ok_or(crate::ErrorKind::FSError(
             "Could not find valid config dir".to_string(),
         ))?;
-    let active_channel = read_update_channel(&settings_dir).await?;
+    let active_channel = resolve_update_channel(&settings_dir).await?;
     if target_channel == active_channel {
         return Err(crate::ErrorKind::InputError(
             "The active database cannot be overwritten while Axolotl is running".to_string(),
@@ -243,11 +247,11 @@ pub async fn backup_current_app_db_for_update(
 }
 
 async fn app_db_path(settings_dir: &Path) -> crate::Result<PathBuf> {
-    let channel = read_update_channel(settings_dir).await?;
+    let channel = resolve_update_channel(settings_dir).await?;
     Ok(settings_dir.join(channel).join(LEGACY_APP_DB_FILE))
 }
 
-async fn read_update_channel(
+async fn resolve_update_channel(
     settings_dir: &Path,
 ) -> crate::Result<&'static str> {
     Ok(read_explicit_update_channel(settings_dir)
@@ -380,6 +384,25 @@ async fn reconcile_default_channel_database(
         return Ok(());
     }
 
+    // Serialize first-run migrations across processes. The OS releases the
+    // lock automatically if we crash mid-migration, and a waiter re-runs the
+    // whole state machine below once it acquires the lock, so an interrupted
+    // attempt by another process is absorbed the same way a crashed one is.
+    let lock_path = settings_dir.join(CHANNEL_RECONCILE_LOCK_FILE);
+    crate::util::io::create_dir_all(settings_dir).await?;
+    let lock_file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .await?;
+    lock_file.lock_exclusive().map_err(|error| {
+        crate::ErrorKind::FSError(format!(
+            "Failed to lock {}: {error}",
+            lock_path.display()
+        ))
+    })?;
+
     let channel = default_update_channel();
     let other_channel = if channel == "release" {
         "beta"
@@ -506,13 +529,13 @@ async fn write_reconcile_marker(
 }
 
 async fn remove_reconcile_marker(marker: &Path) {
-    if let Err(error) = tokio::fs::remove_file(marker).await {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(
-                path = %marker.display(),
-                "Failed to remove channel reconciliation marker: {error}"
-            );
-        }
+    if let Err(error) = tokio::fs::remove_file(marker).await
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            path = %marker.display(),
+            "Failed to remove channel reconciliation marker: {error}"
+        );
     }
 }
 
@@ -2212,7 +2235,7 @@ mod tests {
             None
         );
         assert_eq!(
-            read_update_channel(settings_dir).await.unwrap(),
+            resolve_update_channel(settings_dir).await.unwrap(),
             default_update_channel()
         );
 
@@ -2226,7 +2249,7 @@ mod tests {
             None
         );
         assert_eq!(
-            read_update_channel(settings_dir).await.unwrap(),
+            resolve_update_channel(settings_dir).await.unwrap(),
             default_update_channel()
         );
     }
@@ -2245,7 +2268,10 @@ mod tests {
             read_explicit_update_channel(settings_dir).await.unwrap(),
             Some("release")
         );
-        assert_eq!(read_update_channel(settings_dir).await.unwrap(), "release");
+        assert_eq!(
+            resolve_update_channel(settings_dir).await.unwrap(),
+            "release"
+        );
 
         std::fs::write(
             settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
@@ -2256,7 +2282,7 @@ mod tests {
             read_explicit_update_channel(settings_dir).await.unwrap(),
             Some("beta")
         );
-        assert_eq!(read_update_channel(settings_dir).await.unwrap(), "beta");
+        assert_eq!(resolve_update_channel(settings_dir).await.unwrap(), "beta");
 
         std::fs::write(
             settings_dir.join(UPDATE_CHANNEL_STATE_FILE),
@@ -2264,7 +2290,7 @@ mod tests {
         )
         .unwrap();
         assert!(read_explicit_update_channel(settings_dir).await.is_err());
-        assert!(read_update_channel(settings_dir).await.is_err());
+        assert!(resolve_update_channel(settings_dir).await.is_err());
     }
 
     #[tokio::test]
