@@ -2119,109 +2119,15 @@ async fn install_file_from_resolution_plan(
             }
 
             let node = pending.remove(index);
-            let installed_node = match &node.content {
-                ContentProviderRef::CurseForge {
-                    project_id,
-                    file_id,
-                } => {
-                    if let Some(file_id) = file_id {
-                        let project_id = project_id.get();
-                        let project = get_project(project_id).await?;
-                        if let Some(project_type) =
-                            recognized_project_type(project.class_id)
-                        {
-                            match install_fixed_curseforge_content(
-                                request,
-                                project_id,
-                                file_id.get(),
-                                project_type,
-                                true,
-                                node.expected_sha1.as_deref(),
-                                node.expected_size,
-                                download_metrics,
-                                &mut result,
-                            )
-                            .await
-                            {
-                                Ok(installed) => installed,
-                                Err(error) => {
-                                    result.failed_downloads.push(
-                                        CurseForgeFailedDownload {
-                                            project_id,
-                                            file_id: file_id.get(),
-                                            file_name: project.name,
-                                            reason: error.to_string(),
-                                        },
-                                    );
-                                    false
-                                }
-                            }
-                        } else {
-                            result.skipped_dependencies.push(
-                                CurseForgeSkippedDependency {
-                                    project_id,
-                                    file_id: Some(file_id.get()),
-                                    reason: "unsupported_project_type"
-                                        .to_string(),
-                                },
-                            );
-                            false
-                        }
-                    } else {
-                        result.skipped_dependencies.push(
-                            CurseForgeSkippedDependency {
-                                project_id: project_id.get(),
-                                file_id: None,
-                                reason: "missing_version".to_string(),
-                            },
-                        );
-                        false
-                    }
-                }
-                ContentProviderRef::Modrinth { .. } => {
-                    match install_fixed_modrinth_content(
-                        request, plan, &node, state,
-                    )
-                    .await
-                    {
-                        Ok(()) => true,
-                        Err(error) => {
-                            result.failed_downloads.push(
-                                CurseForgeFailedDownload {
-                                    project_id: curseforge_project_id(
-                                        node.parent
-                                            .as_ref()
-                                            .unwrap_or(&plan.primary),
-                                    )
-                                    .unwrap_or_default(),
-                                    file_id: curseforge_file_id(
-                                        node.parent
-                                            .as_ref()
-                                            .unwrap_or(&plan.primary),
-                                    )
-                                    .unwrap_or_default(),
-                                    file_name: format!(
-                                        "Modrinth {}",
-                                        node.content.database_project_id()
-                                    ),
-                                    reason: error.to_string(),
-                                },
-                            );
-                            false
-                        }
-                    }
-                }
-                ContentProviderRef::McArchive { .. } => {
-                    result.skipped_dependencies.push(
-                        CurseForgeSkippedDependency {
-                            project_id: 0,
-                            file_id: None,
-                            reason: "unsupported_provider".to_string(),
-                        },
-                    );
-                    false
-                }
-            };
+            let installed_node = install_resolution_plan_node(
+                request,
+                plan,
+                &node,
+                download_metrics,
+                state,
+                &mut result,
+            )
+            .await?;
             if installed_node {
                 if let Some(ContentProviderRef::CurseForge {
                     project_id,
@@ -2273,6 +2179,105 @@ async fn install_file_from_resolution_plan(
     )
     .await?;
     Ok(result)
+}
+
+async fn install_resolution_plan_node(
+    request: &CurseForgeInstallRequest,
+    plan: &DependencyResolutionPlan,
+    node: &DependencyResolutionNode,
+    download_metrics: Option<&CurseForgeDownloadMetrics>,
+    state: &State,
+    result: &mut CurseForgeInstallResult,
+) -> crate::Result<bool> {
+    match &node.content {
+        ContentProviderRef::CurseForge {
+            project_id,
+            file_id,
+        } => {
+            let Some(file_id) = file_id else {
+                result
+                    .skipped_dependencies
+                    .push(CurseForgeSkippedDependency {
+                        project_id: project_id.get(),
+                        file_id: None,
+                        reason: "missing_version".to_string(),
+                    });
+                return Ok(false);
+            };
+            let project_id = project_id.get();
+            let project = get_project(project_id).await?;
+            let Some(project_type) = recognized_project_type(project.class_id)
+            else {
+                result
+                    .skipped_dependencies
+                    .push(CurseForgeSkippedDependency {
+                        project_id,
+                        file_id: Some(file_id.get()),
+                        reason: "unsupported_project_type".to_string(),
+                    });
+                return Ok(false);
+            };
+            match install_fixed_curseforge_content(
+                request,
+                project_id,
+                file_id.get(),
+                project_type,
+                true,
+                node.expected_sha1.as_deref(),
+                node.expected_size,
+                download_metrics,
+                result,
+            )
+            .await
+            {
+                Ok(installed) => Ok(installed),
+                Err(error) => {
+                    result.failed_downloads.push(CurseForgeFailedDownload {
+                        project_id,
+                        file_id: file_id.get(),
+                        file_name: project.name,
+                        reason: error.to_string(),
+                    });
+                    Ok(false)
+                }
+            }
+        }
+        ContentProviderRef::Modrinth { .. } => {
+            match install_fixed_modrinth_content(request, plan, node, state)
+                .await
+            {
+                Ok(()) => Ok(true),
+                Err(error) => {
+                    result.failed_downloads.push(CurseForgeFailedDownload {
+                        project_id: curseforge_project_id(
+                            node.parent.as_ref().unwrap_or(&plan.primary),
+                        )
+                        .unwrap_or_default(),
+                        file_id: curseforge_file_id(
+                            node.parent.as_ref().unwrap_or(&plan.primary),
+                        )
+                        .unwrap_or_default(),
+                        file_name: format!(
+                            "Modrinth {}",
+                            node.content.database_project_id()
+                        ),
+                        reason: error.to_string(),
+                    });
+                    Ok(false)
+                }
+            }
+        }
+        ContentProviderRef::McArchive { .. } => {
+            result
+                .skipped_dependencies
+                .push(CurseForgeSkippedDependency {
+                    project_id: 0,
+                    file_id: None,
+                    reason: "unsupported_provider".to_string(),
+                });
+            Ok(false)
+        }
+    }
 }
 
 async fn install_fixed_curseforge_content(
