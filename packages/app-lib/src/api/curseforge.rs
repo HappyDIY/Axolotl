@@ -1879,19 +1879,20 @@ async fn install_file_with_metrics(
         };
 
         validate_file_name(&file.file_name)?;
-        let relative_path = download_installed_file(
-            &request.instance_id,
-            &download_url,
-            &file,
-            item_type,
-            request.world_name.as_deref(),
-            project_id,
-            file_id,
-            &project.slug,
-            request.ownership_kind,
-            download_metrics,
-        )
-        .await?;
+        let relative_path =
+            download_installed_file(DownloadInstalledFileRequest {
+                instance_id: &request.instance_id,
+                url: &download_url,
+                file: &file,
+                project_type: item_type,
+                world_name: request.world_name.as_deref(),
+                project_id,
+                file_id,
+                project_slug: &project.slug,
+                ownership_kind: request.ownership_kind,
+                download_metrics,
+            })
+            .await?;
         result.installed.push(CurseForgeInstalledFile {
             project_id,
             file_id,
@@ -2335,18 +2336,18 @@ async fn install_fixed_curseforge_content(
         return Ok(false);
     };
     validate_file_name(&file.file_name)?;
-    let relative_path = download_installed_file(
-        &request.instance_id,
-        &download_url,
-        &file,
+    let relative_path = download_installed_file(DownloadInstalledFileRequest {
+        instance_id: &request.instance_id,
+        url: &download_url,
+        file: &file,
         project_type,
-        request.world_name.as_deref(),
+        world_name: request.world_name.as_deref(),
         project_id,
         file_id,
-        &project.slug,
-        request.ownership_kind,
+        project_slug: &project.slug,
+        ownership_kind: request.ownership_kind,
         download_metrics,
-    )
+    })
     .await?;
     result.installed.push(CurseForgeInstalledFile {
         project_id,
@@ -7936,18 +7937,34 @@ async fn download_curseforge_archive(
     .await
 }
 
-async fn download_installed_file(
-    instance_id: &str,
-    url: &str,
-    file: &CurseForgeFile,
+struct DownloadInstalledFileRequest<'a> {
+    instance_id: &'a str,
+    url: &'a str,
+    file: &'a CurseForgeFile,
     project_type: ProjectType,
-    world_name: Option<&str>,
+    world_name: Option<&'a str>,
     project_id: u32,
     file_id: u32,
-    project_slug: &str,
+    project_slug: &'a str,
     ownership_kind: crate::state::instances::ContentOwnershipKind,
-    download_metrics: Option<&CurseForgeDownloadMetrics>,
+    download_metrics: Option<&'a CurseForgeDownloadMetrics>,
+}
+
+async fn download_installed_file(
+    request: DownloadInstalledFileRequest<'_>,
 ) -> crate::Result<String> {
+    let DownloadInstalledFileRequest {
+        instance_id,
+        url,
+        file,
+        project_type,
+        world_name,
+        project_id,
+        file_id,
+        project_slug,
+        ownership_kind,
+        download_metrics,
+    } = request;
     if file.mod_id != project_id || file.id != file_id {
         return Err(ErrorKind::InputError(
             "CurseForge returned metadata for a different project or file"
