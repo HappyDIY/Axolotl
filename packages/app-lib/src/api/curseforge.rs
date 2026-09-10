@@ -19,7 +19,7 @@ use crate::state::{
     ModrinthProjectId, ModrinthVersionId, ProjectType, ReleaseChannel,
 };
 use crate::util::fetch::{
-    ContentValidation, DownloadRequest, DownloadResult, DownloadRouteSource,
+    ContentValidation, DownloadRequest, DownloadRouteSource,
     FetchProgressFn, Integrity, ProxyPolicy, ResourceClass, download_to_path,
     resolve_download_routes_for, sha1_file_async,
 };
@@ -43,6 +43,9 @@ use curseforge_validation::{validate_file_name, validate_world_archive_name};
 #[path = "curseforge_download.rs"]
 mod curseforge_download;
 use curseforge_download::normalized_download_url;
+#[path = "curseforge_metrics.rs"]
+mod curseforge_metrics;
+use curseforge_metrics::CurseForgeDownloadMetrics;
 
 const API_BASE_URL: &str = "https://api.curseforge.com";
 const MINECRAFT_GAME_ID: u32 = 432;
@@ -135,47 +138,6 @@ struct CachedDependencyResolutionPlan {
     expires_at: Instant,
 }
 
-#[derive(Default)]
-struct CurseForgeDownloadMetrics {
-    source: Mutex<Option<String>>,
-    fallback_count: AtomicU64,
-    reporter: Option<InstallProgressReporter>,
-}
-
-impl CurseForgeDownloadMetrics {
-    fn with_reporter(reporter: InstallProgressReporter) -> Self {
-        Self {
-            reporter: Some(reporter),
-            ..Self::default()
-        }
-    }
-
-    fn record(&self, result: &DownloadResult) {
-        if result.attempts > 0
-            && let Ok(mut source) = self.source.lock()
-        {
-            *source = Some(result.source.as_str().to_string());
-        }
-        self.fallback_count
-            .fetch_add(result.fallback_count as u64, Ordering::Relaxed);
-    }
-
-    async fn finish(
-        &self,
-        reporter: &InstallProgressReporter,
-    ) -> crate::Result<()> {
-        let source = self.source.lock().ok().and_then(|source| source.clone());
-        if let Some(source) = source {
-            reporter
-                .record_download_metrics(
-                    source,
-                    self.fallback_count.load(Ordering::Relaxed),
-                )
-                .await?;
-        }
-        Ok(())
-    }
-}
 static CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(15))
