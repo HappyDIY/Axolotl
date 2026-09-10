@@ -1,7 +1,7 @@
 use crate::install::InstallProgressReporter;
 use crate::util::fetch::DownloadResult;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 pub(super) struct CurseForgeDownloadMetrics {
