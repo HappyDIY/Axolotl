@@ -2321,6 +2321,9 @@
   "app.home.worlds.pinned": {
     "message": "固定的世界"
   },
+  "app.initialization.quit": {
+    "message": "退出启动器"
+  },
   "app.install.phase.downloading_content": {
     "message": "正在下载内容"
   },
