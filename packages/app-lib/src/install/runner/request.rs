@@ -499,7 +499,8 @@ pub(super) async fn run_request(
             display_icon: _,
         } => {
             let instance_id = request.instance_id.clone();
-            if pack::curseforge_world_was_imported_manually(job_state, &request) {
+            if pack::curseforge_world_was_imported_manually(job_state, &request)
+            {
                 return Ok(InstallExecutionOutcome::Completed(Some(
                     instance_id,
                 )));

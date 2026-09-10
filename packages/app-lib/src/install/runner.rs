@@ -35,15 +35,15 @@ use std::future::Future;
 use std::path::PathBuf;
 use uuid::Uuid;
 
-mod lifecycle;
-mod upgrade;
-mod pack;
 mod adjunct;
+mod lifecycle;
+mod pack;
 mod request;
+mod upgrade;
 
 pub(crate) use adjunct::{
-	install_liteloader_adjunct_resolved, install_optifabric_file,
-	resolve_optifabric_version, validate_loader_components,
+    install_liteloader_adjunct_resolved, install_optifabric_file,
+    resolve_optifabric_version, validate_loader_components,
 };
 
 enum InstallExecutionOutcome<T> {
@@ -994,12 +994,13 @@ async fn prepare_initial_instance(
                     )
                     .await?;
                     set_instance_id(job_state, created.instance.id.clone());
-                    if let Err(error) = upgrade::clone_instance_loader_components(
-                        &metadata.loader_components,
-                        &created.instance.id,
-                        state,
-                    )
-                    .await
+                    if let Err(error) =
+                        upgrade::clone_instance_loader_components(
+                            &metadata.loader_components,
+                            &created.instance.id,
+                            state,
+                        )
+                        .await
                     {
                         return Err(cleanup_failed_initial_install(
                             job_state, state, error,
@@ -1070,7 +1071,6 @@ async fn prepare_initial_instance(
 
     Ok(())
 }
-
 
 async fn apply_post_install_edit(
     instance_id: &str,
@@ -1435,7 +1435,9 @@ fn current_instance_id(job_state: &InstallJobState) -> Option<String> {
 
 pub(crate) const OPTIFABRIC_CURSEFORGE_PROJECT_ID: u32 = 322_385;
 
-pub(super) fn modpack_details(location: &CreatePackLocation) -> InstallPhaseDetails {
+pub(super) fn modpack_details(
+    location: &CreatePackLocation,
+) -> InstallPhaseDetails {
     match location {
         CreatePackLocation::FromVersionId {
             project_id,

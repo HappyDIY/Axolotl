@@ -320,10 +320,7 @@ fn curseforge_file(
         download_count: 0,
         file_size_on_disk: None,
         download_url: None,
-        game_versions: game_versions
-            .iter()
-            .map(ToString::to_string)
-            .collect(),
+        game_versions: game_versions.iter().map(ToString::to_string).collect(),
         sortable_game_versions: Vec::new(),
         dependencies: Vec::new(),
         expose_as_alternative: None,
@@ -363,10 +360,7 @@ fn loader_component_preflight_rejects_unverified_combinations() {
     for components in [
         components(ModLoader::Quilt, &[LoaderComponentKind::OptiFine]),
         components(ModLoader::Cleanroom, &[LoaderComponentKind::OptiFine]),
-        components(
-            ModLoader::LegacyFabric,
-            &[LoaderComponentKind::LiteLoader],
-        ),
+        components(ModLoader::LegacyFabric, &[LoaderComponentKind::LiteLoader]),
         components(ModLoader::Fabric, &[LoaderComponentKind::LiteLoader]),
         components(ModLoader::Fabric, &[LoaderComponentKind::OptiFine]),
         components(
@@ -414,11 +408,8 @@ fn cache_read_errors_have_repair_context_but_generic_sqlx_does_not() {
         sqlite_code: Some("11".to_string()),
     }
     .into();
-    let view = install_error_view(
-        InstallPhaseId::ResolvingPack,
-        &cache_error,
-        None,
-    );
+    let view =
+        install_error_view(InstallPhaseId::ResolvingPack, &cache_error, None);
     assert_eq!(view.code, "cache_repair_required");
     let context = view.context.unwrap();
     assert_eq!(context.cache_types, vec!["curseforge_project"]);
@@ -451,8 +442,7 @@ fn cache_repair_validation_rejects_old_or_unknown_context() {
         .is_err()
     );
 
-    let mut unknown_context =
-        InstallErrorContext::new("read cache").build();
+    let mut unknown_context = InstallErrorContext::new("read cache").build();
     unknown_context.cache_types = vec!["install_jobs".to_string()];
     assert!(
         validated_cache_repair_types_for(
@@ -499,11 +489,10 @@ fn cache_repair_validation_accepts_only_whitelisted_terminal_jobs() {
 
 #[test]
 fn missing_required_content_pauses_without_starting_rollback() {
-    let mut job_state =
-        InstallJobState::new(InstallRequest::DownloadJava {
-            vendor: "test".to_string(),
-            version: 21,
-        });
+    let mut job_state = InstallJobState::new(InstallRequest::DownloadJava {
+        vendor: "test".to_string(),
+        version: 21,
+    });
     job_state.progress.phase = InstallPhaseId::DownloadingContent;
     job_state.cleanup = InstallCleanup::DeleteNewInstance {
         instance_id: Some("same-instance".to_string()),
@@ -516,10 +505,7 @@ fn missing_required_content_pauses_without_starting_rollback() {
 
     begin_waiting_for_user(&mut job_state, reason.clone());
 
-    assert_eq!(
-        job_state.progress.phase,
-        InstallPhaseId::DownloadingContent
-    );
+    assert_eq!(job_state.progress.phase, InstallPhaseId::DownloadingContent);
     assert_eq!(job_state.pause_reason, Some(reason));
     assert_eq!(job_state.cleanup, cleanup);
     assert!(job_state.error.is_none());
@@ -536,25 +522,25 @@ fn missing_required_content_pauses_without_starting_rollback() {
 
 #[test]
 fn curseforge_manual_downloads_create_a_recoverable_pause() {
-    let manual_download =
-        crate::api::curseforge::CurseForgeManualDownload {
-            project_id: 123,
-            file_id: 456,
-            file_name: "mods/manual.jar".to_string(),
-            ownership_kind:
-                crate::state::instances::ContentOwnershipKind::PackManaged,
-            operation_kind: crate::state::instances::ManualDownloadOperationKind::PackInstall,
-            website_url: Some(
-                "https://www.curseforge.com/minecraft/mc-mods/example/download/456"
-                    .to_string(),
-            ),
-            project_type: "mod".to_string(),
-            project_slug: "example".to_string(),
-            target_folder: "mods".to_string(),
-            hashes: Vec::new(),
-            file_length: 12,
-            file_fingerprint: 34,
-        };
+    let manual_download = crate::api::curseforge::CurseForgeManualDownload {
+        project_id: 123,
+        file_id: 456,
+        file_name: "mods/manual.jar".to_string(),
+        ownership_kind:
+            crate::state::instances::ContentOwnershipKind::PackManaged,
+        operation_kind:
+            crate::state::instances::ManualDownloadOperationKind::PackInstall,
+        website_url: Some(
+            "https://www.curseforge.com/minecraft/mc-mods/example/download/456"
+                .to_string(),
+        ),
+        project_type: "mod".to_string(),
+        project_slug: "example".to_string(),
+        target_folder: "mods".to_string(),
+        hashes: Vec::new(),
+        file_length: 12,
+        file_fingerprint: 34,
+    };
     let result = crate::api::curseforge::CurseForgeModpackInstallResult {
         content: crate::api::curseforge::CurseForgeInstallResult {
             manual_downloads: vec![manual_download],
@@ -609,11 +595,10 @@ fn recovered_manual_world_download_does_not_run_again() {
 
 #[test]
 fn resume_preserves_instance_cleanup_and_existing_pack_checkpoint() {
-    let mut job_state =
-        InstallJobState::new(InstallRequest::DownloadJava {
-            vendor: "test".to_string(),
-            version: 21,
-        });
+    let mut job_state = InstallJobState::new(InstallRequest::DownloadJava {
+        vendor: "test".to_string(),
+        version: 21,
+    });
     job_state.target = InstallTarget::NewInstance {
         instance_id: Some("same-instance".to_string()),
     };
@@ -624,11 +609,10 @@ fn resume_preserves_instance_cleanup_and_existing_pack_checkpoint() {
         Some(InstallContinuationState::InstallingPackToExistingInstance {
             disabled_project_ids: vec!["project-a".to_string()],
         });
-    job_state.pause_reason =
-        Some(InstallPauseReason::MissingRequiredContent {
-            failed_files: 1,
-            paths: vec!["mods/a.jar".to_string()],
-        });
+    job_state.pause_reason = Some(InstallPauseReason::MissingRequiredContent {
+        failed_files: 1,
+        paths: vec!["mods/a.jar".to_string()],
+    });
     let target = job_state.target.clone();
     let cleanup = job_state.cleanup.clone();
     let continuation = job_state.continuation.clone();
@@ -647,16 +631,14 @@ fn resume_preserves_instance_cleanup_and_existing_pack_checkpoint() {
 
 #[test]
 fn resumed_job_can_pause_again_without_rollback() {
-    let mut job_state =
-        InstallJobState::new(InstallRequest::DownloadJava {
-            vendor: "test".to_string(),
-            version: 21,
-        });
-    job_state.pause_reason =
-        Some(InstallPauseReason::MissingRequiredContent {
-            failed_files: 1,
-            paths: vec!["mods/first.jar".to_string()],
-        });
+    let mut job_state = InstallJobState::new(InstallRequest::DownloadJava {
+        vendor: "test".to_string(),
+        version: 21,
+    });
+    job_state.pause_reason = Some(InstallPauseReason::MissingRequiredContent {
+        failed_files: 1,
+        paths: vec!["mods/first.jar".to_string()],
+    });
     prepare_resumed_job(&mut job_state);
     begin_waiting_for_user(
         &mut job_state,
@@ -758,8 +740,7 @@ fn manifest_and_override_errors_remain_fatal() {
 async fn global_state() -> std::sync::Arc<State> {
     if !State::initialized() {
         let root = tempfile::tempdir().unwrap().keep();
-        let _ =
-            State::init_for_test(root.to_string_lossy().to_string()).await;
+        let _ = State::init_for_test(root.to_string_lossy().to_string()).await;
     }
     State::get().await.unwrap()
 }
@@ -820,8 +801,7 @@ fn upgrade_failure_preserves_applying_phase_after_successful_rollback() {
         None,
         InstallPhaseDetails::Empty,
     );
-    let failed_phase =
-        latest_failure_phase(&execution_state, &reporter_state);
+    let failed_phase = latest_failure_phase(&execution_state, &reporter_state);
     let mut terminal_state = reporter_state;
     terminal_state.progress.phase = failed_phase;
     let error: crate::Error = crate::ErrorKind::InputError(
@@ -962,8 +942,7 @@ async fn upgrade_backup_clones_authoritative_content_metadata() {
             crate::state::instances::ContentOwnershipKind::PackManaged,
         ),
     ];
-    for (relative_path, bytes, project_id, release_id, ownership) in content
-    {
+    for (relative_path, bytes, project_id, release_id, ownership) in content {
         let path = source_base.join(relative_path);
         crate::util::io::write(&path, bytes).await.unwrap();
         let (_, sha1) =
@@ -1009,9 +988,7 @@ async fn upgrade_backup_clones_authoritative_content_metadata() {
         .collect::<HashMap<_, _>>();
     let entry_by_path = source_entries
         .iter()
-        .map(|entry| {
-            (paths_by_file[entry.file_id.as_deref().unwrap()], entry)
-        })
+        .map(|entry| (paths_by_file[entry.file_id.as_deref().unwrap()], entry))
         .collect::<HashMap<_, _>>();
     let sodium = entry_by_path["mods/sodium.jar"];
     let lithium = entry_by_path["mods/lithium.jar"];
@@ -1092,16 +1069,12 @@ async fn upgrade_backup_clones_authoritative_content_metadata() {
     let sodium_snapshot = snapshot
         .items
         .iter()
-        .find(|item| {
-            item.provider_project_id.as_deref() == Some("AANobbMI")
-        })
+        .find(|item| item.provider_project_id.as_deref() == Some("AANobbMI"))
         .unwrap();
     let lithium_snapshot = snapshot
         .items
         .iter()
-        .find(|item| {
-            item.provider_project_id.as_deref() == Some("gvQqBUqZ")
-        })
+        .find(|item| item.provider_project_id.as_deref() == Some("gvQqBUqZ"))
         .unwrap();
     assert_eq!(
         sodium_snapshot.provider_release_id.as_deref(),
@@ -1265,13 +1238,10 @@ async fn upgrade_applies_solver_and_non_solver_physical_actions() {
             crate::state::instances::ContentSourceKind::Local,
             crate::state::instances::ContentOwnershipKind::UserAdded,
             Some(&ContentProviderRef::Modrinth {
-                project_id: crate::state::ModrinthProjectId::new(
-                    project_id,
-                )
-                .unwrap(),
+                project_id: crate::state::ModrinthProjectId::new(project_id)
+                    .unwrap(),
                 version_id: Some(
-                    crate::state::ModrinthVersionId::new(release_id)
-                        .unwrap(),
+                    crate::state::ModrinthVersionId::new(release_id).unwrap(),
                 ),
             }),
             true,
@@ -1420,10 +1390,9 @@ async fn upgrade_applies_solver_and_non_solver_physical_actions() {
     crate::util::io::write(&staged_path, b"target-upgrade")
         .await
         .unwrap();
-    let (_, staged_sha1) =
-        crate::util::fetch::sha1_file_async(&staged_path)
-            .await
-            .unwrap();
+    let (_, staged_sha1) = crate::util::fetch::sha1_file_async(&staged_path)
+        .await
+        .unwrap();
     let staged = vec![StagedUpgradeMutation {
         existing_path: Some("mods/solver-upgrade.jar".to_string()),
         target_path: "mods/solver-upgrade.jar".to_string(),
@@ -1531,10 +1500,7 @@ fn instance_upgrade_full_scan_detects_enabled_state_change() {
         &[upgrade_source_file("mods/mod.jar", "same", false)],
     );
     assert_eq!(changes.len(), 1);
-    assert_eq!(
-        changes[0].kind,
-        InstanceUpgradeExternalChangeKind::Modified
-    );
+    assert_eq!(changes[0].kind, InstanceUpgradeExternalChangeKind::Modified);
 }
 
 #[test]
@@ -1550,10 +1516,7 @@ fn instance_upgrade_reports_external_edit_after_launcher_mutation() {
 
     assert_eq!(changes.len(), 1);
     assert_eq!(changes[0].relative_path, "mods/lithium.jar");
-    assert_eq!(
-        changes[0].kind,
-        InstanceUpgradeExternalChangeKind::Modified
-    );
+    assert_eq!(changes[0].kind, InstanceUpgradeExternalChangeKind::Modified);
 }
 
 #[test]
@@ -1574,19 +1537,11 @@ fn instance_upgrade_reports_external_add_but_not_launcher_write() {
         &[],
         &[
             upgrade_source_file("mods/dependency.jar", "target", true),
-            upgrade_source_file(
-                "mods/t16-external-added.jar",
-                "user",
-                true,
-            ),
+            upgrade_source_file("mods/t16-external-added.jar", "user", true),
         ],
         &HashMap::from([(
             "mods/dependency.jar".to_string(),
-            Some(upgrade_source_file(
-                "mods/dependency.jar",
-                "target",
-                true,
-            )),
+            Some(upgrade_source_file("mods/dependency.jar", "target", true)),
         )]),
     );
 
@@ -1624,8 +1579,7 @@ fn instance_upgrade_external_changes_coalesce_with_skipped_conflicts() {
 
 #[test]
 fn instance_upgrade_external_target_conflict_skips_mutation() {
-    let mutation =
-        test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
+    let mutation = test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
     assert!(upgrade_mutation_conflicts(
         &mutation,
         &HashSet::from(["mods/new.jar".to_string()])
@@ -1634,8 +1588,7 @@ fn instance_upgrade_external_target_conflict_skips_mutation() {
 
 #[test]
 fn instance_upgrade_external_delete_conflict_skips_mutation() {
-    let mutation =
-        test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
+    let mutation = test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
     assert!(upgrade_mutation_conflicts(
         &mutation,
         &HashSet::from(["mods/old.jar".to_string()])
@@ -1644,8 +1597,7 @@ fn instance_upgrade_external_delete_conflict_skips_mutation() {
 
 #[test]
 fn instance_upgrade_unrelated_external_change_does_not_skip_mutation() {
-    let mutation =
-        test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
+    let mutation = test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
     assert!(!upgrade_mutation_conflicts(
         &mutation,
         &HashSet::from(["mods/user.jar".to_string()])
@@ -1702,8 +1654,7 @@ fn instance_upgrade_staging_populates_persisted_download_summary() {
     }
 
     let persisted = serde_json::to_string(&job).unwrap();
-    let restored: InstallJobState =
-        serde_json::from_str(&persisted).unwrap();
+    let restored: InstallJobState = serde_json::from_str(&persisted).unwrap();
     let summary = restored.download_summary();
     assert_eq!(summary.files_completed, 27);
     assert_eq!(summary.files_total, Some(27));
