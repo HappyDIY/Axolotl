@@ -37,6 +37,10 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
+#[path = "curseforge_validation.rs"]
+mod curseforge_validation;
+use curseforge_validation::{validate_file_name, validate_world_archive_name};
+
 const API_BASE_URL: &str = "https://api.curseforge.com";
 const MINECRAFT_GAME_ID: u32 = 432;
 const MAX_PAGE_SIZE: u32 = 50;
@@ -7693,35 +7697,6 @@ async fn persist_manual_download(
     .await?;
     tx.commit().await?;
     Ok(())
-}
-
-fn validate_file_name(file_name: &str) -> crate::Result<()> {
-    let path = Path::new(file_name);
-    if file_name.is_empty()
-        || path.components().count() != 1
-        || !matches!(path.components().next(), Some(Component::Normal(_)))
-    {
-        return Err(ErrorKind::InputError(
-            "CurseForge returned an invalid file name".to_string(),
-        )
-        .into());
-    }
-    Ok(())
-}
-
-fn validate_world_archive_name(file_name: &str) -> crate::Result<()> {
-    validate_file_name(file_name)?;
-    if Path::new(file_name)
-        .extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("zip"))
-    {
-        return Ok(());
-    }
-    Err(ErrorKind::InputError(
-        "CurseForge world downloads must be ZIP archives".to_string(),
-    )
-    .into())
 }
 
 fn format_bytes(bytes: u64) -> String {
