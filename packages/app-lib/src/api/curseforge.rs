@@ -19,8 +19,8 @@ use crate::state::{
     ModrinthProjectId, ModrinthVersionId, ProjectType, ReleaseChannel,
 };
 use crate::util::fetch::{
-    ContentValidation, DownloadRequest, DownloadRouteSource,
-    FetchProgressFn, Integrity, ProxyPolicy, ResourceClass, download_to_path,
+    ContentValidation, DownloadRequest, DownloadRouteSource, FetchProgressFn,
+    Integrity, ProxyPolicy, ResourceClass, download_to_path,
     resolve_download_routes_for, sha1_file_async,
 };
 use crate::{ErrorKind, State};
@@ -46,6 +46,12 @@ use curseforge_download::normalized_download_url;
 #[path = "curseforge_metrics.rs"]
 mod curseforge_metrics;
 use curseforge_metrics::CurseForgeDownloadMetrics;
+#[path = "curseforge_mapping.rs"]
+mod curseforge_mapping;
+use curseforge_mapping::{
+    filter_categories, mod_loader_to_slug, project_type_for_class, push_query,
+    recognized_project_type,
+};
 
 const API_BASE_URL: &str = "https://api.curseforge.com";
 const MINECRAFT_GAME_ID: u32 = 432;
@@ -8190,66 +8196,6 @@ impl From<CurseForgeProject> for UnifiedSearchHit {
             source_url: project.links.source_url,
             allow_mod_distribution: project.allow_mod_distribution,
         }
-    }
-}
-
-fn mod_loader_to_slug(mod_loader_type: u32) -> &'static str {
-    match mod_loader_type {
-        1 => "forge",
-        4 => "fabric",
-        5 => "quilt",
-        6 => "neoforge",
-        _ => "unknown",
-    }
-}
-
-fn project_type_for_class(class_id: Option<u32>) -> &'static str {
-    match class_id {
-        Some(5) => "plugin",
-        Some(6) => "mod",
-        Some(12) => "resourcepack",
-        Some(17) => "world",
-        Some(6945) => "datapack",
-        Some(4471) => "modpack",
-        Some(6552) => "shader",
-        _ => "mod",
-    }
-}
-
-fn recognized_project_type(class_id: Option<u32>) -> Option<ProjectType> {
-    match class_id {
-        Some(6) => Some(ProjectType::Mod),
-        Some(12) => Some(ProjectType::ResourcePack),
-        Some(6552) => Some(ProjectType::ShaderPack),
-        Some(6945) => Some(ProjectType::DataPack),
-        Some(17) => Some(ProjectType::WorldSave),
-        _ => None,
-    }
-}
-
-fn filter_categories(
-    categories: Vec<CurseForgeCategory>,
-    class_id: Option<u32>,
-) -> Vec<CurseForgeCategory> {
-    let Some(class_id) = class_id else {
-        return categories;
-    };
-
-    categories
-        .into_iter()
-        .filter(|category| {
-            category.id == class_id || category.class_id == Some(class_id)
-        })
-        .collect()
-}
-
-fn push_query<T: ToString>(
-    query: &mut Vec<(String, String)>,
-    name: &str,
-    value: Option<T>,
-) {
-    if let Some(value) = value {
-        query.push((name.to_string(), value.to_string()));
     }
 }
 
