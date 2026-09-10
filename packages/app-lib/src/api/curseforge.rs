@@ -1938,13 +1938,31 @@ async fn install_file_with_metrics(
         }
     }
 
-    install_modrinth_fallbacks(
+    finalize_install_result(
         &request.instance_id,
         &modrinth_fallbacks,
         &mut result,
+        &edge_candidates,
         &state,
     )
     .await?;
+    Ok(result)
+}
+
+/// Completes the common post-processing for a CurseForge installation.
+///
+/// Keeping fallback installation, result normalization, and dependency-edge
+/// persistence together makes the main dependency walk easier to reason about
+/// and gives preview/resolution-plan flows a single place to reuse later.
+async fn finalize_install_result(
+    instance_id: &str,
+    modrinth_fallbacks: &[ModrinthFallbackPlan],
+    result: &mut CurseForgeInstallResult,
+    edge_candidates: &[CurseForgeDependencyEdgeCandidate],
+    state: &State,
+) -> crate::Result<()> {
+    install_modrinth_fallbacks(instance_id, modrinth_fallbacks, result, state)
+        .await?;
 
     result.optional_dependencies.sort_unstable();
     result.optional_dependencies.dedup();
@@ -1952,13 +1970,10 @@ async fn install_file_with_metrics(
     result.incompatible_dependencies.dedup();
     result.skipped_dependencies.sort_unstable();
     result.skipped_dependencies.dedup();
-    persist_curseforge_dependency_edges(
-        &request.instance_id,
-        &edge_candidates,
-        &state,
-    )
-    .await?;
-    Ok(result)
+
+    persist_curseforge_dependency_edges(instance_id, edge_candidates, state)
+        .await?;
+    Ok(())
 }
 
 async fn load_dependency_resolution_plan(
