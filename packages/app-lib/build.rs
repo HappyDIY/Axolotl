@@ -42,6 +42,17 @@ fn set_env() {
     if let Some(curseforge_api_key) = curseforge_api_key {
         println!("cargo::rustc-env=CURSEFORGE_API_KEY={curseforge_api_key}");
     }
+
+    // Lets a local or test build keep its data next to nothing else: the
+    // settings directory is derived from this value, so builds that set it
+    // never touch the database of an installed launcher. Releases leave it
+    // unset and therefore keep the plain identifier.
+    println!("cargo::rerun-if-env-changed=AXOLOTL_DATA_DIR_SUFFIX");
+    if let Ok(suffix) = env::var("AXOLOTL_DATA_DIR_SUFFIX")
+        && !suffix.is_empty()
+    {
+        println!("cargo::rustc-env=AXOLOTL_DATA_DIR_SUFFIX={suffix}");
+    }
 }
 
 fn read_dotenv_literal(name: &str) -> Option<String> {
