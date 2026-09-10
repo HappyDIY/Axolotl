@@ -116,7 +116,7 @@ async fn run_job(job_id: Uuid) -> crate::Result<()> {
     let result = tokio::select! {
         biased;
         _ = cancellation.cancelled() => RunResult::Canceled,
-        result = run_request(job_id, &mut job_state, &state) => RunResult::Completed(result),
+        result = request::run_request(job_id, &mut job_state, &state) => RunResult::Completed(result),
     };
     state.install_job_cancellations.remove(&job_id);
     let execution_state = job_state;
