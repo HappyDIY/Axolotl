@@ -3282,6 +3282,129 @@ pub async fn get_modpack_target(
     Ok(target)
 }
 
+async fn download_modpack_archive_with_reporter(
+    project_id: u32,
+    file_id: u32,
+    pack_file: &CurseForgeFile,
+    download_url: &str,
+    pack_details: InstallPhaseDetails,
+    reporter: Option<InstallProgressReporter>,
+) -> crate::Result<(PathBuf, CurseForgeModpackManifest)> {
+    if let Some(reporter) = reporter.as_ref() {
+        let state = State::get().await?;
+        let item_path = state
+            .directories
+            .caches_dir()
+            .join("curseforge")
+            .join("modpacks")
+            .join(project_id.to_string())
+            .join(file_id.to_string())
+            .join(&pack_file.file_name)
+            .display()
+            .to_string();
+        reporter
+            .update_with_events(
+                InstallPhaseId::DownloadingPackFile,
+                Some(InstallProgress {
+                    current: 0,
+                    total: pack_file.file_length.max(1),
+                    secondary: None,
+                }),
+                pack_details.clone(),
+                vec![InstallJobEventKind::ContentFileQueued {
+                    path: item_path,
+                    bytes_total: Some(pack_file.file_length),
+                    max_attempts: 5,
+                }],
+            )
+            .await?;
+        reporter.persist().await?;
+    }
+
+    let mut last_downloaded = 0_u64;
+    let progress_reporter = reporter.clone();
+    let progress_details = pack_details.clone();
+    let mut progress = move |current: u64,
+                             total: u64|
+          -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = crate::Result<()>> + Send>,
+    > {
+        let min_delta = (total / 200).max(256 * 1024);
+        if current < total
+            && current.saturating_sub(last_downloaded) < min_delta
+        {
+            return Box::pin(async { Ok(()) });
+        }
+        last_downloaded = current;
+        let reporter = progress_reporter.clone();
+        let details = progress_details.clone();
+        Box::pin(async move {
+            if let Some(reporter) = reporter {
+                reporter
+                    .update(
+                        InstallPhaseId::DownloadingPackFile,
+                        Some(InstallProgress {
+                            current,
+                            total,
+                            secondary: None,
+                        }),
+                        details,
+                    )
+                    .await?;
+            }
+            Ok(())
+        })
+    };
+    let progress = reporter
+        .is_some()
+        .then_some(&mut progress as &mut FetchProgressFn<'_>);
+    let pack_download = download_curseforge_archive(
+        project_id,
+        file_id,
+        pack_file,
+        download_url,
+        progress,
+        reporter.as_ref(),
+    )
+    .await?;
+    if let Some(reporter) = reporter.as_ref()
+        && pack_download.attempts > 0
+    {
+        reporter
+            .record_download_metrics(
+                pack_download.source.as_str(),
+                pack_download.fallback_count as u64,
+            )
+            .await?;
+    }
+    let pack_path = pack_download.path;
+    if let Some(reporter) = reporter.as_ref() {
+        reporter
+            .update(
+                InstallPhaseId::DownloadingPackFile,
+                Some(InstallProgress {
+                    current: pack_file.file_length,
+                    total: pack_file.file_length.max(1),
+                    secondary: None,
+                }),
+                pack_details.clone(),
+            )
+            .await?;
+        reporter
+            .update(InstallPhaseId::ReadingPackManifest, None, pack_details)
+            .await?;
+    }
+    let pack_path_for_manifest = pack_path.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&pack_path_for_manifest)?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
+        read_modpack_manifest(&mut archive)
+    })
+    .await??;
+    Ok((pack_path, manifest))
+}
+
 pub async fn install_modpack_with_reporter(
     request: CurseForgeModpackInstallRequest,
     reporter: Option<InstallProgressReporter>,
@@ -3360,121 +3483,15 @@ pub async fn install_modpack_with_reporter(
         version_id: Some(request.file_id.to_string()),
         title: Some(project.name.clone()),
     };
-    if let Some(reporter) = reporter.as_ref() {
-        let state = State::get().await?;
-        let item_path = state
-            .directories
-            .caches_dir()
-            .join("curseforge")
-            .join("modpacks")
-            .join(request.project_id.to_string())
-            .join(request.file_id.to_string())
-            .join(&pack_file.file_name)
-            .display()
-            .to_string();
-        reporter
-            .update_with_events(
-                InstallPhaseId::DownloadingPackFile,
-                Some(InstallProgress {
-                    current: 0,
-                    total: pack_file.file_length.max(1),
-                    secondary: None,
-                }),
-                pack_details.clone(),
-                vec![InstallJobEventKind::ContentFileQueued {
-                    path: item_path,
-                    bytes_total: Some(pack_file.file_length),
-                    max_attempts: 5,
-                }],
-            )
-            .await?;
-        reporter.persist().await?;
-    }
-    let mut last_downloaded = 0_u64;
-    let progress_reporter = reporter.clone();
-    let progress_details = pack_details.clone();
-    let mut progress = move |current: u64,
-                             total: u64|
-          -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = crate::Result<()>> + Send>,
-    > {
-        let min_delta = (total / 200).max(256 * 1024);
-        if current < total
-            && current.saturating_sub(last_downloaded) < min_delta
-        {
-            return Box::pin(async { Ok(()) });
-        }
-        last_downloaded = current;
-        let reporter = progress_reporter.clone();
-        let details = progress_details.clone();
-        Box::pin(async move {
-            if let Some(reporter) = reporter {
-                reporter
-                    .update(
-                        InstallPhaseId::DownloadingPackFile,
-                        Some(InstallProgress {
-                            current,
-                            total,
-                            secondary: None,
-                        }),
-                        details,
-                    )
-                    .await?;
-            }
-            Ok(())
-        })
-    };
-    let progress = reporter
-        .is_some()
-        .then_some(&mut progress as &mut FetchProgressFn<'_>);
-    let pack_download = download_curseforge_archive(
+    let (pack_path, manifest) = download_modpack_archive_with_reporter(
         request.project_id,
         request.file_id,
         &pack_file,
         &download_url,
-        progress,
-        reporter.as_ref(),
+        pack_details.clone(),
+        reporter.clone(),
     )
     .await?;
-    if let Some(reporter) = reporter.as_ref()
-        && pack_download.attempts > 0
-    {
-        reporter
-            .record_download_metrics(
-                pack_download.source.as_str(),
-                pack_download.fallback_count as u64,
-            )
-            .await?;
-    }
-    let pack_path = pack_download.path;
-    if let Some(reporter) = reporter.as_ref() {
-        reporter
-            .update(
-                InstallPhaseId::DownloadingPackFile,
-                Some(InstallProgress {
-                    current: pack_file.file_length,
-                    total: pack_file.file_length.max(1),
-                    secondary: None,
-                }),
-                pack_details.clone(),
-            )
-            .await?;
-        reporter
-            .update(
-                InstallPhaseId::ReadingPackManifest,
-                None,
-                pack_details.clone(),
-            )
-            .await?;
-    }
-    let pack_path_for_manifest = pack_path.clone();
-    let manifest = tokio::task::spawn_blocking(move || {
-        let file = std::fs::File::open(&pack_path_for_manifest)?;
-        let mut archive =
-            zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
-        read_modpack_manifest(&mut archive)
-    })
-    .await??;
 
     let state = State::get().await?;
     use sqlx::Row;
