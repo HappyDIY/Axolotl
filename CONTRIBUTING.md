@@ -62,9 +62,9 @@ Remove-Item -Recurse -Force target\debug
 
 **本地构建与已安装的正式版共用这份数据目录。** 本地跑一次桌面应用，改动的就是正在使用的那份数据库，因此：
 
-- 不要手工修改 `_sqlx_migrations` 表。
-- 迁移是单向的。某个构建写入新迁移后，比它旧的构建（包括已安装的正式版）将因 sqlx 拒绝打开而无法启动，报错形如 `migration <版本号> was previously applied but is missing in the resolved migrations`。
-- 需要回退时，先用下面的方式确认改动范围，再决定如何处理。
+- 迁移是单向的，也不要手工改 `_sqlx_migrations` 表。
+- 某个构建写入新迁移后，比它旧的构建（包括已安装的正式版）将因 sqlx 拒绝打开而无法启动，报错形如 `migration <版本号> was previously applied but is missing in the resolved migrations`。
+- 需要回退时用下面的降级脚本，不要手工处理。
 
 隔离数据目录有两种方式，推荐在开发时始终使用其中一种：
 
@@ -78,22 +78,36 @@ $env:THESEUS_CONFIG_DIR = "$PWD\.dev-data"
 pnpm app:dev
 ```
 
-如果数据库已经被较新的构建升级，可先用降级脚本查看并回退（**运行前必须关闭启动器**，脚本会自行备份，默认只做演练）：
+如果数据库已经被较新的构建升级，用降级脚本回退（**运行前必须关闭启动器**；默认只做演练，执行时会先写一份备份）：
 
 ```powershell
 # 列出已应用的迁移
 node scripts/axolotl/downgrade-app-db.mjs --list
 
 # 演练：显示将移除哪些迁移记录、删除哪些列
-node scripts/axolotl/downgrade-app-db.mjs --to 20260909010000
+node scripts/axolotl/downgrade-app-db.mjs --to 20260903120000
 
-# 实际执行（会在同目录写入 app.db.before-downgrade-<时间戳> 备份）
-node scripts/axolotl/downgrade-app-db.mjs --to 20260909010000 --apply
+# 实际执行
+node scripts/axolotl/downgrade-app-db.mjs --to 20260903120000 --apply
 ```
 
-脚本只认识登记在案的迁移结构；遇到未登记的迁移会打印警告，此时它只移除迁移记录、保留相关列，重新安装带该迁移的构建会因对象重复而失败，需要手工处理。
+`--to` 是**阈值而非单条**：它会移除**该版本及其之后**的全部迁移记录。请填你确认可以回退到的最老版本。
 
-新增列迁移时，请同步在 `scripts/axolotl/downgrade-app-db.mjs` 的 `REVERTIBLE_COLUMNS` 里登记，否则该迁移无法安全回退。
+脚本默认在正式的数据目录里找库；如果那个库属于带后缀的构建，用 `--suffix` 指过去：
+
+```powershell
+node scripts/axolotl/downgrade-app-db.mjs --suffix pr538 --to 20260903120000 --apply
+```
+
+恢复备份的方法：关闭启动器，删除 `app.db` 及其 `-wal`/`-shm` 边车文件，再把 `app.db.before-downgrade-<时间戳>` 改名回 `app.db`。
+
+脚本的几条硬性约束，遇到时请照提示处理而不是绕过：
+
+- 只认识登记在案的迁移结构。遇到未登记的迁移会**拒绝执行**，因为删掉记录却留下它建的列/表，会让重新安装该构建时因对象重复而失败；确认无碍时用 `--allow-unmapped` 显式放行。
+- 若某个已登记迁移对应的列在库里不存在，说明登记的表结构与数据库不符（版本号被复用、列被改名等），脚本同样拒绝执行。
+- 新增**列**的迁移时，请在 `scripts/axolotl/downgrade-app-db.mjs` 的 `REVERTIBLE_COLUMNS` 里登记，否则无法自动回退。新增**表**的迁移目前没有登记机制，只能手工处理。
+
+该脚本依赖 Node 内置的 `node:sqlite`，并要求 Windows（解析默认数据目录需要 `APPDATA`；其他平台请用 `--db` 指定路径）。
 
 ## 仓库范围
 
