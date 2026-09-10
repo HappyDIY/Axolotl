@@ -8,7 +8,7 @@ pub(super) fn spawn_job(job_id: Uuid) {
     });
 }
 
-fn begin_failed_job_rollback(
+pub(super) fn begin_failed_job_rollback(
     job_state: &mut InstallJobState,
     error: &crate::Error,
 ) {
@@ -30,7 +30,7 @@ fn begin_failed_job_rollback(
     });
 }
 
-fn latest_failure_phase(
+pub(super) fn latest_failure_phase(
     execution_state: &InstallJobState,
     reporter_state: &InstallJobState,
 ) -> InstallPhaseId {
@@ -56,7 +56,7 @@ fn latest_failure_phase(
     }
 }
 
-fn begin_waiting_for_user(
+pub(super) fn begin_waiting_for_user(
     job_state: &mut InstallJobState,
     reason: InstallPauseReason,
 ) {

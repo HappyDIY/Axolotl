@@ -1,17 +1,17 @@
 use super::*;
 
-enum StagedUpgradeDownload {
+pub(super) enum StagedUpgradeDownload {
     Modrinth(crate::state::instances::commands::DownloadedProjectVersion),
     CurseForge(crate::api::curseforge::StagedCurseForgeUpgrade),
 }
 
-struct StagedUpgradeMutation {
-    existing_path: Option<String>,
-    target_path: String,
-    ownership: crate::state::instances::ContentOwnershipKind,
-    auto_dependency: bool,
-    enabled: bool,
-    download: StagedUpgradeDownload,
+pub(super) struct StagedUpgradeMutation {
+    pub(super) existing_path: Option<String>,
+    pub(super) target_path: String,
+    pub(super) ownership: crate::state::instances::ContentOwnershipKind,
+    pub(super) auto_dependency: bool,
+    pub(super) enabled: bool,
+    pub(super) download: StagedUpgradeDownload,
 }
 
 struct UpgradeStagingRequest {
@@ -26,7 +26,7 @@ struct UpgradeStagingRequest {
     project_type: Option<crate::state::ProjectType>,
 }
 
-struct AppliedUpgradeContent {
+pub(super) struct AppliedUpgradeContent {
     skipped: Vec<String>,
     launcher_expected_files:
         HashMap<String, Option<crate::state::InstanceUpgradeSourceFile>>,
@@ -368,7 +368,7 @@ pub(super) async fn run_instance_upgrade(
     Ok(())
 }
 
-fn default_upgrade_instance_name(
+pub(super) fn default_upgrade_instance_name(
     environment: &crate::state::InstanceUpgradeEnvironment,
 ) -> String {
     let loader = match environment.mod_loader {
@@ -392,7 +392,7 @@ fn default_upgrade_instance_name(
     format!("{}-{loader}{loader_version}", environment.game_version)
 }
 
-fn upgrade_compatibility_warning_details(
+pub(super) fn upgrade_compatibility_warning_details(
     execution: &InstanceUpgradeExecution,
 ) -> Vec<InstanceUpgradeCompatibilityWarning> {
     let physical_details = execution
@@ -536,7 +536,7 @@ async fn copy_physical_instance_contents(
     Ok(())
 }
 
-async fn create_upgrade_backup(
+pub(super) async fn create_upgrade_backup(
     job_id: Uuid,
     job_state: &InstallJobState,
     state: &State,
@@ -974,7 +974,7 @@ async fn stage_upgrade_content(
     collect_ordered_upgrade_staging(&mut downloads).await
 }
 
-async fn collect_ordered_upgrade_staging<F, T>(
+pub(super) async fn collect_ordered_upgrade_staging<F, T>(
     downloads: &mut FuturesUnordered<F>,
 ) -> crate::Result<Vec<T>>
 where
@@ -1100,7 +1100,7 @@ async fn stage_one_upgrade_request(
     })
 }
 
-async fn apply_upgrade_content(
+pub(super) async fn apply_upgrade_content(
     instance_id: &str,
     staged: Vec<StagedUpgradeMutation>,
     execution: &InstanceUpgradeExecution,
@@ -1319,7 +1319,7 @@ fn injected_upgrade_pause_after_mutations() -> Option<usize> {
 }
 
 #[cfg(debug_assertions)]
-fn debug_mutation_count(value: &str) -> Option<usize> {
+pub(super) fn debug_mutation_count(value: &str) -> Option<usize> {
     value.trim().parse().ok().filter(|count| *count > 0)
 }
 
@@ -1434,7 +1434,7 @@ async fn collect_upgrade_external_changes(
     Ok(changes)
 }
 
-fn diff_upgrade_source_files(
+pub(super) fn diff_upgrade_source_files(
     source_files: &[crate::state::InstanceUpgradeSourceFile],
     current_files: &[crate::state::InstanceUpgradeSourceFile],
 ) -> Vec<InstanceUpgradeExternalChange> {
@@ -1587,7 +1587,7 @@ async fn current_upgrade_source_file(
     }))
 }
 
-fn final_upgrade_external_changes(
+pub(super) fn final_upgrade_external_changes(
     source_files: &[crate::state::InstanceUpgradeSourceFile],
     current_files: &[crate::state::InstanceUpgradeSourceFile],
     launcher_expected_files: &HashMap<
@@ -1615,7 +1615,7 @@ fn final_upgrade_external_changes(
         .collect()
 }
 
-fn merge_upgrade_external_changes(
+pub(super) fn merge_upgrade_external_changes(
     changes: &mut Vec<InstanceUpgradeExternalChange>,
     additional: Vec<InstanceUpgradeExternalChange>,
 ) {
@@ -1632,14 +1632,14 @@ fn merge_upgrade_external_changes(
     changes.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
 }
 
-fn should_create_upgrade_backup(
+pub(super) fn should_create_upgrade_backup(
     requested: bool,
     mode: SharedUpgradeMode,
 ) -> bool {
     requested && mode == SharedUpgradeMode::Direct
 }
 
-fn upgrade_mutation_conflicts(
+pub(super) fn upgrade_mutation_conflicts(
     mutation: &StagedUpgradeMutation,
     external_paths: &HashSet<String>,
 ) -> bool {
@@ -1650,7 +1650,7 @@ fn upgrade_mutation_conflicts(
             .is_some_and(|path| external_paths.contains(path))
 }
 
-fn classify_upgrade_external_change(
+pub(super) fn classify_upgrade_external_change(
     existed_at_start: bool,
     exists_now: bool,
 ) -> InstanceUpgradeExternalChangeKind {

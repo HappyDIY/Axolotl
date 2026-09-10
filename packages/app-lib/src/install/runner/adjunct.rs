@@ -202,7 +202,7 @@ pub(crate) async fn resolve_optifabric_version(
         })
 }
 
-fn select_optifabric_file_id(
+pub(super) fn select_optifabric_file_id(
     files: &[crate::api::curseforge::CurseForgeFile],
     game_version: &str,
 ) -> Option<u32> {

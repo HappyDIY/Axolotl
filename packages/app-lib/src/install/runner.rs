@@ -41,6 +41,15 @@ mod pack;
 mod request;
 mod upgrade;
 
+#[cfg(test)]
+use adjunct::*;
+#[cfg(test)]
+use lifecycle::*;
+#[cfg(test)]
+use pack::*;
+#[cfg(test)]
+use upgrade::*;
+
 pub(crate) use adjunct::{
     install_liteloader_adjunct_resolved, install_optifabric_file,
     resolve_optifabric_version, validate_loader_components,
