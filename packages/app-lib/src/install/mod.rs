@@ -41,3 +41,12 @@ pub use runner::{
     retry_job, retry_job_as_new, skip_missing_content_and_resume_job,
     update_managed_curseforge_modpack, upgrade_unmanaged_instance,
 };
+
+/// Replaces credentials and IP addresses in text the user may share publicly
+/// (support reports, exported logs) with placeholders.
+pub async fn censor_shared_text(
+    text: String,
+    state: &crate::State,
+) -> crate::Result<String> {
+    diagnostics::censor_support_text(text, state).await
+}
