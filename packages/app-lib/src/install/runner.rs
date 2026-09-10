@@ -758,7 +758,6 @@ async fn cleanup_failed_initial_install(
         .into(),
     }
 }
-
 async fn prepare_initial_instance(
     job_state: &mut InstallJobState,
     state: &State,
