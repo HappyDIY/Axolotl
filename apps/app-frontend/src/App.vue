@@ -120,18 +120,10 @@ import { install_create_modpack_instance, install_get_modpack_preview } from '@/
 import { type DirectLinkSyncReport, get as getInstance, run } from '@/helpers/instance'
 import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
-import {
-	getNavShortcutEnabled,
-} from '@/helpers/nav-shortcut-state'
-import {
-	discoverContentTarget,
-	NAV_SHORTCUTS,
-} from '@/helpers/nav-shortcuts'
+import { getNavShortcutEnabled } from '@/helpers/nav-shortcut-state'
+import { discoverContentTarget, NAV_SHORTCUTS } from '@/helpers/nav-shortcuts'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
-import {
-	getQuickScrollEnabled,
-	getShowScrollTop,
-} from '@/helpers/scroll-top-state'
+import { getQuickScrollEnabled, getShowScrollTop } from '@/helpers/scroll-top-state'
 import {
 	get as getSettings,
 	getLastBrowseContentProjectType,
@@ -485,49 +477,101 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 	handleNavShortcutKey(event)
 }
 
-/**
- * Home/End/PageUp/PageDown quick scrolling for the launcher's single scroll
- * container (`.app-viewport`). The WebView window itself never scrolls, so
- * the browser's native handling for these keys does nothing; route them to
- * the container explicitly. Editing controls keep their native behaviour.
- */
-function handleScrollShortcutKey(event: KeyboardEvent) {
-	if (event.isComposing) return
-	if (event.ctrlKey || event.metaKey || event.altKey) return
-	if (!themeStore.quickScrollEnabled) return
+/** Keys the launcher routes to the page scroller instead of leaving them inert. */
+const SCROLL_SHORTCUT_KEYS = ['Home', 'End', 'PageUp', 'PageDown']
 
-	const target = event.target
-	if (
+/** Editing surfaces keep these keys for themselves. */
+function isEditableTarget(target: EventTarget | null) {
+	return (
 		target instanceof HTMLInputElement ||
 		target instanceof HTMLTextAreaElement ||
 		target instanceof HTMLSelectElement ||
 		(target instanceof HTMLElement && target.isContentEditable)
-	) {
-		return
+	)
+}
+
+function scrollsAtOwnLevel(element: Element) {
+	const { overflowY } = getComputedStyle(element)
+	return /(auto|scroll|overlay)/.test(overflowY) && element.scrollHeight > element.clientHeight
+}
+
+/** A container that scrolls the page itself rather than a widget on it. */
+function isPageScroller(element: Element) {
+	return scrollsAtOwnLevel(element) && element.clientHeight >= window.innerHeight / 2
+}
+
+/** Nearest scrolling ancestor, whatever its size. */
+function nearestScrollContainer(target: EventTarget | null) {
+	let element = target instanceof Element ? target : null
+	while (element) {
+		if (scrollsAtOwnLevel(element)) return element
+		element = element.parentElement
+	}
+	return null
+}
+
+/**
+ * The page's own scroller. Most pages scroll inside `.app-viewport`, but some
+ * screens (settings, consoles, studios) turn that element's scrolling off and
+ * host a full-height container inside it, so fall back to whatever fills the
+ * middle of the viewport.
+ */
+function resolvePageScroller() {
+	const viewport = document.querySelector<HTMLElement>('.app-viewport')
+	if (!viewport) return null
+	if (isPageScroller(viewport)) return viewport
+
+	const bounds = viewport.getBoundingClientRect()
+	let element: Element | null = document.elementFromPoint(
+		bounds.left + bounds.width / 2,
+		bounds.top + bounds.height / 2,
+	)
+	while (element) {
+		if (isPageScroller(element)) return element
+		element = element.parentElement
 	}
 
-	const viewport = document.querySelector<HTMLElement>('.app-viewport')
-	if (!viewport) return
+	return viewport
+}
+
+/**
+ * Home/End/PageUp/PageDown quick scrolling for the page's own scroll container.
+ * The setting decides whether the keys act at all: while it is off they stay
+ * inert, and while it is on they move the page. A focused list or popover still
+ * scrolls itself, so local keyboard scrolling keeps working.
+ */
+function handleScrollShortcutKey(event: KeyboardEvent) {
+	if (event.isComposing) return
+	if (!SCROLL_SHORTCUT_KEYS.includes(event.key)) return
+	if (event.ctrlKey || event.metaKey || event.altKey) return
+	if (isEditableTarget(event.target)) return
+
+	const focusedContainer = nearestScrollContainer(event.target)
+	if (focusedContainer && !isPageScroller(focusedContainer)) return
+
+	const scroller = resolvePageScroller()
+	if (!scroller) return
+
+	// Take the key over even when the feature is off: the browser would scroll
+	// a focused page container on its own, which would make the setting a lie.
+	event.preventDefault()
+	if (!themeStore.quickScrollEnabled) return
 
 	switch (event.key) {
 		case 'Home':
-			event.preventDefault()
-			viewport.scrollTo({ top: 0, behavior: 'smooth' })
+			scroller.scrollTo({ top: 0, behavior: 'smooth' })
 			break
 		case 'End':
-			event.preventDefault()
-			viewport.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
+			scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' })
 			break
 		case 'PageUp':
 			// Immediate scrolling keeps rapid key repeats responsive.
-			event.preventDefault()
-			viewport.scrollTop = Math.max(0, viewport.scrollTop - viewport.clientHeight * 0.9)
+			scroller.scrollTop = Math.max(0, scroller.scrollTop - scroller.clientHeight * 0.9)
 			break
 		case 'PageDown':
-			event.preventDefault()
-			viewport.scrollTop = Math.min(
-				viewport.scrollHeight,
-				viewport.scrollTop + viewport.clientHeight * 0.9,
+			scroller.scrollTop = Math.min(
+				scroller.scrollHeight,
+				scroller.scrollTop + scroller.clientHeight * 0.9,
 			)
 			break
 		default:
@@ -545,16 +589,7 @@ function handleNavShortcutKey(event: KeyboardEvent) {
 	if (event.shiftKey || event.altKey || (!event.ctrlKey && !event.metaKey)) {
 		return
 	}
-
-	const target = event.target
-	if (
-		target instanceof HTMLInputElement ||
-		target instanceof HTMLTextAreaElement ||
-		target instanceof HTMLSelectElement ||
-		(target instanceof HTMLElement && target.isContentEditable)
-	) {
-		return
-	}
+	if (isEditableTarget(event.target)) return
 
 	const match = NAV_SHORTCUTS.find((shortcut) => shortcut.key === event.key)
 	if (!match || !themeStore[match.id]) return
@@ -562,8 +597,7 @@ function handleNavShortcutKey(event: KeyboardEvent) {
 	// Respect the same conditions that hide or disable the nav button.
 	if (
 		(match.id === 'shortcutNavWorlds' && !themeStore.featureFlags.worlds_tab) ||
-		((match.id === 'shortcutNavDiscover' || match.id === 'shortcutNavCreate') &&
-			offline.value)
+		((match.id === 'shortcutNavDiscover' || match.id === 'shortcutNavCreate') && offline.value)
 	) {
 		return
 	}
@@ -571,6 +605,23 @@ function handleNavShortcutKey(event: KeyboardEvent) {
 	event.preventDefault()
 	router.push(match.target(route))
 }
+
+/**
+ * Hand the keyboard over to the page after the menu navigates. Without this the
+ * focus stays on the nav button, so Tab keeps walking the rail and the page's
+ * own shortcuts act on whatever happened to be focused before.
+ */
+watch(
+	() => route.path,
+	async () => {
+		await nextTick()
+		const active = document.activeElement
+		const navRail = document.querySelector('.app-grid-navbar')
+		const cameFromMenu = !active || active === document.body || (navRail?.contains(active) ?? false)
+		if (!cameFromMenu) return
+		document.querySelector<HTMLElement>('.app-viewport')?.focus({ preventScroll: true })
+	},
+)
 
 onMounted(async () => {
 	unlistenLightweightModeError = await listen<string>('lightweight-mode-error', ({ payload }) => {
@@ -2635,7 +2686,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 			'has-transparent-background': themeStore.transparentBackground,
 		}"
 	>
-		<div class="app-viewport flex-grow router-view">
+		<div class="app-viewport flex-grow router-view" tabindex="-1">
 			<div
 				class="loading-indicator-container h-8 fixed z-50 pointer-events-none"
 				:style="{

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { defineMessages, SettingsLabel, Toggle, useVIntl } from '@modrinth/ui'
+import { defineMessages, Toggle, useVIntl } from '@modrinth/ui'
 
 import { getNavShortcutEnabled, setNavShortcutEnabled } from '@/helpers/nav-shortcut-state'
 import { NAV_SHORTCUTS, type NavShortcut } from '@/helpers/nav-shortcuts'
@@ -18,15 +18,30 @@ for (const shortcut of NAV_SHORTCUTS) {
 }
 
 const messages = defineMessages({
-	title: { id: 'app.shortcut-settings.title', defaultMessage: 'Keyboard shortcuts' },
-	description: {
-		id: 'app.shortcut-settings.description',
-		defaultMessage: 'Browse, home and library screens support quick scrolling keys.',
+	scrollTitle: {
+		id: 'app.shortcut-settings.scroll-title',
+		defaultMessage: 'Quick scrolling',
+	},
+	scrollDescription: {
+		id: 'app.shortcut-settings.scroll-description',
+		defaultMessage: 'Move through long pages with the keyboard.',
 	},
 	enable: { id: 'app.shortcut-settings.enable', defaultMessage: 'Enable quick scrolling' },
-	enableDescription: {
-		id: 'app.shortcut-settings.enable-description',
-		defaultMessage: 'Allow Home / End / Page Up / Page Down to scroll the page.',
+	homeAction: {
+		id: 'app.shortcut-settings.home-action',
+		defaultMessage: 'Scroll to the top',
+	},
+	endAction: {
+		id: 'app.shortcut-settings.end-action',
+		defaultMessage: 'Scroll to the bottom',
+	},
+	pageUpAction: {
+		id: 'app.shortcut-settings.page-up-action',
+		defaultMessage: 'Scroll up one screen',
+	},
+	pageDownAction: {
+		id: 'app.shortcut-settings.page-down-action',
+		defaultMessage: 'Scroll down one screen',
 	},
 	navTitle: {
 		id: 'app.shortcut-settings.nav-title',
@@ -36,22 +51,6 @@ const messages = defineMessages({
 		id: 'app.shortcut-settings.nav-description',
 		defaultMessage:
 			'Jump to a menu item with Ctrl/Cmd + a number. Each shortcut is off until enabled.',
-	},
-	homeDescription: {
-		id: 'app.shortcut-settings.home-description',
-		defaultMessage: 'Scroll to the top of the page.',
-	},
-	endDescription: {
-		id: 'app.shortcut-settings.end-description',
-		defaultMessage: 'Scroll to the bottom of the page.',
-	},
-	pageUpDescription: {
-		id: 'app.shortcut-settings.page-up-description',
-		defaultMessage: 'Scroll up by one viewport.',
-	},
-	pageDownDescription: {
-		id: 'app.shortcut-settings.page-down-description',
-		defaultMessage: 'Scroll down by one viewport.',
 	},
 })
 
@@ -81,20 +80,19 @@ function toggleNavShortcut(shortcut: NavShortcut, value: unknown) {
 	<div class="flex flex-col gap-6">
 		<SettingsSection>
 			<template #header>
-				<h2 id="settings-target-shortcuts" tabindex="-1" class="m-0 text-lg font-semibold text-contrast">
-					{{ formatMessage(messages.title) }}
+				<h2 class="m-0 text-lg font-semibold text-contrast">
+					{{ formatMessage(messages.scrollTitle) }}
 				</h2>
 				<p class="m-0 mt-1 text-sm leading-relaxed text-secondary">
-					{{ formatMessage(messages.description) }}
+					{{ formatMessage(messages.scrollDescription) }}
 				</p>
 			</template>
-			<SettingsRow stacked>
+			<SettingsRow>
 				<template #label>
 					<span id="settings-target-shortcuts-enable" tabindex="-1">
 						{{ formatMessage(messages.enable) }}
 					</span>
 				</template>
-				<template #description>{{ formatMessage(messages.enableDescription) }}</template>
 				<template #control>
 					<Toggle
 						id="quick-scroll-enabled"
@@ -103,21 +101,79 @@ function toggleNavShortcut(shortcut: NavShortcut, value: unknown) {
 					/>
 				</template>
 			</SettingsRow>
-
-			<SettingsLabel
-				:title="formatMessage(messages.navTitle)"
-				:description="formatMessage(messages.navDescription)"
-			/>
-			<SettingsRow
-				v-for="shortcut in NAV_SHORTCUTS"
-				:key="shortcut.id"
-				stacked
-			>
+			<SettingsRow>
 				<template #label>
-					<span :id="`settings-target-shortcuts-nav-${shortcut.id}`" tabindex="-1">
-						{{ shortcutLabel(shortcut) }}
+					<span id="settings-target-shortcuts-home" tabindex="-1">
+						{{ formatMessage(messages.homeAction) }}
 					</span>
 				</template>
+				<template #control>
+					<kbd
+						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
+					>
+						Home
+					</kbd>
+				</template>
+			</SettingsRow>
+			<SettingsRow>
+				<template #label>
+					<span id="settings-target-shortcuts-end" tabindex="-1">
+						{{ formatMessage(messages.endAction) }}
+					</span>
+				</template>
+				<template #control>
+					<kbd
+						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
+					>
+						End
+					</kbd>
+				</template>
+			</SettingsRow>
+			<SettingsRow>
+				<template #label>
+					<span id="settings-target-shortcuts-page-up" tabindex="-1">
+						{{ formatMessage(messages.pageUpAction) }}
+					</span>
+				</template>
+				<template #control>
+					<kbd
+						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
+					>
+						Page Up
+					</kbd>
+				</template>
+			</SettingsRow>
+			<SettingsRow>
+				<template #label>
+					<span id="settings-target-shortcuts-page-down" tabindex="-1">
+						{{ formatMessage(messages.pageDownAction) }}
+					</span>
+				</template>
+				<template #control>
+					<kbd
+						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
+					>
+						Page Down
+					</kbd>
+				</template>
+			</SettingsRow>
+		</SettingsSection>
+
+		<SettingsSection>
+			<template #header>
+				<h2
+					id="settings-target-shortcuts-nav"
+					tabindex="-1"
+					class="m-0 text-lg font-semibold text-contrast"
+				>
+					{{ formatMessage(messages.navTitle) }}
+				</h2>
+				<p class="m-0 mt-1 text-sm leading-relaxed text-secondary">
+					{{ formatMessage(messages.navDescription) }}
+				</p>
+			</template>
+			<SettingsRow v-for="shortcut in NAV_SHORTCUTS" :key="shortcut.id">
+				<template #label>{{ shortcutLabel(shortcut) }}</template>
 				<template #description>{{ shortcutDescription(shortcut) }}</template>
 				<template #control>
 					<Toggle
@@ -126,55 +182,6 @@ function toggleNavShortcut(shortcut: NavShortcut, value: unknown) {
 						@update:model-value="(value) => toggleNavShortcut(shortcut, value)"
 					/>
 				</template>
-			</SettingsRow>
-
-			<SettingsRow>
-				<template #label>
-					<kbd
-						id="settings-target-shortcuts-home"
-						tabindex="-1"
-						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
-					>
-						Home
-					</kbd>
-				</template>
-				<template #description>{{ formatMessage(messages.homeDescription) }}</template>
-			</SettingsRow>
-			<SettingsRow>
-				<template #label>
-					<kbd
-						id="settings-target-shortcuts-end"
-						tabindex="-1"
-						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
-					>
-						End
-					</kbd>
-				</template>
-				<template #description>{{ formatMessage(messages.endDescription) }}</template>
-			</SettingsRow>
-			<SettingsRow>
-				<template #label>
-					<kbd
-						id="settings-target-shortcuts-page-up"
-						tabindex="-1"
-						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
-					>
-						Page Up
-					</kbd>
-				</template>
-				<template #description>{{ formatMessage(messages.pageUpDescription) }}</template>
-			</SettingsRow>
-			<SettingsRow>
-				<template #label>
-					<kbd
-						id="settings-target-shortcuts-page-down"
-						tabindex="-1"
-						class="rounded-md border border-solid border-surface-4 bg-surface-3 px-2 py-0.5 font-mono text-sm text-contrast"
-					>
-						Page Down
-					</kbd>
-				</template>
-				<template #description>{{ formatMessage(messages.pageDownDescription) }}</template>
 			</SettingsRow>
 		</SettingsSection>
 	</div>
