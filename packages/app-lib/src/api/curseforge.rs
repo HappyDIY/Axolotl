@@ -40,6 +40,9 @@ use std::time::{Duration, Instant};
 #[path = "curseforge_validation.rs"]
 mod curseforge_validation;
 use curseforge_validation::{validate_file_name, validate_world_archive_name};
+#[path = "curseforge_download.rs"]
+mod curseforge_download;
+use curseforge_download::normalized_download_url;
 
 const API_BASE_URL: &str = "https://api.curseforge.com";
 const MINECRAFT_GAME_ID: u32 = 432;
@@ -1389,35 +1392,7 @@ pub async fn get_download_url(
     Ok(normalized_download_url(response.data))
 }
 
-fn normalized_download_url(url: Option<String>) -> Option<String> {
-    url.and_then(|url| {
-        let url = url.trim();
-        (!url.is_empty()).then(|| url.to_string())
-    })
-}
-
-async fn resolve_curseforge_download_url(
-    project_id: u32,
-    file_id: u32,
-    project: &CurseForgeProject,
-    file: &CurseForgeFile,
-) -> crate::Result<Option<String>> {
-    let state = State::get().await?;
-    let bypass_restrictions = state.bypass_curseforge_download_restrictions();
-    if !bypass_restrictions && project.allow_mod_distribution == Some(false) {
-        return Ok(None);
-    }
-    if let Some(url) = normalized_download_url(file.download_url.clone()) {
-        return Ok(Some(url));
-    }
-    if bypass_restrictions {
-        return Ok(Some(derived_curseforge_download_url(
-            file_id,
-            &file.file_name,
-        )?));
-    }
-    get_download_url(project_id, file_id).await
-}
+use curseforge_download::resolve_download_url as resolve_curseforge_download_url;
 
 fn derived_curseforge_download_url(
     file_id: u32,
