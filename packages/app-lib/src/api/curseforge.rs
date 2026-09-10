@@ -3669,11 +3669,16 @@ pub async fn install_modpack_with_reporter(
                 active_downloads.fetch_add(1, Ordering::Relaxed);
                 let (installed_result, failed_result, failure_reason) =
                     retry_modpack_file_install(
-                        &request,
+                        &request.instance_id,
                         &manifest_file,
                         project_type,
                         &minecraft_version,
                         loader_type_value,
+                        if request.allow_target_change {
+                            crate::state::instances::ManualDownloadOperationKind::PackUpdate
+                        } else {
+                            crate::state::instances::ManualDownloadOperationKind::PackInstall
+                        },
                         download_metrics.as_deref(),
                     )
                     .await;
@@ -3960,11 +3965,12 @@ fn select_modpack_manifest_files(
 }
 
 async fn retry_modpack_file_install(
-    request: &CurseForgeModpackInstallRequest,
+    instance_id: &str,
     manifest_file: &CurseForgeManifestFile,
     project_type: &str,
     minecraft_version: &str,
     loader_type_value: Option<u32>,
+    manual_operation_kind: crate::state::instances::ManualDownloadOperationKind,
     download_metrics: Option<&CurseForgeDownloadMetrics>,
 ) -> (
     Option<CurseForgeInstallResult>,
@@ -3977,17 +3983,13 @@ async fn retry_modpack_file_install(
     for attempt in 1..=MODPACK_FILE_INSTALL_ATTEMPTS {
         match install_file_with_metrics(
             CurseForgeInstallRequest {
-                instance_id: request.instance_id.clone(),
+                instance_id: instance_id.to_string(),
                 project_id: manifest_file.project_id,
                 file_id: manifest_file.file_id,
                 project_type: project_type.to_string(),
                 ownership_kind:
                     crate::state::instances::ContentOwnershipKind::PackManaged,
-                manual_operation_kind: if request.allow_target_change {
-                    crate::state::instances::ManualDownloadOperationKind::PackUpdate
-                } else {
-                    crate::state::instances::ManualDownloadOperationKind::PackInstall
-                },
+                manual_operation_kind,
                 game_version: Some(minecraft_version.to_string()),
                 mod_loader_type: loader_type_value,
                 world_name: None,
@@ -4008,9 +4010,12 @@ async fn retry_modpack_file_install(
                 failure_reason = item_result
                     .manual_downloads
                     .first()
-                    .map(|file| format!("{} requires manual download", file.file_name))
+                    .map(|file| {
+                        format!("{} requires manual download", file.file_name)
+                    })
                     .unwrap_or_else(|| "no file was installed".to_string());
-                let manual_download_required = !item_result.manual_downloads.is_empty();
+                let manual_download_required =
+                    !item_result.manual_downloads.is_empty();
                 failed_result = Some(item_result);
                 if manual_download_required {
                     break;
@@ -4335,75 +4340,17 @@ pub(crate) async fn install_local_manifest_files(
                 managed_project_type(project_type)?;
 
                 active_downloads.fetch_add(1, Ordering::Relaxed);
-                let mut installed_result = None;
-                let mut failed_result = None;
-                let mut failure_reason = "no file was installed".to_string();
-                for attempt in 1..=MODPACK_FILE_INSTALL_ATTEMPTS {
-                    match install_file_with_metrics(
-                        CurseForgeInstallRequest {
-                            instance_id: instance_id.clone(),
-                            project_id: manifest_file.project_id,
-                            file_id: manifest_file.file_id,
-							project_type: project_type.to_string(),
-							ownership_kind: crate::state::instances::ContentOwnershipKind::PackManaged,
-                            manual_operation_kind: crate::state::instances::ManualDownloadOperationKind::PackUpdate,
-                            game_version: Some(minecraft_version.clone()),
-                            mod_loader_type: loader_type_value,
-							world_name: None,
-							install_dependencies: false,
-							excluded_dependency_project_ids: Vec::new(),
-							force_dependency_project_ids: Vec::new(),
-							dependency_plan_id: None,
-                        },
+                let (installed_result, failed_result, failure_reason) =
+                    retry_modpack_file_install(
+                        &instance_id,
+                        &manifest_file,
+                        project_type,
+                        &minecraft_version,
+                        loader_type_value,
+                        crate::state::instances::ManualDownloadOperationKind::PackUpdate,
                         Some(&download_metrics),
                     )
-                    .await
-                    {
-                        Ok(item_result)
-                            if !item_result.installed.is_empty() =>
-                        {
-                            installed_result = Some(item_result);
-                            break;
-                        }
-                        Ok(item_result) => {
-                            failure_reason = item_result
-                                .manual_downloads
-                                .first()
-                                .map(|file| {
-                                    format!(
-                                        "{} requires manual download",
-                                        file.file_name
-                                    )
-                                })
-                                .unwrap_or_else(|| {
-                                    "no file was installed".to_string()
-                                });
-                            let manual_download_required =
-                                !item_result.manual_downloads.is_empty();
-                            failed_result = Some(item_result);
-                            if manual_download_required {
-                                break;
-                            }
-                        }
-                        Err(err) => {
-                            failure_reason = err.to_string();
-                        }
-                    }
-                    tracing::warn!(
-                        project_id = manifest_file.project_id,
-                        file_id = manifest_file.file_id,
-                        attempt,
-                        max_attempts = MODPACK_FILE_INSTALL_ATTEMPTS,
-                        reason = %failure_reason,
-                        "Failed to install required CurseForge file"
-                    );
-                    if attempt < MODPACK_FILE_INSTALL_ATTEMPTS {
-                        tokio::time::sleep(Duration::from_millis(
-                            250 * attempt as u64,
-                        ))
-                        .await;
-                    }
-                }
+                    .await;
 
                 let Some(item_result) = installed_result else {
                     active_downloads.fetch_sub(1, Ordering::Relaxed);
