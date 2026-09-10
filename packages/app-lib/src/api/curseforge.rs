@@ -3627,7 +3627,6 @@ pub async fn install_modpack_with_reporter(
     let files_done = Arc::new(AtomicU64::new(0));
     let bytes_done = Arc::new(AtomicU64::new(0));
     let active_downloads = Arc::new(AtomicU64::new(0));
-    let instance_id = request.instance_id.clone();
     let minecraft_version = manifest.minecraft.version.clone();
 
     loading_try_for_each_concurrent(
