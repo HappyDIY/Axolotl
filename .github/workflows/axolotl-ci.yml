@@ -61,9 +61,12 @@ jobs:
       # Replaces an sccache setup whose startup probe failed on every run:
       # the shared cache service rejected it, the enable step was skipped, and
       # Windows rebuilt the whole dependency tree uncached (~56 minutes).
+      # The shared key deliberately matches the release workflow's build job,
+      # so tagged releases can restore the cache this job keeps warm on main.
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
+          shared-key: axolotl-rust-deps
           # A failing build still warms the cache for the next attempt.
           cache-on-failure: true
       - if: runner.os == 'Linux'
