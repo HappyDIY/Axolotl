@@ -3,6 +3,11 @@ use std::path::PathBuf;
 use std::process::{Command, exit};
 use std::{env, fs};
 
+/// Build-time opt-in to a private launcher data directory. Read by
+/// `theseus::brand::app_data_dir_identifier`, which appends it to the directory
+/// name.
+const DATA_DIR_SUFFIX_VAR: &str = "AXOLOTL_DATA_DIR_SUFFIX";
+
 fn main() {
     println!("cargo::rerun-if-changed=.env");
     println!("cargo::rerun-if-env-changed=CURSEFORGE_API_KEY");
@@ -31,8 +36,12 @@ fn set_env() {
     for (var_name, var_value) in
         dotenvy::dotenv_iter().into_iter().flatten().flatten()
     {
-        if var_name == "DATABASE_URL" || var_name == "CURSEFORGE_API_KEY" {
-            // The sqlx database URL is a build-time detail that should not be exposed to the crate
+        if var_name == "DATABASE_URL"
+            || var_name == "CURSEFORGE_API_KEY"
+            || var_name == DATA_DIR_SUFFIX_VAR
+        {
+            // Handled explicitly below, where an empty value can be rejected
+            // instead of baked into the crate.
             continue;
         }
 
@@ -43,15 +52,20 @@ fn set_env() {
         println!("cargo::rustc-env=CURSEFORGE_API_KEY={curseforge_api_key}");
     }
 
-    // Lets a local or test build keep its data next to nothing else: the
-    // settings directory is derived from this value, so builds that set it
-    // never touch the database of an installed launcher. Releases leave it
-    // unset and therefore keep the plain identifier.
-    println!("cargo::rerun-if-env-changed=AXOLOTL_DATA_DIR_SUFFIX");
-    if let Ok(suffix) = env::var("AXOLOTL_DATA_DIR_SUFFIX")
-        && !suffix.is_empty()
-    {
-        println!("cargo::rustc-env=AXOLOTL_DATA_DIR_SUFFIX={suffix}");
+    // Lets a local or test build keep its own data directory, so it cannot write
+    // the database an installed launcher is using. Releases leave it unset and
+    // resolve to the plain identifier.
+    println!("cargo::rerun-if-env-changed={DATA_DIR_SUFFIX_VAR}");
+    let data_dir_suffix = env::var(DATA_DIR_SUFFIX_VAR)
+        .ok()
+        .filter(|suffix| !suffix.is_empty())
+        .or_else(|| {
+            read_dotenv_literal(DATA_DIR_SUFFIX_VAR)
+                .filter(|suffix| !suffix.is_empty())
+        });
+
+    if let Some(data_dir_suffix) = data_dir_suffix {
+        println!("cargo::rustc-env={DATA_DIR_SUFFIX_VAR}={data_dir_suffix}");
     }
 }
 

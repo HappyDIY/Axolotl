@@ -26,22 +26,26 @@ pub fn app_data_dir_identifier(app_identifier: &str) -> String {
 /// Appends a sanitized suffix to the identifier.
 ///
 /// The result becomes a directory name, so anything that could escape the data
-/// directory (path separators, traversal) is dropped rather than escaped. A
-/// suffix that leaves nothing usable behind is ignored entirely.
+/// directory (path separators, drive letters, traversal) is dropped rather than
+/// escaped. A suffix that leaves nothing usable behind is ignored entirely.
 fn data_dir_identifier(base: &str, suffix: Option<&str>) -> String {
     let Some(suffix) = suffix else {
         return base.to_string();
     };
 
-    let sanitized: String = suffix
+    let filtered: String = suffix
         .chars()
         .filter(|character| {
             character.is_ascii_alphanumeric()
                 || matches!(character, '-' | '_' | '.')
         })
-        .take(MAX_DATA_DIR_SUFFIX_LEN)
         .collect();
-    let sanitized = sanitized.trim_matches(['.', '-']);
+
+    // Trim on both sides of the length cap. A suffix of dots alone would
+    // otherwise spend the whole cap and silently drop what follows it.
+    let trimmed = filtered.trim_matches(['.', '-']);
+    let capped = &trimmed[..trimmed.len().min(MAX_DATA_DIR_SUFFIX_LEN)];
+    let sanitized = capped.trim_matches(['.', '-']);
 
     if sanitized.is_empty() {
         base.to_string()
@@ -89,23 +93,81 @@ mod tests {
 
     #[test]
     fn data_dir_identifier_never_escapes_the_data_directory() {
-        for suffix in ["../evil", "..\\evil", "a/b", "a\\b", "..", "/", "\\"] {
+        for suffix in [
+            "../evil",
+            "..\\evil",
+            "a/b",
+            "a\\b",
+            "..",
+            "/",
+            "\\",
+            "C:\\Users",
+            "\\\\server\\share",
+            ".....",
+            "..-.-",
+        ] {
             let identifier =
                 data_dir_identifier("red.ghs.axolotl", Some(suffix));
 
             assert!(
-                !identifier.contains('/') && !identifier.contains('\\'),
-                "suffix {suffix:?} produced a path separator in {identifier:?}"
+                !identifier.contains(['/', '\\', ':']),
+                "suffix {suffix:?} produced a path separator or drive letter in {identifier:?}"
             );
             assert!(
-                !identifier.contains(".."),
-                "suffix {suffix:?} produced a parent reference in {identifier:?}"
+                !identifier.ends_with(['.', '-']),
+                "suffix {suffix:?} left a trailing dot or dash in {identifier:?}, which Windows would strip"
             );
+
+            let remainder = identifier
+                .strip_prefix("red.ghs.axolotl-")
+                .map_or(identifier.as_str(), |remainder| remainder);
             assert!(
-                identifier.starts_with("red.ghs.axolotl"),
-                "suffix {suffix:?} lost the identifier prefix"
+                !remainder.is_empty() && remainder != "." && remainder != "..",
+                "suffix {suffix:?} produced the bare component {remainder:?}"
             );
         }
+    }
+
+    #[test]
+    fn data_dir_identifier_keeps_the_prefix_so_device_names_cannot_win() {
+        // Windows treats a path component as a device when the whole name is
+        // one. The identifier always carries the prefix, so it never is.
+        for suffix in ["CON", "NUL", "PRN", "AUX", "COM1", "LPT1"] {
+            assert_eq!(
+                data_dir_identifier("red.ghs.axolotl", Some(suffix)),
+                format!("red.ghs.axolotl-{suffix}")
+            );
+        }
+    }
+
+    #[test]
+    fn data_dir_identifier_drops_characters_that_are_unsafe_in_a_path() {
+        for (suffix, expected) in [
+            ("a b", "red.ghs.axolotl-ab"),
+            ("a:b", "red.ghs.axolotl-ab"),
+            // Fullwidth solidus: not a separator the filesystem honours, but no
+            // more welcome in a directory name than any other non-ASCII.
+            ("a\u{ff0f}b", "red.ghs.axolotl-ab"),
+            ("café", "red.ghs.axolotl-caf"),
+        ] {
+            assert_eq!(
+                data_dir_identifier("red.ghs.axolotl", Some(suffix)),
+                expected,
+                "unexpected identifier for suffix {suffix:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn data_dir_identifier_trims_before_capping_the_length() {
+        // Capping first would let a run of dots spend the whole allowance and
+        // drop the characters after it, so the suffix would vanish silently.
+        let suffix = format!("{}abc", ".".repeat(40));
+
+        assert_eq!(
+            data_dir_identifier("red.ghs.axolotl", Some(&suffix)),
+            "red.ghs.axolotl-abc"
+        );
     }
 
     #[test]
