@@ -43,6 +43,9 @@ export function resolveInitialLocale(preferredLocales: readonly string[]): strin
 // dialogs matter most. Starting from the system language keeps them in a
 // language the user reads; `setupApp` still applies the saved locale once the
 // database is available.
-i18n.global.locale.value = resolveInitialLocale(navigator.languages)
+const preferredLocales = navigator.languages?.length
+	? navigator.languages
+	: [navigator.language ?? 'en-US']
+i18n.global.locale.value = resolveInitialLocale(preferredLocales)
 
 export default i18n

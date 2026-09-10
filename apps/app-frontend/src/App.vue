@@ -2738,7 +2738,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 		<div class="mt-4">
 			<Checkbox
 				v-model="closeChoiceRemember"
-				:disabled="closeRequestInProgress"
+				:disabled="closeRequestInProgress || stateFailed"
 				:label="formatMessage(messages.closeLauncherRemember)"
 			/>
 		</div>

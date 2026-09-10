@@ -1827,7 +1827,7 @@
     "message": "空间不足"
   },
   "app.error.state-database-newer-description": {
-    "message": "数据库最后一次是被更新版本的 Axolotl 打开的，它将其升级为当前版本无法读取的格式。你的实例与设置仍然保留。"
+    "message": "数据库最后一次是被较新版本的 Axolotl 打开的，它将其升级为当前版本无法读取的格式。你的实例与设置仍然保留。"
   },
   "app.error.state-database-newer-fix-downgrade": {
     "message": "如果你只是在试用构建、并非日常使用启动器，可以改用 scripts/axolotl/downgrade-app-db.mjs 将数据库回退。"
