@@ -3530,52 +3530,12 @@ pub async fn install_modpack_with_reporter(
 			&state.pool,
 		)
 		.await?;
-    let preserved_pack_projects = pack_members
-        .iter()
-        .filter(|member| {
-            matches!(
-                member.override_kind,
-                crate::state::instances::PackMemberOverrideKind::Version
-                    | crate::state::instances::PackMemberOverrideKind::Removed
-            )
-        })
-        .filter_map(|member| member.provider_project_id.clone())
-        .collect::<HashSet<_>>();
-    let disabled_pack_projects = pack_members
-        .iter()
-        .filter(|member| {
-            member.override_kind
-                == crate::state::instances::PackMemberOverrideKind::Disabled
-        })
-        .filter_map(|member| member.provider_project_id.clone())
-        .collect::<HashSet<_>>();
-    let installed_pack_releases = pack_members
-        .iter()
-        .filter(|member| {
-            member.materialization_state
-				== crate::state::instances::PackMemberMaterializationState::Present
-        })
-        .filter_map(|member| {
-            Some((
-                member.provider_project_id.clone()?,
-                member.provider_release_id.clone()?,
-            ))
-        })
-        .collect::<HashSet<_>>();
-    let selected_files = manifest
-        .files
-        .into_iter()
-        .filter(|file| file.required || request.install_optional)
-        .filter(|file| {
-            !preserved_pack_projects.contains(&file.project_id.to_string())
-        })
-        .filter(|file| {
-            !installed_pack_releases.contains(&(
-                file.project_id.to_string(),
-                file.file_id.to_string(),
-            ))
-        })
-        .collect::<Vec<_>>();
+    let (selected_files, disabled_pack_projects) =
+        select_modpack_manifest_files(
+            &manifest,
+            &pack_members,
+            request.install_optional,
+        );
     let loader_type_value = loader.as_deref().and_then(loader_type);
     let project_ids = selected_files
         .iter()
@@ -4006,6 +3966,61 @@ pub async fn install_modpack_with_reporter(
         minecraft_version: manifest.minecraft.version,
         loader,
     })
+}
+
+fn select_modpack_manifest_files(
+    manifest: &CurseForgeModpackManifest,
+    pack_members: &[crate::state::instances::PackMember],
+    install_optional: bool,
+) -> (Vec<CurseForgeManifestFile>, HashSet<String>) {
+    let preserved_pack_projects = pack_members
+        .iter()
+        .filter(|member| {
+            matches!(
+                member.override_kind,
+                crate::state::instances::PackMemberOverrideKind::Version
+                    | crate::state::instances::PackMemberOverrideKind::Removed
+            )
+        })
+        .filter_map(|member| member.provider_project_id.clone())
+        .collect::<HashSet<_>>();
+    let disabled_pack_projects = pack_members
+        .iter()
+        .filter(|member| {
+            member.override_kind
+                == crate::state::instances::PackMemberOverrideKind::Disabled
+        })
+        .filter_map(|member| member.provider_project_id.clone())
+        .collect::<HashSet<_>>();
+    let installed_pack_releases = pack_members
+        .iter()
+        .filter(|member| {
+            member.materialization_state
+                == crate::state::instances::PackMemberMaterializationState::Present
+        })
+        .filter_map(|member| {
+            Some((
+                member.provider_project_id.clone()?,
+                member.provider_release_id.clone()?,
+            ))
+        })
+        .collect::<HashSet<_>>();
+    let selected_files = manifest
+        .files
+        .iter()
+        .filter(|file| file.required || install_optional)
+        .filter(|file| {
+            !preserved_pack_projects.contains(&file.project_id.to_string())
+        })
+        .filter(|file| {
+            !installed_pack_releases.contains(&(
+                file.project_id.to_string(),
+                file.file_id.to_string(),
+            ))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    (selected_files, disabled_pack_projects)
 }
 
 /// Installs a CurseForge modpack from a local archive on disk (a zip with a
