@@ -2251,6 +2251,15 @@ pub async fn launch_minecraft(
         )?
         .into_iter(),
     );
+    // Identify the launcher to Minecraft and mods consistently across every
+    // loader. Append these after profile-provided JVM arguments so custom
+    // arguments cannot accidentally replace the launcher's identity.
+    command
+        .arg("-Dminecraft.launcher.brand=Axolotl Launcher")
+        .arg(format!(
+            "-Dminecraft.launcher.version={}",
+            env!("CARGO_PKG_VERSION")
+        ));
 
     // The java launcher requires access to java.lang.reflect in order to force access in to
     // whatever module the main class is in
