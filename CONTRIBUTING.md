@@ -56,6 +56,45 @@ Remove-Item -Recurse -Force target\debug
 
 此操作不会删除 `target\installer-test` 中单独生成的安装包。下次启动开发模式时需要重新编译 Rust 依赖。
 
+### 应用数据目录与数据库迁移
+
+启动器把设置、数据库、日志与缓存放在同一个数据目录下，Windows 上是 `%APPDATA%\red.ghs.axolotl`，其中按更新通道分为 `release\app.db` 与 `beta\app.db`。
+
+**本地构建与已安装的正式版共用这份数据目录。** 本地跑一次桌面应用，改动的就是正在使用的那份数据库，因此：
+
+- 不要手工修改 `_sqlx_migrations` 表。
+- 迁移是单向的。某个构建写入新迁移后，比它旧的构建（包括已安装的正式版）将因 sqlx 拒绝打开而无法启动，报错形如 `migration <版本号> was previously applied but is missing in the resolved migrations`。
+- 需要回退时，先用下面的方式确认改动范围，再决定如何处理。
+
+隔离数据目录有两种方式，推荐在开发时始终使用其中一种：
+
+```powershell
+# 构建期：该构建写入 red.ghs.axolotl-<后缀>，与正式版互不影响
+$env:AXOLOTL_DATA_DIR_SUFFIX = "pr538"
+pnpm app:build
+
+# 运行时：把整个数据目录搬到指定路径（便携模式也用这个变量）
+$env:THESEUS_CONFIG_DIR = "$PWD\.dev-data"
+pnpm app:dev
+```
+
+如果数据库已经被较新的构建升级，可先用降级脚本查看并回退（**运行前必须关闭启动器**，脚本会自行备份，默认只做演练）：
+
+```powershell
+# 列出已应用的迁移
+node scripts/axolotl/downgrade-app-db.mjs --list
+
+# 演练：显示将移除哪些迁移记录、删除哪些列
+node scripts/axolotl/downgrade-app-db.mjs --to 20260909010000
+
+# 实际执行（会在同目录写入 app.db.before-downgrade-<时间戳> 备份）
+node scripts/axolotl/downgrade-app-db.mjs --to 20260909010000 --apply
+```
+
+脚本只认识登记在案的迁移结构；遇到未登记的迁移会打印警告，此时它只移除迁移记录、保留相关列，重新安装带该迁移的构建会因对象重复而失败，需要手工处理。
+
+新增列迁移时，请同步在 `scripts/axolotl/downgrade-app-db.mjs` 的 `REVERTIBLE_COLUMNS` 里登记，否则该迁移无法安全回退。
+
 ## 仓库范围
 
 Axolotl 的产品改动主要位于：
