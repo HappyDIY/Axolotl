@@ -41,7 +41,7 @@ const LAUNCHER_LOG_FULL_FIDELITY_AGE: std::time::Duration =
 #[cfg(any(test, not(debug_assertions)))]
 const LAUNCHER_LOG_DEBUG_FIDELITY_AGE: std::time::Duration =
     std::time::Duration::from_secs(2 * 60 * 60);
-#[cfg(any(test, not(debug_assertions)))]
+#[cfg(not(debug_assertions))]
 const LAUNCHER_LOG_PRUNE_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
 
@@ -410,23 +410,34 @@ fn log_level_minimum_ordinal(level: &str) -> Option<u8> {
     }
 }
 
+/// How a log line relates to the surrounding entries.
+enum LogEntryHeader {
+    /// Timestamp and level parsed: the entry can be filtered.
+    Classified(chrono::DateTime<chrono::FixedOffset>, u8),
+    /// Timestamp parsed but the level is unknown: keep it rather than
+    /// dropping content this logic does not understand.
+    Unclassified,
+}
+
 /// Reads the timestamp and level of an entry line. Continuation lines of a
 /// multi-line message carry no prefix and return `None`, so callers keep them
 /// grouped with the entry they belong to.
-fn parse_log_entry_header(
-    line: &str,
-) -> Option<(chrono::DateTime<chrono::FixedOffset>, u8)> {
+fn parse_log_entry_header(line: &str) -> Option<LogEntryHeader> {
     let (timestamp, rest) = line.split_once(char::is_whitespace)?;
     let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp).ok()?;
     let level = rest.trim_start().split_whitespace().next()?;
-    Some((timestamp, log_level_ordinal(level)?))
+    Some(match log_level_ordinal(level) {
+        Some(ordinal) => LogEntryHeader::Classified(timestamp, ordinal),
+        None => LogEntryHeader::Unclassified,
+    })
 }
 
 /// Keeps or drops whole log entries by a predicate over their timestamp and
 /// level ordinal, returning `None` when nothing was dropped.
 ///
-/// Multi-line messages are kept or dropped together with their header, and the
-/// bytes of kept lines are preserved exactly (no re-encoding).
+/// Multi-line messages are kept or dropped together with their header, the
+/// bytes of kept lines are preserved exactly (no re-encoding), and entries
+/// whose level cannot be classified are always kept.
 fn filter_log_entries<F>(contents: &[u8], keep: F) -> Option<Vec<u8>>
 where
     F: Fn(chrono::DateTime<chrono::FixedOffset>, u8) -> bool,
@@ -436,10 +447,13 @@ where
     let mut keep_entry = true;
 
     for line in contents.split_inclusive(|byte| *byte == b'\n') {
-        if let Some((timestamp, ordinal)) =
-            parse_log_entry_header(&String::from_utf8_lossy(line))
-        {
-            keep_entry = keep(timestamp, ordinal);
+        match parse_log_entry_header(&String::from_utf8_lossy(line)) {
+            Some(LogEntryHeader::Classified(timestamp, ordinal)) => {
+                keep_entry = keep(timestamp, ordinal);
+            }
+            Some(LogEntryHeader::Unclassified) => keep_entry = true,
+            // Continuation line: it follows the decision of its entry.
+            None => {}
         }
 
         if keep_entry {
@@ -492,6 +506,25 @@ pub fn filter_log_contents(
     .unwrap_or_else(|| contents.to_vec())
 }
 
+/// Path of the scratch file used while a log segment is being rewritten.
+#[cfg(any(test, not(debug_assertions)))]
+fn prune_temporary_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.with_extension("log.pruning")
+}
+
+/// Writes contents durably, so an interrupted rewrite can never leave a
+/// partially written file behind.
+#[cfg(any(test, not(debug_assertions)))]
+fn write_file_durably(
+    path: &std::path::Path,
+    contents: &[u8],
+) -> std::io::Result<()> {
+    let mut file = std::fs::File::create(path)?;
+    std::io::Write::write_all(&mut file, contents)?;
+    std::io::Write::flush(&mut file)?;
+    file.sync_all()
+}
+
 /// Rewrites a rotated log file through a temporary sibling, so a crash during
 /// pruning never leaves a truncated file behind.
 #[cfg(any(test, not(debug_assertions)))]
@@ -504,14 +537,25 @@ fn prune_inactive_log_file(
         return Ok(());
     };
 
-    let temporary = path.with_extension("log.pruning");
-    std::fs::write(&temporary, &pruned)?;
-    std::fs::rename(&temporary, path)
+    let temporary = prune_temporary_path(path);
+    if let Err(error) = write_file_durably(&temporary, &pruned) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+    Ok(())
 }
 
-/// Rewrites the active segment in place. The writer keeps its append handle,
-/// so appends continue at the new end of the file; its byte counter is
-/// refreshed to match.
+/// Rewrites the active segment by moving the pruned copy into place and
+/// reopening it for appending.
+///
+/// Replacing the file instead of truncating it keeps a crash or a failed write
+/// from shortening the log being written, and the replacement is only adopted
+/// once the pruned copy is safely on disk. The writer holds the lock for the
+/// whole swap, so no event can land in the discarded file.
 #[cfg(any(test, not(debug_assertions)))]
 fn prune_active_log_file(
     state: &mut RotatingLogState,
@@ -524,14 +568,29 @@ fn prune_active_log_file(
     };
 
     std::io::Write::flush(&mut state.file)?;
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-    std::io::Write::write_all(&mut file, &pruned)?;
-    std::io::Write::flush(&mut file)?;
-    drop(file);
 
+    let temporary = prune_temporary_path(path);
+    if let Err(error) = write_file_durably(&temporary, &pruned) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    // Opening the replacement before the swap means a failure here leaves the
+    // original segment untouched and still being appended to.
+    let replacement = match open_log_file(&temporary) {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(error);
+        }
+    };
+    if let Err(error) = std::fs::rename(&temporary, path) {
+        drop(replacement);
+        let _ = std::fs::remove_file(&temporary);
+        return Err(error);
+    }
+
+    state.file = replacement;
     state.bytes_written = pruned.len() as u64;
     Ok(())
 }
@@ -551,20 +610,26 @@ fn prune_launcher_logs(
     let Ok(entries) = std::fs::read_dir(&state.logs_dir) else {
         return Vec::new();
     };
-    let mut paths = entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let name = path.file_name()?.to_str()?;
-            if !entry.file_type().ok()?.is_file()
-                || !name.starts_with("session_")
-                || path.extension()?.to_str()? != "log"
-            {
-                return None;
-            }
-            Some(path)
-        })
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !entry.file_type().is_ok_and(|kind| kind.is_file()) {
+            continue;
+        }
+        // A scratch file left behind by an interrupted rewrite is an orphan:
+        // rewriting is serialized under the writer lock, so nothing else can
+        // own it now.
+        if name.starts_with("session_") && name.ends_with(".log.pruning") {
+            let _ = std::fs::remove_file(&path);
+            continue;
+        }
+        if name.starts_with("session_") && name.ends_with(".log") {
+            paths.push(path);
+        }
+    }
     paths.sort();
 
     let mut failures = Vec::new();
@@ -1330,6 +1395,55 @@ mod tests {
         assert!(pruned.contains("hot trace"));
         assert!(!pruned.contains("stale debug"));
         assert!(!rotated.with_extension("log.pruning").exists());
+    }
+
+    #[test]
+    fn entries_with_unknown_levels_are_kept() {
+        let now = test_now();
+        let stale = (now - chrono::Duration::hours(3)).to_rfc3339();
+        let fresh = (now - chrono::Duration::minutes(1)).to_rfc3339();
+        let contents = format!(
+            "{stale} DEBUG theseus: dropped header\n{stale} NOTICE theseus: unclassified line\n{fresh} TRACE theseus: kept trace\n"
+        );
+
+        let pruned = String::from_utf8(
+            prune_log_contents(contents.as_bytes(), now)
+                .expect("the stale debug entry is pruned"),
+        )
+        .unwrap();
+
+        assert!(!pruned.contains("dropped header"));
+        assert!(pruned.contains("unclassified line"));
+        assert!(pruned.contains("kept trace"));
+    }
+
+    #[test]
+    fn interrupted_rewrites_leave_no_scratch_files_behind() {
+        let directory = tempfile::tempdir().unwrap();
+        let session_name = "session_20260722_120000".to_string();
+        let writer = RotatingLogWriter::new(
+            directory.path().to_path_buf(),
+            session_name.clone(),
+            10_000,
+            30_000,
+            5,
+            std::time::Duration::from_secs(3 * 24 * 60 * 60),
+        )
+        .unwrap();
+
+        let orphan =
+            directory.path().join(format!("{session_name}.log.pruning"));
+        std::fs::write(&orphan, b"half written").unwrap();
+
+        writer.prune_old_logs();
+
+        assert!(!orphan.exists());
+        assert!(
+            directory
+                .path()
+                .join(format!("{session_name}.log"))
+                .exists()
+        );
     }
 
     #[test]

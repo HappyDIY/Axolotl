@@ -207,15 +207,19 @@ async fn initialize_state(app: tauri::AppHandle) -> api::Result<()> {
     State::init(app.config().identifier.clone()).await?;
 
     // The logger starts before the database is available, so the stored level
-    // is applied here once settings can be read.
-    match theseus::settings::get().await {
-        Ok(settings) => {
-            if let Err(error) = theseus::set_log_level(&settings.log_level) {
-                tracing::warn!("Keeping the default log level: {error}");
+    // is applied here once settings can be read. RUST_LOG keeps overriding the
+    // initial filter, exactly as it does when the logger starts.
+    if std::env::var_os("RUST_LOG").is_none() {
+        match theseus::settings::get().await {
+            Ok(settings) => {
+                if let Err(error) = theseus::set_log_level(&settings.log_level)
+                {
+                    tracing::warn!("Keeping the default log level: {error}");
+                }
             }
-        }
-        Err(error) => {
-            tracing::warn!("Could not read the stored log level: {error}");
+            Err(error) => {
+                tracing::warn!("Could not read the stored log level: {error}");
+            }
         }
     }
 

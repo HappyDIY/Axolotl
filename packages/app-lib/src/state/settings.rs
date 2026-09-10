@@ -143,7 +143,7 @@ pub struct Settings {
     pub sidebar_instance_count: u32,
     #[serde(default)]
     pub close_behavior: String,
-    #[serde(default)]
+    #[serde(default = "default_log_level")]
     pub log_level: String,
     #[serde(default)]
     pub auto_hide_downloads_button: bool,
@@ -201,6 +201,12 @@ pub struct PrivacySettings {
 
 fn default_true() -> bool {
     true
+}
+
+/// Default log level, kept in sync with the `log_level` column default and
+/// the logger's own fallback.
+fn default_log_level() -> String {
+    crate::logger::DEFAULT_LOG_LEVEL.to_string()
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, Hash, PartialEq)]

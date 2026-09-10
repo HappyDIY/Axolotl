@@ -152,6 +152,10 @@ pub async fn export_error_logs(
             }
 
             let file_name = entry.file_name().to_string_lossy().to_string();
+            // Scratch files from an interrupted log rewrite are not logs.
+            if file_name.ends_with(".log.pruning") {
+                continue;
+            }
             write_zip_file(
                 &mut writer,
                 &format!("launcher_logs/{file_name}"),
@@ -238,11 +242,16 @@ pub async fn export_launcher_logs(
     include_instance_logs: bool,
     include_crash_analysis: bool,
 ) -> Result<()> {
-    let state = theseus::State::get().await.ok();
+    // Censoring needs the app state (credentials, IPs). Without it an export
+    // would silently ship secrets, so fail rather than degrade.
+    let state = theseus::State::get().await?;
     let archive = tokio::fs::File::create(&output_path).await?;
     let mut writer = ZipFileWriter::with_tokio(archive);
 
-    let manifest = format!(
+    let (exported_logs, skipped_logs) =
+        write_exported_logs(&mut writer, range, level, &state).await?;
+
+    let mut manifest = format!(
         "Axolotl Launcher log export\n\
          Exported at: {}\n\
          App version: {}\n\
@@ -250,7 +259,8 @@ pub async fn export_launcher_logs(
          Level filter: {}\n\
          System information: {}\n\
          Recent instance log: {}\n\
-         Crash analysis: {}\n\n\
+         Crash analysis: {}\n\
+         Log files: {exported_logs}\n\n\
          Access tokens, Minecraft tokens, and IP addresses are replaced with placeholders.\n",
         chrono::Local::now().to_rfc3339(),
         env!("CARGO_PKG_VERSION"),
@@ -272,14 +282,17 @@ pub async fn export_launcher_logs(
             "omitted"
         },
     );
+    if !skipped_logs.is_empty() {
+        manifest.push_str("\nSkipped unreadable log files:\n");
+        for name in &skipped_logs {
+            manifest.push_str(&format!("- {name}\n"));
+        }
+    }
     write_zip_entry(&mut writer, "manifest.txt", manifest.as_bytes()).await?;
-
-    let state = state.as_deref();
-    write_exported_logs(&mut writer, range, level, state).await?;
 
     if include_system_info {
         let environment = build_environment_report();
-        let environment = censor_export_text(environment, state).await;
+        let environment = censor_export_text(environment, &state).await?;
         write_zip_entry(
             &mut writer,
             "system-information.txt",
@@ -288,17 +301,17 @@ pub async fn export_launcher_logs(
         .await?;
     }
 
-    let recent_instance =
-        match (include_instance_logs || include_crash_analysis, state) {
-            (true, Some(state)) => newest_instance_log(state).await,
-            _ => None,
-        };
+    let recent_instance = if include_instance_logs || include_crash_analysis {
+        newest_instance_log(&state).await
+    } else {
+        None
+    };
 
     if include_instance_logs
         && let Some((instance_id, path)) = recent_instance.as_ref()
     {
         let tail = read_file_tail(path, LOG_EXPORT_INSTANCE_LOG_TAIL_BYTES)?;
-        let tail = censor_export_text(tail, state).await;
+        let tail = censor_export_text(tail, &state).await?;
         write_zip_entry(
             &mut writer,
             &format!("minecraft/{instance_id}/latest.log"),
@@ -313,10 +326,17 @@ pub async fn export_launcher_logs(
         && (analysis.crashed || !analysis.findings.is_empty())
         && let Ok(report) = serde_json::to_vec_pretty(&analysis)
     {
+        // The analysis carries raw log text and Windows event messages, so it
+        // goes through the same censoring as the exported logs.
+        let report = censor_export_text(
+            String::from_utf8_lossy(&report).into_owned(),
+            &state,
+        )
+        .await?;
         write_zip_entry(
             &mut writer,
             &format!("minecraft/{instance_id}/crash-analysis.json"),
-            &report,
+            report.as_bytes(),
         )
         .await?;
     }
@@ -325,20 +345,22 @@ pub async fn export_launcher_logs(
     Ok(())
 }
 
+/// Writes the matching launcher logs and reports how many were written plus
+/// the names of any files that could not be read.
 async fn write_exported_logs(
     writer: &mut ZipFileWriter<tokio::fs::File>,
     range: LogExportRange,
     level: LogExportLevel,
-    state: Option<&theseus::State>,
-) -> Result<()> {
+    state: &theseus::State,
+) -> Result<(usize, Vec<String>)> {
     let Some(directories) = DirectoryInfo::global_handle_if_ready() else {
-        return Ok(());
+        return Ok((0, Vec::new()));
     };
     let Some(logs_dir) = directories.launcher_logs_dir() else {
-        return Ok(());
+        return Ok((0, Vec::new()));
     };
     if !tokio::fs::try_exists(&logs_dir).await? {
-        return Ok(());
+        return Ok((0, Vec::new()));
     }
 
     let mut entries = tokio::fs::read_dir(&logs_dir).await?;
@@ -355,42 +377,45 @@ async fn write_exported_logs(
     }
     paths.sort();
 
+    let mut exported = 0;
+    let mut skipped = Vec::new();
     for path in paths {
-        let contents = tokio::fs::read(&path).await?;
+        let file_name = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "session.log".to_string());
+
+        // A single unreadable file must not lose the whole report.
+        let Ok(contents) = tokio::fs::read(&path).await else {
+            skipped.push(file_name);
+            continue;
+        };
         let filtered = theseus::filter_log_contents(
             &contents,
             range.max_age(),
             level.minimum(),
         );
         let text = String::from_utf8_lossy(&filtered).into_owned();
-        let censored = censor_export_text(text, state).await;
-        let file_name = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "session.log".to_string());
+        let censored = censor_export_text(text, state).await?;
         write_zip_entry(
             writer,
             &format!("launcher_logs/{file_name}"),
             censored.as_bytes(),
         )
         .await?;
+        exported += 1;
     }
 
-    Ok(())
+    Ok((exported, skipped))
 }
 
-/// Replaces credentials and IP addresses with placeholders when the app state
-/// is available; otherwise the text is exported as-is.
+/// Replaces credentials and IP addresses with placeholders. Censoring failures
+/// propagate so an export never ships unredacted content.
 async fn censor_export_text(
     text: String,
-    state: Option<&theseus::State>,
-) -> String {
-    let Some(state) = state else {
-        return text;
-    };
-    theseus::install::censor_shared_text(text.clone(), state)
-        .await
-        .unwrap_or(text)
+    state: &theseus::State,
+) -> Result<String> {
+    Ok(theseus::install::censor_shared_text(text, state).await?)
 }
 
 fn build_environment_report() -> String {
