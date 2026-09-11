@@ -21,7 +21,7 @@ use crate::state::{
 use crate::util::fetch::{
     ContentValidation, DownloadRequest, DownloadRouteSource, FetchProgressFn,
     Integrity, ProxyPolicy, ResourceClass, download_to_path,
-    resolve_download_routes_for, sha1_file_async,
+    resolve_download_routes_for, sha1_file_async, sha1_file_cancellable,
 };
 use crate::{ErrorKind, State};
 use dashmap::DashMap;
@@ -578,7 +578,7 @@ pub(crate) async fn stage_curseforge_upgrade_file(
         true,
     )
     .await?;
-    verify_installed_curseforge_file(&path, &file).await?;
+    verify_installed_curseforge_file(&path, &file, None).await?;
     Ok(StagedCurseForgeUpgrade {
         path,
         file,
@@ -8155,8 +8155,15 @@ async fn download_installed_file(
     if let Some(download_metrics) = download_metrics {
         download_metrics.record(&result);
     }
-    let verified =
-        verify_installed_curseforge_file(download_path, file).await?;
+    let verified = verify_installed_curseforge_file(
+        download_path,
+        file,
+        download_metrics
+            .and_then(|metrics| metrics.reporter.as_ref())
+            .map(InstallProgressReporter::cancellation_token)
+            .as_ref(),
+    )
+    .await?;
     let provider_ref = ContentProviderRef::CurseForge {
         project_id: CurseForgeProjectId::new(file.mod_id)?,
         file_id: Some(CurseForgeFileId::new(file.id)?),
@@ -8253,6 +8260,7 @@ struct VerifiedInstalledCurseForgeFile {
 async fn verify_installed_curseforge_file(
     path: &Path,
     file: &CurseForgeFile,
+    cancellation: Option<&CancellationToken>,
 ) -> crate::Result<VerifiedInstalledCurseForgeFile> {
     if let Some(expected_sha1) = file
         .hashes
@@ -8260,7 +8268,12 @@ async fn verify_installed_curseforge_file(
         .find(|hash| hash.algo == 1 && !hash.value.trim().is_empty())
         .map(|hash| hash.value.as_str())
     {
-        let (size, sha1) = sha1_file_async(path).await?;
+        let (size, sha1) = match cancellation {
+            Some(cancellation) => {
+                sha1_file_cancellable(path, cancellation).await?
+            }
+            None => sha1_file_async(path).await?,
+        };
         if !sha1.eq_ignore_ascii_case(expected_sha1) {
             return Err(
                 ErrorKind::HashError(expected_sha1.to_string(), sha1).into()
@@ -8291,7 +8304,10 @@ async fn verify_installed_curseforge_file(
         });
     }
 
-    let (size, sha1) = sha1_file_async(path).await?;
+    let (size, sha1) = match cancellation {
+        Some(cancellation) => sha1_file_cancellable(path, cancellation).await?,
+        None => sha1_file_async(path).await?,
+    };
     Ok(VerifiedInstalledCurseForgeFile {
         size,
         sha1,
@@ -8308,7 +8324,8 @@ async fn record_installed_curseforge_file(
     ownership_kind: crate::state::instances::ContentOwnershipKind,
     state: &State,
 ) -> crate::Result<()> {
-    let verified = verify_installed_curseforge_file(full_path, file).await?;
+    let verified =
+        verify_installed_curseforge_file(full_path, file, None).await?;
     match verified.pending_completion {
         CurseForgePendingCompletionProof::None => {
             let provider_ref = ContentProviderRef::CurseForge {
