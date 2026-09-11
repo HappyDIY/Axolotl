@@ -152,20 +152,20 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
-import ButtonStyled from '../base/ButtonStyled.vue'
-import KeybindingChips from '../base/KeybindingChips.vue'
 import { defineMessages, useVIntl } from '../../composables/i18n'
 import { useKeybindingLabels } from '../../composables/use-keybinding-labels'
 import {
 	type BindingConflict,
 	bindingFromKeyboardEvent,
 	bindingsEqual,
-	type KeyBinding,
 	isModifierCode,
+	type KeyBinding,
 	keyCodeLabel,
 	validateBinding,
 } from '../../utils/keybinding'
 import { KEYBINDING_CATALOG } from '../../utils/keybinding-catalog'
+import ButtonStyled from '../base/ButtonStyled.vue'
+import KeybindingChips from '../base/KeybindingChips.vue'
 import KeybindingChoiceTree from './KeybindingChoiceTree.vue'
 import NewModal from './NewModal.vue'
 
@@ -416,7 +416,8 @@ function handleKeydown(event: KeyboardEvent) {
 	if (event.key === 'Escape') {
 		// Leaving the recording is a step back, not closing the dialog.
 		event.preventDefault()
-		event.stopPropagation()
+		// Immediate: the dialog's own escape handler sits on the same node.
+		event.stopImmediatePropagation()
 		clearTimers()
 		phase.value = 'idle'
 		return
@@ -424,7 +425,7 @@ function handleKeydown(event: KeyboardEvent) {
 
 	if (phase.value === 'listening') {
 		event.preventDefault()
-		event.stopPropagation()
+		event.stopImmediatePropagation()
 		livePressed.value = {
 			device: 'keyboard',
 			code: event.code,
@@ -443,7 +444,7 @@ function handleKeydown(event: KeyboardEvent) {
 
 	if (phase.value === 'verifying') {
 		event.preventDefault()
-		event.stopPropagation()
+		event.stopImmediatePropagation()
 		const attempt = bindingFromKeyboardEvent(event)
 		if (!attempt || !candidate.value) return
 		if (bindingsEqual(attempt, candidate.value)) {

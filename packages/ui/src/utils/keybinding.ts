@@ -44,9 +44,15 @@ const MODIFIER_FREE_CODES = new Set<string>([
 	'PageUp',
 	'PageDown',
 	...Array.from({ length: 24 }, (_, index) => `F${index + 1}`),
-	...MOUSE_BUTTON_CODES,
+	...MOUSE_BUTTON_CODES.filter((code) => code !== 'Mouse0'),
 	...WHEEL_CODES,
 ])
+
+/**
+ * Codes that always need a modifier, whatever else is allowed. A bare left
+ * click is how the whole interface is operated, so it can never be a shortcut.
+ */
+const MODIFIER_REQUIRED_CODES = new Set<string>(['Mouse0'])
 
 /** A combination someone else already answers to. */
 export interface BindingConflict {
@@ -156,7 +162,11 @@ export function validateBinding(
 	binding: KeyBinding,
 	conflicts: BindingConflict[],
 ): BindingIssue | null {
-	if (!binding.mod && !binding.shift && !binding.alt && !MODIFIER_FREE_CODES.has(binding.code)) {
+	const unmodified = !binding.mod && !binding.shift && !binding.alt
+	if (unmodified && MODIFIER_REQUIRED_CODES.has(binding.code)) {
+		return { kind: 'needs-modifier' }
+	}
+	if (unmodified && !MODIFIER_FREE_CODES.has(binding.code)) {
 		return { kind: 'needs-modifier' }
 	}
 

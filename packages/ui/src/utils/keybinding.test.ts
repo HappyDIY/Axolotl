@@ -125,7 +125,7 @@ test('a bare key is refused unless it can be pressed without disturbing typing',
 	assert.equal(validateBinding(key('KeyA', { mod: true }), conflicts), null)
 })
 
-test('an unmodified pointer input is allowed', () => {
+test('an unmodified pointer input is allowed, except a bare left click', () => {
 	const conflicts: BindingConflict[] = []
 	const click: KeyBinding = {
 		device: 'mouse',
@@ -142,7 +142,8 @@ test('an unmodified pointer input is allowed', () => {
 		alt: false,
 	}
 
-	assert.equal(validateBinding(click, conflicts), null)
+	assert.deepEqual(validateBinding(click, conflicts), { kind: 'needs-modifier' })
+	assert.equal(validateBinding({ ...click, mod: true }, conflicts), null)
 	assert.equal(validateBinding(wheel, conflicts), null)
 })
 
