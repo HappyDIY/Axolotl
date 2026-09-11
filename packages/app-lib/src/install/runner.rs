@@ -1188,9 +1188,6 @@ async fn run_job(job_id: Uuid) -> crate::Result<()> {
         _ = cancellation.cancelled() => RunResult::Canceled,
         result = run_request(job_id, &mut job_state, &state) => RunResult::Completed(result),
     };
-    // Flush the latest in-memory progress before any terminal transition
-    // (success, pause, failure, or cancellation) is persisted.
-    live_reporter.persist().await?;
     state.install_job_cancellations.remove(&job_id);
     let execution_state = job_state;
     let reporter_state = live_reporter.current_state().await?;
