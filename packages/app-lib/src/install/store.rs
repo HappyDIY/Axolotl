@@ -275,6 +275,16 @@ pub async fn update_state(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let json = serde_json::to_string(state)?;
     let instance_id = instance_id(state);
@@ -306,6 +316,16 @@ pub async fn update_serialized_state(
     json: &str,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let instance_id = instance_id_from_json(json);
     let id_value = id.to_string();
@@ -347,6 +367,16 @@ pub async fn update_progress_state(
     json: &str,
     app_state: &State,
 ) -> crate::Result<()> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let modified = Utc::now().timestamp();
     let id_value = id.to_string();
 
@@ -370,6 +400,16 @@ pub async fn update_status(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let finished = status.is_finished().then_some(now.timestamp());
     let json = serde_json::to_string(state)?;
@@ -405,6 +445,16 @@ pub async fn update_status_if(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<Option<InstallJobRecord>> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let finished = status.is_finished().then_some(now.timestamp());
     let json = serde_json::to_string(state)?;
