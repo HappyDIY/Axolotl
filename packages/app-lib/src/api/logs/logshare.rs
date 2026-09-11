@@ -463,6 +463,12 @@ async fn stream_ai(
     let response = request.send().await?;
     let status = response.status();
     if !status.is_success() {
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(crate::ErrorKind::OtherError(
+                "LogAgent queue is full, please retry later".to_string(),
+            )
+            .into());
+        }
         let text = response.text().await?;
         return Err(crate::ErrorKind::OtherError(format!(
             "LogAgent analysis failed with HTTP {status}: {}",
@@ -488,8 +494,7 @@ async fn stream_ai(
             break;
         };
         let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
-        for event in parser.feed(&text) {
+        for event in parser.feed(&chunk) {
             if let Some(delta) = event.content {
                 output.push_str(&delta);
                 if show_progress {
@@ -502,7 +507,7 @@ async fn stream_ai(
                 }
             }
             if let Some(status_event) = event.status_event {
-                if show_progress {
+                if show_progress || status_event.event_type == "queued" {
                     emit_logshare_ai_event(
                         instance_id,
                         &status_event.event_type,
@@ -547,29 +552,27 @@ struct ParsedStatusEvent {
 }
 
 struct SseParser {
-    buffer: String,
+    buffer: Vec<u8>,
 }
 
 impl SseParser {
     fn new() -> Self {
-        Self {
-            buffer: String::new(),
-        }
+        Self { buffer: Vec::new() }
     }
 
-    fn feed(&mut self, chunk: &str) -> Vec<ParsedEvent> {
-        self.buffer.push_str(chunk);
+    fn feed(&mut self, chunk: &[u8]) -> Vec<ParsedEvent> {
+        self.buffer.extend_from_slice(chunk);
         let mut events = Vec::new();
-        while {
-            let lf_pos = self.buffer.find("\n\n");
-            let crlf_pos = self.buffer.find("\r\n\r\n");
+        loop {
+            let lf_pos = find_bytes(&self.buffer, b"\n\n");
+            let crlf_pos = find_bytes(&self.buffer, b"\r\n\r\n");
             let (pos, separator_len) = match (lf_pos, crlf_pos) {
                 (Some(lf_pos), Some(crlf_pos)) if crlf_pos < lf_pos => (crlf_pos, 4),
                 (Some(lf_pos), _) => (lf_pos, 2),
                 (None, Some(crlf_pos)) => (crlf_pos, 4),
                 (None, None) => break,
             };
-            let block = self.buffer[..pos].to_string();
+            let block = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
             self.buffer.drain(..pos + separator_len);
             if let Some(event) = parse_sse_block(&block) {
                 events.push(event);
@@ -577,6 +580,10 @@ impl SseParser {
         }
         events
     }
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 fn parse_sse_block(block: &str) -> Option<ParsedEvent> {
