@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_millis(500);
+const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(2);
 const CONTENT_PROGRESS_PERSIST_STEPS: u64 = 25;
 const LIVE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 const LIVE_PROGRESS_MIN_BYTES: u64 = 256 * 1024;
@@ -37,6 +37,7 @@ pub struct InstallProgressReporter {
 #[derive(Debug)]
 struct InstallProgressReporterState {
     job: InstallJobState,
+    last_snapshot: Option<InstallJobSnapshot>,
     last_persisted_at: Instant,
     last_persisted_progress: Option<(InstallPhaseId, u64)>,
     initialized_from_store: bool,
@@ -99,6 +100,29 @@ impl InstallProgressReporter {
         self.job_id
     }
 
+    /// Overlays the in-memory reporter state on a database snapshot. Progress
+    /// and active download details are intentionally runtime state and can be
+    /// newer than the last checkpoint written to SQLite.
+    pub(crate) async fn overlay_snapshot(
+        job_id: Uuid,
+        mut snapshot: InstallJobSnapshot,
+    ) -> Option<InstallJobSnapshot> {
+        let state = REPORTER_STATES.get(&job_id)?.upgrade()?;
+        let state = state.lock().await;
+        snapshot.phase = state.job.progress.phase;
+        snapshot.progress = state.job.progress.progress.clone();
+        snapshot.details = state.job.progress.details.clone();
+        snapshot.parallel = state.job.progress.parallel.clone();
+        snapshot.display = state.job.display.clone();
+        snapshot.error = state.job.error.clone();
+        snapshot.rollback_error = state.job.rollback_error.clone();
+        snapshot.pause_reason = state.job.pause_reason.clone();
+        snapshot.upgrade_result = state.job.upgrade_result.clone();
+        snapshot.summary = state.job.download_summary();
+        snapshot.items = state.job.download_items();
+        Some(snapshot)
+    }
+
     pub fn new(job_id: Uuid, mut state: InstallJobState) -> Self {
         state.compact_transient_download_events();
         let shared_state = match REPORTER_STATES.entry(job_id) {
@@ -109,6 +133,7 @@ impl InstallProgressReporter {
                     let state =
                         Arc::new(Mutex::new(InstallProgressReporterState {
                             job: state,
+                            last_snapshot: None,
                             last_persisted_at: Instant::now(),
                             last_persisted_progress: None,
                             initialized_from_store: false,
@@ -124,6 +149,7 @@ impl InstallProgressReporter {
                 let state =
                     Arc::new(Mutex::new(InstallProgressReporterState {
                         job: state,
+                        last_snapshot: None,
                         last_persisted_at: Instant::now(),
                         last_persisted_progress: None,
                         initialized_from_store: false,
@@ -249,6 +275,7 @@ impl InstallProgressReporter {
         };
         if let Ok(mut state) = self.state.try_lock() {
             state.mark_persisted();
+            state.last_snapshot = Some(record.snapshot());
         }
         if let Err(error) = emit_install_job(&record.snapshot()).await {
             tracing::warn!(%error, "Failed to emit parallel install progress");
@@ -352,6 +379,7 @@ impl InstallProgressReporter {
         let record =
             store::update_state(self.job_id, &state.job, &app_state).await?;
         state.mark_persisted();
+        state.last_snapshot = Some(record.snapshot());
         let snapshot = record.snapshot();
         emit_install_job(&snapshot).await?;
         Ok(snapshot)
@@ -435,6 +463,7 @@ impl InstallProgressReporter {
                 .await?;
         if let Ok(mut state) = self.state.try_lock() {
             state.mark_persisted();
+            state.last_snapshot = Some(record.snapshot());
         }
         let snapshot = record.snapshot();
         emit_install_job(&snapshot).await?;
@@ -850,6 +879,25 @@ impl InstallProgressReporter {
         }
 
         if !state.should_persist(phase_started || progress_counter_started) {
+            let snapshot = state.last_snapshot.as_ref().map(|base| {
+                let mut snapshot = base.clone();
+                snapshot.phase = state.job.progress.phase;
+                snapshot.progress = state.job.progress.progress.clone();
+                snapshot.details = state.job.progress.details.clone();
+                snapshot.parallel = state.job.progress.parallel.clone();
+                snapshot.display = state.job.display.clone();
+                snapshot.error = state.job.error.clone();
+                snapshot.rollback_error = state.job.rollback_error.clone();
+                snapshot.pause_reason = state.job.pause_reason.clone();
+                snapshot.upgrade_result = state.job.upgrade_result.clone();
+                snapshot.summary = state.job.download_summary();
+                snapshot.items = state.job.download_items();
+                snapshot
+            });
+            drop(state);
+            if let Some(snapshot) = snapshot {
+                emit_install_job(&snapshot).await?;
+            }
             return Ok(());
         }
 
@@ -873,6 +921,7 @@ impl InstallProgressReporter {
         };
         if let Ok(mut state) = self.state.try_lock() {
             state.mark_persisted();
+            state.last_snapshot = Some(record.snapshot());
         }
         if let Err(error) = emit_install_job(&record.snapshot()).await {
             tracing::warn!(%error, "Failed to emit install progress");

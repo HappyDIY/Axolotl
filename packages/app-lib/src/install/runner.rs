@@ -296,16 +296,25 @@ pub async fn list_jobs(
     include_finished: bool,
 ) -> crate::Result<Vec<InstallJobSnapshot>> {
     let state = State::get().await?;
-    Ok(store::list(include_finished, &state)
-        .await?
-        .into_iter()
-        .map(|job| job.snapshot())
-        .collect())
+    let mut snapshots = Vec::new();
+    for job in store::list(include_finished, &state).await? {
+        let snapshot = job.snapshot();
+        snapshots.push(
+            InstallProgressReporter::overlay_snapshot(job.id, snapshot)
+                .await
+                .unwrap_or_else(|| job.snapshot()),
+        );
+    }
+    Ok(snapshots)
 }
 
 pub async fn get_job(job_id: Uuid) -> crate::Result<InstallJobSnapshot> {
     let state = State::get().await?;
-    Ok(store::get_required(job_id, &state).await?.snapshot())
+    let job = store::get_required(job_id, &state).await?;
+    let snapshot = job.snapshot();
+    Ok(InstallProgressReporter::overlay_snapshot(job_id, snapshot)
+        .await
+        .unwrap_or_else(|| job.snapshot()))
 }
 
 pub async fn job_support_details(job_id: Uuid) -> crate::Result<String> {
@@ -1179,6 +1188,9 @@ async fn run_job(job_id: Uuid) -> crate::Result<()> {
         _ = cancellation.cancelled() => RunResult::Canceled,
         result = run_request(job_id, &mut job_state, &state) => RunResult::Completed(result),
     };
+    // Flush the latest in-memory progress before any terminal transition
+    // (success, pause, failure, or cancellation) is persisted.
+    live_reporter.persist().await?;
     state.install_job_cancellations.remove(&job_id);
     let execution_state = job_state;
     let reporter_state = live_reporter.current_state().await?;
