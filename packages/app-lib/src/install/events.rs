@@ -14,8 +14,6 @@ use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(2);
-const CONTENT_PROGRESS_PERSIST_STEPS: u64 = 25;
 const LIVE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
 const LIVE_PROGRESS_MIN_BYTES: u64 = 256 * 1024;
 
@@ -230,56 +228,17 @@ impl InstallProgressReporter {
                 .map(|parallel| (parallel.current, parallel.total))
                 .unwrap_or((0, 0)),
         };
-        let previous = &state.job.progress.parallel;
-        let phase_changed = previous
-            .as_ref()
-            .is_none_or(|parallel| parallel.phase != phase);
-        let total_changed = previous
-            .as_ref()
-            .is_none_or(|parallel| parallel.total != total);
-        let enough_progress = previous
-            .as_ref()
-            .map(|parallel| {
-                current.saturating_sub(parallel.current)
-                    >= (parallel.total / 200)
-                        .max(CONTENT_PROGRESS_PERSIST_STEPS)
-            })
-            .unwrap_or(true);
         state.job.progress.parallel = Some(InstallParallelProgress {
             phase,
             current,
             total,
             details,
         });
-        if !(phase_changed || total_changed || enough_progress)
-            && state.last_persisted_at.elapsed() < PROGRESS_PERSIST_INTERVAL
-        {
+        let Some(snapshot) = runtime_snapshot(&state) else {
             return Ok(());
-        }
-
-        let json = serde_json::to_string(&state.job)?;
-        drop(state);
-        let record =
-            match store::update_progress_state(self.job_id, &json, &app_state)
-                .await
-            {
-                Ok(()) => store::get_required(self.job_id, &app_state).await,
-                Err(error) => Err(error),
-            };
-        let record = match record {
-            Ok(record) => record,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to persist parallel install progress");
-                return Ok(());
-            }
         };
-        if let Ok(mut state) = self.state.try_lock() {
-            state.mark_persisted();
-            state.last_snapshot = Some(record.snapshot());
-        }
-        if let Err(error) = emit_install_job(&record.snapshot()).await {
-            tracing::warn!(%error, "Failed to emit parallel install progress");
-        }
+        drop(state);
+        emit_install_job(&snapshot).await?;
         Ok(())
     }
 
@@ -399,6 +358,7 @@ impl InstallProgressReporter {
         let app_state = crate::State::get().await?;
         let mut state = self.state.lock().await;
         self.sync_latest(&mut state, &app_state).await?;
+        self.sync_latest(&mut state, &app_state).await?;
         state.job.continuation = continuation;
         let record =
             store::update_state(self.job_id, &state.job, &app_state).await?;
@@ -454,18 +414,13 @@ impl InstallProgressReporter {
         if refresh_missing_reason {
             refresh_missing_pause_reason(&mut state.job);
         }
-        // Serialize under the lock; the DB write runs without holding the
-        // reporter mutex so per-file completion events never serialize on it.
-        let json = serde_json::to_string(&state.job)?;
+        let Some(snapshot) = runtime_snapshot(&state) else {
+            return Err(crate::ErrorKind::OtherError(
+                "install progress snapshot unavailable".to_string(),
+            )
+            .into());
+        };
         drop(state);
-        let record =
-            store::update_serialized_state(self.job_id, &json, &app_state)
-                .await?;
-        if let Ok(mut state) = self.state.try_lock() {
-            state.mark_persisted();
-            state.last_snapshot = Some(record.snapshot());
-        }
-        let snapshot = record.snapshot();
         emit_install_job(&snapshot).await?;
         Ok(snapshot)
     }
@@ -527,6 +482,7 @@ impl InstallProgressReporter {
     ) -> crate::Result<()> {
         let app_state = crate::State::get().await?;
         let mut state = self.state.lock().await;
+        self.sync_latest(&mut state, &app_state).await?;
 
         state
             .job
@@ -534,22 +490,9 @@ impl InstallProgressReporter {
                 source: source.into(),
                 fallback_count,
             });
-        let record = match store::update_state(
-            self.job_id,
-            &state.job,
-            &app_state,
-        )
-        .await
-        {
-            Ok(record) => record,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to persist download metrics");
-                return Ok(());
-            }
-        };
-        state.mark_persisted();
-        if let Err(error) = emit_install_job(&record.snapshot()).await {
-            tracing::warn!(%error, "Failed to emit download metrics");
+        if let Some(snapshot) = runtime_snapshot(&state) {
+            drop(state);
+            emit_install_job(&snapshot).await?;
         }
         Ok(())
     }
@@ -862,72 +805,36 @@ impl InstallProgressReporter {
             tracing::warn!(%error, "Failed to load install progress state");
             return Ok(());
         }
-        let phase_started = state.job.progress.phase != phase
-            || matches!(
-                &state.job.progress.details,
-                InstallPhaseDetails::Empty
-            ) && !matches!(&details, InstallPhaseDetails::Empty);
-        let progress_counter_started = state.job.progress.phase == phase
-            && match (&state.job.progress.progress, &progress) {
-                (None, Some(_)) => true,
-                (Some(old), Some(new)) => old.total != new.total,
-                _ => false,
-            };
         state.job.set_progress(phase, progress, details);
         for event in events {
             state.job.record_event(event);
         }
 
-        if !state.should_persist(phase_started || progress_counter_started) {
-            let snapshot = state.last_snapshot.as_ref().map(|base| {
-                let mut snapshot = base.clone();
-                snapshot.phase = state.job.progress.phase;
-                snapshot.progress = state.job.progress.progress.clone();
-                snapshot.details = state.job.progress.details.clone();
-                snapshot.parallel = state.job.progress.parallel.clone();
-                snapshot.display = state.job.display.clone();
-                snapshot.error = state.job.error.clone();
-                snapshot.rollback_error = state.job.rollback_error.clone();
-                snapshot.pause_reason = state.job.pause_reason.clone();
-                snapshot.upgrade_result = state.job.upgrade_result.clone();
-                snapshot.summary = state.job.download_summary();
-                snapshot.items = state.job.download_items();
-                snapshot
-            });
-            drop(state);
-            if let Some(snapshot) = snapshot {
-                emit_install_job(&snapshot).await?;
-            }
+        let Some(snapshot) = runtime_snapshot(&state) else {
             return Ok(());
-        }
-
-        // Serialize under the lock (CPU only); the DB write below runs without
-        // holding the reporter mutex.
-        let json = serde_json::to_string(&state.job)?;
-        drop(state);
-        let record =
-            match store::update_progress_state(self.job_id, &json, &app_state)
-                .await
-            {
-                Ok(()) => store::get_required(self.job_id, &app_state).await,
-                Err(error) => Err(error),
-            };
-        let record = match record {
-            Ok(record) => record,
-            Err(error) => {
-                tracing::warn!(%error, "Failed to persist install progress");
-                return Ok(());
-            }
         };
-        if let Ok(mut state) = self.state.try_lock() {
-            state.mark_persisted();
-            state.last_snapshot = Some(record.snapshot());
-        }
-        if let Err(error) = emit_install_job(&record.snapshot()).await {
-            tracing::warn!(%error, "Failed to emit install progress");
-        }
+        drop(state);
+        emit_install_job(&snapshot).await?;
         Ok(())
     }
+}
+
+fn runtime_snapshot(
+    state: &InstallProgressReporterState,
+) -> Option<InstallJobSnapshot> {
+    let mut snapshot = state.last_snapshot.clone()?;
+    snapshot.phase = state.job.progress.phase;
+    snapshot.progress = state.job.progress.progress.clone();
+    snapshot.details = state.job.progress.details.clone();
+    snapshot.parallel = state.job.progress.parallel.clone();
+    snapshot.display = state.job.display.clone();
+    snapshot.error = state.job.error.clone();
+    snapshot.rollback_error = state.job.rollback_error.clone();
+    snapshot.pause_reason = state.job.pause_reason.clone();
+    snapshot.upgrade_result = state.job.upgrade_result.clone();
+    snapshot.summary = state.job.download_summary();
+    snapshot.items = state.job.download_items();
+    Some(snapshot)
 }
 
 fn refresh_missing_pause_reason(job: &mut InstallJobState) {
@@ -973,36 +880,6 @@ fn refresh_missing_pause_reason(job: &mut InstallJobState) {
 }
 
 impl InstallProgressReporterState {
-    fn should_persist(&self, state_transition: bool) -> bool {
-        if state_transition {
-            return true;
-        }
-
-        let Some(progress) = &self.job.progress.progress else {
-            return true;
-        };
-
-        if progress.current >= progress.total {
-            return true;
-        }
-
-        let progressed_enough =
-            if self.job.progress.phase == InstallPhaseId::DownloadingContent {
-                self.last_persisted_progress
-                    .map(|(phase, current)| {
-                        phase != self.job.progress.phase
-                            || progress.current.saturating_sub(current)
-                                >= CONTENT_PROGRESS_PERSIST_STEPS
-                    })
-                    .unwrap_or(true)
-            } else {
-                false
-            };
-
-        progressed_enough
-            || self.last_persisted_at.elapsed() >= PROGRESS_PERSIST_INTERVAL
-    }
-
     fn mark_persisted(&mut self) {
         self.last_persisted_at = Instant::now();
         self.last_persisted_progress = self
