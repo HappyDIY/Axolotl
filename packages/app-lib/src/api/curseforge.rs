@@ -36,6 +36,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 #[path = "curseforge_validation.rs"]
 mod curseforge_validation;
@@ -490,7 +491,14 @@ pub struct CurseForgeInstallRequest {
     pub dependency_plan_id: Option<String>,
     #[serde(skip)]
     pub(crate) defer_persistence: bool,
+    #[serde(skip)]
+    pub(crate) persistence_tx: Option<mpsc::Sender<DeferredCurseForgeRecord>>,
 }
+
+type DeferredCurseForgeRecord = (
+    crate::state::instances::commands::ProjectFileRecord,
+    Option<(CurseForgeProjectId, CurseForgeFileId)>,
+);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -702,10 +710,7 @@ pub struct CurseForgeInstallResult {
     #[serde(default)]
     pub cross_source_dependencies: Vec<CurseForgeCrossSourceDependency>,
     #[serde(skip)]
-    pub(crate) deferred_records: Vec<(
-        crate::state::instances::commands::ProjectFileRecord,
-        Option<(CurseForgeProjectId, CurseForgeFileId)>,
-    )>,
+    pub(crate) deferred_records: Vec<DeferredCurseForgeRecord>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1703,10 +1708,19 @@ async fn install_file_with_metrics(
             .await?;
         let relative_path = downloaded.relative_path.clone();
         if request.defer_persistence {
-            result.deferred_records.push((downloaded.record, match downloaded.pending_completion {
+            let deferred = (downloaded.record, match downloaded.pending_completion {
                 CurseForgePendingCompletionProof::None => None,
                 CurseForgePendingCompletionProof::AuthoritativeSha1 | CurseForgePendingCompletionProof::AuthoritativeFingerprint => Some((CurseForgeProjectId::new(project_id)?, CurseForgeFileId::new(file_id)?)),
-            }));
+            });
+            if let Some(tx) = request.persistence_tx.as_ref() {
+                tx.send(deferred).await.map_err(|_| {
+                    ErrorKind::OtherError(
+                        "curseforge persistence worker stopped".to_string(),
+                    )
+                })?;
+            } else {
+                result.deferred_records.push(deferred);
+            }
         }
         result.installed.push(CurseForgeInstalledFile {
             project_id,
@@ -3652,10 +3666,9 @@ pub async fn install_modpack_with_reporter(
         "Resolved CurseForge modpack manifest files"
     );
     let content = Arc::new(Mutex::new(CurseForgeInstallResult::default()));
-    let deferred_records = Arc::new(Mutex::new(Vec::<(
-        crate::state::instances::commands::ProjectFileRecord,
-        Option<(CurseForgeProjectId, CurseForgeFileId)>,
-    )>::new()));
+    let db_tasks = Arc::new(Mutex::new(Vec::<
+        tokio::task::JoinHandle<crate::Result<()>>,
+    >::new()));
     let download_metrics = reporter.as_ref().map(|reporter| {
         Arc::new(CurseForgeDownloadMetrics::with_reporter(reporter.clone()))
     });
@@ -3687,7 +3700,7 @@ pub async fn install_modpack_with_reporter(
             let pack_details = pack_details.clone();
             let minecraft_version = minecraft_version.clone();
             let request = request.clone();
-            let deferred_records = deferred_records.clone();
+            let db_tasks = db_tasks.clone();
             async move {
                 let expected_bytes = file_meta
                     .get(&manifest_file.file_id)
@@ -3795,7 +3808,18 @@ pub async fn install_modpack_with_reporter(
                     return Ok(());
                 };
                 if !item_result.deferred_records.is_empty() {
-                    deferred_records.lock().expect("deferred records mutex").extend(item_result.deferred_records.iter().cloned());
+                    for (record, pending) in item_result.deferred_records.iter().cloned() {
+                        let instance_id = request.instance_id.clone();
+                        db_tasks.lock().expect("db task mutex").push(tokio::spawn(async move {
+                            let state = State::get().await?;
+                            let _permit = state.install_db_semaphore.acquire().await.map_err(|_| ErrorKind::OtherError("install database semaphore closed".to_string()))?;
+                            if let Some((project_id, file_id)) = pending {
+                                crate::state::instances::commands::record_verified_curseforge_project_file_atomic(&instance_id, &record.relative_path, &record.sha1, record.size, record.project_type, record.source_kind, record.ownership_kind, project_id, file_id, record.origin, &state).await
+                            } else {
+                                crate::state::instances::commands::record_project_files_atomic(&instance_id, &[record], &state).await
+                            }
+                        }));
+                    }
                 }
                 let completed_path =
                     item_result.installed[0].relative_path.clone();
@@ -3826,25 +3850,11 @@ pub async fn install_modpack_with_reporter(
     )
     .await?;
 
-    let deferred = std::mem::take(
-        &mut *deferred_records.lock().expect("deferred records mutex"),
-    );
-    let plain_records = deferred
-        .iter()
-        .filter_map(|(record, pending)| {
-            pending.is_none().then_some(record.clone())
-        })
-        .collect::<Vec<_>>();
-    crate::state::instances::commands::record_project_files_atomic(
-        &request.instance_id,
-        &plain_records,
-        &state,
-    )
-    .await?;
-    for (record, pending) in deferred {
-        if let Some((project_id, file_id)) = pending {
-            crate::state::instances::commands::record_verified_curseforge_project_file_atomic(&request.instance_id, &record.relative_path, &record.sha1, record.size, record.project_type, record.source_kind, record.ownership_kind, project_id, file_id, record.origin, &state).await?;
-        }
+    let tasks = std::mem::take(&mut *db_tasks.lock().expect("db task mutex"));
+    for task in tasks {
+        task.await.map_err(|e| {
+            ErrorKind::OtherError(format!("database task failed: {e}"))
+        })??;
     }
 
     if let (Some(reporter), Some(download_metrics)) =
@@ -4066,6 +4076,7 @@ async fn retry_modpack_file_install(
                 force_dependency_project_ids: Vec::new(),
                 dependency_plan_id: None,
                 defer_persistence: true,
+                persistence_tx: None,
             },
             download_metrics,
         )
@@ -5522,6 +5533,7 @@ async fn install_selected_file(
         force_dependency_project_ids: Vec::new(),
         dependency_plan_id: None,
         defer_persistence: false,
+        persistence_tx: None,
     })
     .await?;
     if ownership_kind
@@ -9401,6 +9413,7 @@ mod tests {
 					force_dependency_project_ids: Vec::new(),
                     dependency_plan_id: None,
                     defer_persistence: false,
+                    persistence_tx: None,
                 },
                 display_title: "CurseForge".to_string(),
                 display_icon: None,
