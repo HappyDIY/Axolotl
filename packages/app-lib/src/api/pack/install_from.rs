@@ -218,6 +218,22 @@ pub async fn get_instance_from_pack(
                 ))
             })?;
 
+            // CurseForge archives carry authoritative identity metadata in
+            // manifest.json. Read it before instance creation so we do not
+            // briefly create a 1.19.4/Vanilla instance.
+            if let Ok((pack_name, target)) =
+                crate::api::curseforge::get_local_modpack_target(&path).await
+            {
+                return Ok(CreatePackInstance {
+                    name: pack_name,
+                    game_version: target.game_version,
+                    modloader: target.loader,
+                    loader_version: target.loader_version,
+                    unknown_file: false,
+                    ..Default::default()
+                });
+            }
+
             // Scan ZIP entry names to detect pack format (no extraction, just
             // reads the central directory). This tells us what kind of content
             // we're dealing with before any expensive operations.

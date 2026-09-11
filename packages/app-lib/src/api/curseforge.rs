@@ -71,6 +71,11 @@ const MAX_DEPENDENCY_DEPTH: usize = 32;
 const DEPENDENCY_PLAN_TTL: Duration = Duration::from_secs(10 * 60);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
+// Downloads may run concurrently, but publishing files and updating the
+// instance content tables must be bounded to avoid SQLite writer contention.
+static CONTENT_PUBLISH_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
+    LazyLock::new(|| tokio::sync::Semaphore::new(4));
+
 static UNAUTHORIZED: AtomicBool = AtomicBool::new(false);
 static CATEGORY_CACHE: LazyLock<RwLock<Option<Vec<CurseForgeCategory>>>> =
     LazyLock::new(|| RwLock::new(None));
@@ -3697,6 +3702,10 @@ pub async fn install_modpack_with_reporter(
                             crate::state::instances::ManualDownloadOperationKind::PackInstall
                         },
                         download_metrics.as_deref(),
+                        file_meta
+                            .get(&manifest_file.file_id)
+                            .map(|file| file.file_name.as_str())
+                            .unwrap_or("<unknown>"),
                     )
                     .await;
 
@@ -3989,6 +3998,7 @@ async fn retry_modpack_file_install(
     loader_type_value: Option<u32>,
     manual_operation_kind: crate::state::instances::ManualDownloadOperationKind,
     download_metrics: Option<&CurseForgeDownloadMetrics>,
+    expected_file_name: &str,
 ) -> (
     Option<CurseForgeInstallResult>,
     Option<CurseForgeInstallResult>,
@@ -3997,6 +4007,7 @@ async fn retry_modpack_file_install(
     let mut installed_result = None;
     let mut failed_result = None;
     let mut failure_reason = "no file was installed".to_string();
+    let mut attempt_failures = Vec::new();
     for attempt in 1..=MODPACK_FILE_INSTALL_ATTEMPTS {
         match install_file_with_metrics(
             CurseForgeInstallRequest {
@@ -4020,6 +4031,21 @@ async fn retry_modpack_file_install(
         .await
         {
             Ok(item_result) if !item_result.installed.is_empty() => {
+                let installed_path = &item_result.installed[0].relative_path;
+                if project_type == ProjectType::Mod.get_name()
+                    && Path::new(installed_path).file_name()
+                    != Some(std::ffi::OsStr::new(expected_file_name))
+                {
+                    failure_reason = format!(
+                        "CurseForge install context mismatch: project_id={} file_id={} expected_file={} installed_path={}",
+                        manifest_file.project_id,
+                        manifest_file.file_id,
+                        expected_file_name,
+                        installed_path,
+                    );
+                    attempt_failures.push(format!("attempt {attempt}: {failure_reason}"));
+                    continue;
+                }
                 installed_result = Some(item_result);
                 break;
             }
@@ -4038,14 +4064,16 @@ async fn retry_modpack_file_install(
                     break;
                 }
             }
-            Err(error) => failure_reason = error.to_string(),
+            Err(error) => failure_reason = install_error_chain(&error),
         }
+        attempt_failures.push(format!("attempt {attempt}: {failure_reason}"));
         tracing::warn!(
             project_id = manifest_file.project_id,
             file_id = manifest_file.file_id,
             attempt,
             max_attempts = MODPACK_FILE_INSTALL_ATTEMPTS,
-            reason = %failure_reason,
+            expected_file = expected_file_name,
+            reason = %attempt_failures.last().expect("attempt failure recorded"),
             "Failed to install required CurseForge file"
         );
         if attempt < MODPACK_FILE_INSTALL_ATTEMPTS {
@@ -4053,7 +4081,21 @@ async fn retry_modpack_file_install(
                 .await;
         }
     }
+    if !attempt_failures.is_empty() {
+        failure_reason = attempt_failures.join("\n");
+    }
     (installed_result, failed_result, failure_reason)
+}
+
+fn install_error_chain(error: &crate::Error) -> String {
+    let mut chain = error.to_string();
+    let mut source = std::error::Error::source(error);
+    while let Some(cause) = source {
+        chain.push_str("\nCaused by: ");
+        chain.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    chain
 }
 
 /// Installs a CurseForge modpack from a local archive on disk (a zip with a
@@ -4345,6 +4387,10 @@ pub(crate) async fn install_local_manifest_files(
                     .get(&manifest_file.file_id)
                     .map(|file| file.file_length)
                     .unwrap_or(0);
+                let expected_file_name = file_meta
+                    .get(&manifest_file.file_id)
+                    .map(|file| file.file_name.as_str())
+                    .unwrap_or("<unknown>");
                 let project = projects
                     .get(&manifest_file.project_id)
                     .ok_or_else(|| {
@@ -4366,6 +4412,7 @@ pub(crate) async fn install_local_manifest_files(
                         loader_type_value,
                         crate::state::instances::ManualDownloadOperationKind::PackUpdate,
                         Some(&download_metrics),
+                        expected_file_name,
                     )
                     .await;
 
@@ -5167,6 +5214,22 @@ fn modpack_target(
         loader,
         loader_version,
     })
+}
+
+/// Reads the identity fields from a local CurseForge archive before an
+/// instance is created, avoiding the temporary default Vanilla metadata.
+pub async fn get_local_modpack_target(
+    archive_path: &Path,
+) -> crate::Result<(String, CurseForgeModpackTarget)> {
+    let path = archive_path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(path)?;
+        let mut archive = zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
+        let manifest = read_modpack_manifest(&mut archive)?;
+        let name = manifest.name.clone().filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| "CurseForge Modpack".to_string());
+        Ok((name, modpack_target(&manifest)?))
+    }).await?
 }
 
 fn modpack_zip_error(error: zip::result::ZipError) -> crate::Error {
@@ -7998,7 +8061,12 @@ async fn download_installed_file(
     if let Some(download_metrics) = download_metrics {
         download_metrics.record(&result);
     }
-    // Transfers remain concurrent; only publishing into an instance is serialized.
+    // Transfers remain concurrent; publishing into an instance is bounded so
+    // SQLite writer transactions cannot stampede each other.
+    let _publish_permit = CONTENT_PUBLISH_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|_| ErrorKind::OtherError("content publish semaphore closed".to_string()))?;
     let _instance_lock = state.lock_instance_content(instance_id).await;
     let previous_path =
         crate::state::materialize_project_download(download_path, &full_path)
