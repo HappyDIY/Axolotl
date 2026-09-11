@@ -26,6 +26,12 @@
   "app.log-share.ai.limit": {
     "message": "已达到工具调用上限"
   },
+  "app.log-share.ai.queued": {
+    "message": "排队中，前方约 {position} 个任务"
+  },
+  "app.log-share.ai.queued-front": {
+    "message": "排队中，正在等待空闲槽位"
+  },
   "app.log-share.ai.thinking": {
     "message": "思考中…"
   },

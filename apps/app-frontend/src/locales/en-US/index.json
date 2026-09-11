@@ -4943,6 +4943,12 @@
   "app.log-share.ai.limit": {
     "message": "Reached tool loop limit"
   },
+  "app.log-share.ai.queued": {
+    "message": "Queued, about {position} ahead"
+  },
+  "app.log-share.ai.queued-front": {
+    "message": "Queued, waiting for a free slot"
+  },
   "app.log-share.ai.thinking": {
     "message": "Thinking…"
   },

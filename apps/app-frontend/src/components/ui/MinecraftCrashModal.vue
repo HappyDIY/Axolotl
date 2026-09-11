@@ -103,6 +103,7 @@ const logShareSummaryLoading = ref(false)
 const aiOutput = ref('')
 const aiLoading = ref(false)
 const aiStatus = ref('')
+const aiQueued = ref(false)
 
 const messages = defineMessages({
 	title: {
@@ -340,6 +341,14 @@ const messages = defineMessages({
 	aiThinking: {
 		id: 'app.log-share.ai.thinking',
 		defaultMessage: 'Thinking…',
+	},
+	aiQueued: {
+		id: 'app.log-share.ai.queued',
+		defaultMessage: 'Queued, about {position} ahead',
+	},
+	aiQueuedFront: {
+		id: 'app.log-share.ai.queued-front',
+		defaultMessage: 'Queued, waiting for a free slot',
 	},
 	aiUsingTool: {
 		id: 'app.log-share.ai.tool',
@@ -750,7 +759,20 @@ function handleLogShareAiEvent(event: {
 	data: Record<string, unknown>
 }): void {
 	if (!aiLoading.value || event.instance_id !== payload.value.instance_id) return
+	if (aiQueued.value && event.event_type !== 'queued') {
+		aiQueued.value = false
+		aiStatus.value = ''
+	}
 	switch (event.event_type) {
+		case 'queued': {
+			const position = Number(event.data?.position ?? 0)
+			aiQueued.value = true
+			aiStatus.value =
+				position > 0
+					? formatMessage(messages.aiQueued, { position })
+					: formatMessage(messages.aiQueuedFront)
+			break
+		}
 		case 'delta': {
 			const content = event.data?.content
 			if (typeof content === 'string') aiOutput.value += content
@@ -799,6 +821,7 @@ function openAIAnalysis(): void {
 
 	aiLoading.value = true
 	aiOutput.value = ''
+	aiQueued.value = false
 	aiStatus.value = formatMessage(messages.aiWorking)
 	runLogShareAi()
 		.then((content) => {
