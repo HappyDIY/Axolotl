@@ -49,7 +49,7 @@ use crate::data::ProjectType;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 
 type ExtractProgressFn<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>>
     + Send
@@ -114,9 +114,30 @@ struct RequiredFileFailure {
     reason: String,
 }
 
-struct DownloadedContentCompletion {
-    manifest_index: usize,
-    record: Option<crate::state::instances::commands::ProjectFileRecord>,
+async fn persist_modpack_record_batch(
+    instance_id: &str,
+    records: &[crate::state::instances::commands::ProjectFileRecord],
+) -> crate::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    let state = State::get().await?;
+    let _permit = tokio::time::timeout(
+        FINALIZE_WAIT_TIMEOUT,
+        state.install_db_semaphore.acquire(),
+    )
+    .await
+    .map_err(|_| {
+        crate::ErrorKind::NetworkError(
+            "timed out waiting for modpack database".to_string(),
+        )
+    })??;
+    crate::state::instances::commands::record_project_files_atomic(
+        instance_id,
+        records,
+        &state,
+    )
+    .await
 }
 
 impl RequiredFileFailure {
@@ -1051,8 +1072,25 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     )),
                 )
             });
-        let downloaded_completions =
-            Arc::new(Mutex::new(Vec::<DownloadedContentCompletion>::new()));
+        let (completion_tx, mut completion_rx) = mpsc::channel::<
+            crate::state::instances::commands::ProjectFileRecord,
+        >(128);
+        let completion_instance_id = content_context.instance_id.clone();
+        let completion_worker = tokio::spawn(async move {
+            let mut batch = Vec::with_capacity(CONTENT_DATABASE_BATCH_SIZE);
+            while let Some(record) = completion_rx.recv().await {
+                batch.push(record);
+                if batch.len() >= CONTENT_DATABASE_BATCH_SIZE {
+                    persist_modpack_record_batch(
+                        &completion_instance_id,
+                        &batch,
+                    )
+                    .await?;
+                    batch.clear();
+                }
+            }
+            persist_modpack_record_batch(&completion_instance_id, &batch).await
+        });
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
@@ -1067,7 +1105,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
              let native_pipeline = native_pipeline.clone();
-             let downloaded_completions = downloaded_completions.clone();
+            let completion_tx = completion_tx.clone();
              async move {
                 let project_size = project.file_size as u64;
                 let project_path =
@@ -1337,12 +1375,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 content_context
                     .mark_file_settled(downloaded_bytes, event.clone())
                     .await?;
-                downloaded_completions.lock().await.push(
-                    DownloadedContentCompletion {
-                        manifest_index,
-                        record,
-                    },
-                );
+                if let Some(record) = record {
+                    completion_tx.send(record).await.map_err(|_| {
+                        crate::ErrorKind::OtherError(
+                            "modpack database worker stopped".to_string(),
+                        )
+                    })?;
+                }
                 Ok(())
                 }
                 .await;
@@ -1407,50 +1446,12 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         },
     )
     .await?;
-        let mut completions = {
-            let mut collected = downloaded_completions.lock().await;
-            std::mem::take(&mut *collected)
-        };
-        completions
-            .sort_unstable_by_key(|completion| completion.manifest_index);
-        for chunk in completions.chunks(CONTENT_DATABASE_BATCH_SIZE) {
-            let records = chunk
-                .iter()
-                .filter_map(|completion| completion.record.clone())
-                .collect::<Vec<_>>();
-            if records.is_empty() {
-                continue;
-            }
-            let cancellation = content_context.reporter.cancellation_token();
-            let _permit = tokio::select! {
-                _ = cancellation.cancelled() => {
-                    return Err(crate::ErrorKind::OtherError(
-                        "modpack finalization canceled while waiting for database".to_string(),
-                    ).into());
-                }
-                result = tokio::time::timeout(
-                    FINALIZE_WAIT_TIMEOUT,
-                    state.install_db_semaphore.acquire(),
-                ) => result.map_err(|_| {
-                    crate::ErrorKind::NetworkError(
-                        "timed out waiting for modpack database".to_string(),
-                    )
-                })??,
-            };
-            content_context
-                .reporter
-                .preserve_failure_context(
-                    InstallErrorContext::new("record modpack content batch")
-                        .build(),
-                    crate::state::instances::commands::record_project_files_atomic(
-                        &content_context.instance_id,
-                        &records,
-                        state,
-                    )
-                    .await,
-                )
-                .await?;
-        }
+        drop(completion_tx);
+        completion_worker.await.map_err(|error| {
+            crate::ErrorKind::OtherError(format!(
+                "modpack database worker failed: {error}"
+            ))
+        })??;
         required_file_failures = pass_failures;
         if required_file_failures.is_empty() {
             break;
