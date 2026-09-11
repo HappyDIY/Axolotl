@@ -71,11 +71,6 @@ const MAX_DEPENDENCY_DEPTH: usize = 32;
 const DEPENDENCY_PLAN_TTL: Duration = Duration::from_secs(10 * 60);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
-// Downloads may run concurrently, but publishing files and updating the
-// instance content tables must be bounded to avoid SQLite writer contention.
-static CONTENT_PUBLISH_SEMAPHORE: LazyLock<tokio::sync::Semaphore> =
-    LazyLock::new(|| tokio::sync::Semaphore::new(4));
-
 static UNAUTHORIZED: AtomicBool = AtomicBool::new(false);
 static CATEGORY_CACHE: LazyLock<RwLock<Option<Vec<CurseForgeCategory>>>> =
     LazyLock::new(|| RwLock::new(None));
@@ -8063,10 +8058,12 @@ async fn download_installed_file(
     }
     // Transfers remain concurrent; publishing into an instance is bounded so
     // SQLite writer transactions cannot stampede each other.
-    let _publish_permit = CONTENT_PUBLISH_SEMAPHORE
-        .acquire()
-        .await
-        .map_err(|_| ErrorKind::OtherError("content publish semaphore closed".to_string()))?;
+    let _publish_permit =
+        state.install_db_semaphore.acquire().await.map_err(|_| {
+            ErrorKind::OtherError(
+                "content publish semaphore closed".to_string(),
+            )
+        })?;
     let _instance_lock = state.lock_instance_content(instance_id).await;
     let previous_path =
         crate::state::materialize_project_download(download_path, &full_path)

@@ -1850,6 +1850,16 @@ impl CachedEntry {
             return;
         }
 
+        // SQLite only permits one writer. Coordinate fetched cache refreshes
+        // with modpack content publication so SQLx does not start dozens of
+        // INSERT statements that spend their measured execution time waiting
+        // on the same write lock. Standalone cache tests can run without the
+        // global application state and simply use SQLite's normal locking.
+        let app_state = crate::State::get().await.ok();
+        let _write_permit = match app_state.as_ref() {
+            Some(state) => state.install_db_semaphore.acquire().await.ok(),
+            None => None,
+        };
         if let Err(error) = Self::upsert_many(entries, pool).await {
             Self::log_cache_write_failure(
                 type_,
