@@ -309,8 +309,7 @@ pub async fn update_state(
     get_required(id, app_state).await
 }
 
-/// Updates a caller-supplied serialized job state so the reporter mutex is not
-/// held across the DB write.
+/*
 pub async fn update_serialized_state(
     id: Uuid,
     json: &str,
@@ -393,6 +392,7 @@ pub async fn update_progress_state(
 
     Ok(())
 }
+*/
 
 pub async fn update_status(
     id: Uuid,
