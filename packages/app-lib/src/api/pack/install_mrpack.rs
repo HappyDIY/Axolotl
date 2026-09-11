@@ -19,8 +19,8 @@ use crate::state::instances::ContentSourceKind;
 use crate::state::instances::adapters::sqlite::content_rows;
 use crate::state::{
     CachedEntry, ContentProviderRef, EditInstance, InstanceInstallStage,
-    KnownModrinthFile, ModrinthHashMatch, ModrinthProjectId, ModrinthVersionId,
-    Settings, SideType,
+    ModrinthHashMatch, ModrinthProjectId, ModrinthVersionId, Settings,
+    SideType,
 };
 use crate::util::fetch::{
     ContentValidation, DownloadMeta, DownloadReason, DownloadRequest,
@@ -65,6 +65,7 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
 const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
+const CONTENT_DATABASE_BATCH_SIZE: usize = 64;
 const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
@@ -111,6 +112,13 @@ struct RequiredFileFailure {
     manifest_index: usize,
     path: String,
     reason: String,
+}
+
+struct DownloadedContentCompletion {
+    manifest_index: usize,
+    record: Option<crate::state::instances::commands::ProjectFileRecord>,
+    settled_bytes: u64,
+    event: InstallJobEventKind,
 }
 
 impl RequiredFileFailure {
@@ -229,8 +237,6 @@ struct ModpackContentInstallContext {
     download_source: Arc<Mutex<Option<String>>>,
     fallback_count: Arc<AtomicU64>,
     file_infos_by_hash: Arc<Mutex<Option<HashMap<String, ModrinthHashMatch>>>>,
-    file_infos_loading: Arc<Mutex<()>>,
-    file_info_hashes: Arc<Vec<String>>,
     chinese_titles_by_sha1: Arc<HashMap<String, String>>,
     existing_paths_by_original: Arc<HashMap<String, String>>,
     num_files: usize,
@@ -399,7 +405,22 @@ impl ModpackContentInstallContext {
         settled_bytes: u64,
         event: InstallJobEventKind,
     ) -> crate::Result<()> {
-        let current = self.content_progress.fetch_add(1, Ordering::Relaxed) + 1;
+        self.mark_files_settled(vec![(settled_bytes, event)]).await
+    }
+
+    async fn mark_files_settled(
+        &self,
+        completions: Vec<(u64, InstallJobEventKind)>,
+    ) -> crate::Result<()> {
+        if completions.is_empty() {
+            return Ok(());
+        }
+        let settled_files = completions.len() as u64;
+        let settled_bytes = completions.iter().map(|(bytes, _)| *bytes).sum();
+        let current = self
+            .content_progress
+            .fetch_add(settled_files, Ordering::Relaxed)
+            + settled_files;
         let current_bytes = self
             .content_bytes_progress
             .fetch_add(settled_bytes, Ordering::Relaxed)
@@ -420,7 +441,7 @@ impl ModpackContentInstallContext {
                     ),
                 }),
                 self.modpack_details.clone(),
-                vec![event],
+                completions.into_iter().map(|(_, event)| event).collect(),
             )
             .await
     }
@@ -877,6 +898,16 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     } else {
         HashMap::new()
     });
+    // Resolve and cache the shared hash metadata before the Minecraft install
+    // and content database writes begin competing for SQLite's single writer.
+    load_modpack_file_infos(
+        &file_infos_by_hash,
+        &file_infos_loading,
+        &file_info_hashes,
+        &state.pool,
+        &state.api_semaphore,
+    )
+    .await;
     let existing_paths_by_original = Arc::new(
         content_rows::get_instance_files(&instance_id, &state.pool)
             .await?
@@ -902,8 +933,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         download_source: Arc::new(Mutex::new(None)),
         fallback_count: Arc::new(AtomicU64::new(0)),
         file_infos_by_hash,
-        file_infos_loading,
-        file_info_hashes,
         chinese_titles_by_sha1,
         existing_paths_by_original,
         num_files,
@@ -1039,6 +1068,8 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     )),
                 )
             });
+        let downloaded_completions =
+            Arc::new(Mutex::new(Vec::<DownloadedContentCompletion>::new()));
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
@@ -1052,8 +1083,9 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             let content_context = content_context.clone();
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
-            let native_pipeline = native_pipeline.clone();
-            async move {
+             let native_pipeline = native_pipeline.clone();
+             let downloaded_completions = downloaded_completions.clone();
+             async move {
                 let project_size = project.file_size as u64;
                 let project_path =
                     content_context.resolve_install_path(&project);
@@ -1260,14 +1292,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     sha1_file_async(&path).await?.1
                 };
 
-                load_modpack_file_infos(
-                    &content_context.file_infos_by_hash,
-                    &content_context.file_infos_loading,
-                    &content_context.file_info_hashes,
-                    &state.pool,
-                    &state.api_semaphore,
-                )
-                .await;
                 let file_info = content_context
                     .file_infos_by_hash
                     .lock()
@@ -1275,96 +1299,63 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .as_ref()
                     .and_then(|infos| infos.get(&sha1))
                     .cloned();
-                {
-                    content_context
-                        .reporter
-                        .record_download_stage(
-                            project_path.clone(),
-                            DownloadItemStatus::WaitingForDatabase,
-                        )
-                        .await?;
-                    let cancellation =
-                        content_context.reporter.cancellation_token();
-                    let _permit = tokio::select! {
-                        _ = cancellation.cancelled() => {
-                            return Err(crate::ErrorKind::OtherError(
-                                "modpack finalization canceled while waiting for database".to_string(),
-                            ).into());
-                        }
-                        result = tokio::time::timeout(
-                            FINALIZE_WAIT_TIMEOUT,
-                            state.install_db_semaphore.acquire(),
-                        ) => result.map_err(|_| {
-                            crate::ErrorKind::NetworkError(
-                                "timed out waiting for modpack database".to_string(),
-                            )
-                        })??,
-                    };
-                    if let Some(project_type) =
-                    ProjectType::get_from_parent_folder(project.path.as_str())
-                    {
-                    let provider_ref = match file_info.as_ref() {
-                        Some(file) => Some(ContentProviderRef::Modrinth {
+                drop(finalize_permit);
+
+                let provider_ref = file_info
+                    .as_ref()
+                    .map(|file| {
+                        crate::Result::Ok(ContentProviderRef::Modrinth {
                             project_id: ModrinthProjectId::new(
                                 file.project_id.clone(),
                             )?,
                             version_id: Some(ModrinthVersionId::new(
                                 file.version_id.clone(),
                             )?),
-                        }),
-                        None => None,
-                    };
-                    content_context
-                        .reporter
-                        .preserve_failure_context(
-                            context.clone(),
-                            crate::state::instances::commands::record_project_file_atomic(
-                                &content_context.instance_id,
-                                &project_path,
-                                &sha1,
-                                downloaded_bytes,
-                                project_type,
-								modpack_source_kind(
-									content_context.pack_version_id.as_deref(),
-								),
-								crate::state::instances::ContentOwnershipKind::PackManaged,
-                                provider_ref.as_ref(),
-                                false,
-                                file_info.as_ref().map(|file| KnownModrinthFile {
-                                    project_id: &file.project_id,
-                                    version_id: &file.version_id,
-                                }),
-                                state,
-                            )
-                            .await,
-                        )
-                        .await?;
+                        })
+                    })
+                    .transpose()?;
+                let record = ProjectType::get_from_parent_folder(
+                    project.path.as_str(),
+                )
+                .map(|project_type| {
+                    crate::state::instances::commands::ProjectFileRecord {
+                        relative_path: project_path.clone(),
+                        sha1: sha1.clone(),
+                        size: downloaded_bytes,
+                        project_type,
+                        source_kind: modpack_source_kind(
+                            content_context.pack_version_id.as_deref(),
+                        ),
+                        ownership_kind: crate::state::instances::ContentOwnershipKind::PackManaged,
+                        provider_ref,
+                        origin: false,
+                        known_modrinth_project_id: file_info
+                            .as_ref()
+                            .map(|file| file.project_id.clone()),
+                        known_modrinth_version_id: file_info
+                            .as_ref()
+                            .map(|file| file.version_id.clone()),
                     }
-                }
-                drop(finalize_permit);
-
-								let recovered = download.attempts == 0; //When recovered, the download attempts were set to 0 by download_to_path_inner()
-								if recovered {
-									content_context
-										.mark_file_settled(
-												downloaded_bytes,
-												InstallJobEventKind::ContentFileRecovered {
-														path: project_path.clone(),
-														bytes: downloaded_bytes,
-												},
-										)
-										.await?;
-								} else {
-									content_context
-											.mark_file_settled(
-													downloaded_bytes,
-													InstallJobEventKind::ContentFileCompleted {
-															path: project_path.clone(),
-															bytes: downloaded_bytes,
-													},
-											)
-											.await?;
-								}
+                });
+                let event = if download.attempts == 0 {
+                    InstallJobEventKind::ContentFileRecovered {
+                        path: project_path.clone(),
+                        bytes: downloaded_bytes,
+                    }
+                } else {
+                    InstallJobEventKind::ContentFileCompleted {
+                        path: project_path.clone(),
+                        bytes: downloaded_bytes,
+                    }
+                };
+                downloaded_completions.lock().await.push(
+                    DownloadedContentCompletion {
+                        manifest_index,
+                        record,
+                        settled_bytes: downloaded_bytes,
+                        event,
+                    },
+                );
                 Ok(())
                 }
                 .await;
@@ -1429,6 +1420,60 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         },
     )
     .await?;
+        let mut completions = {
+            let mut collected = downloaded_completions.lock().await;
+            std::mem::take(&mut *collected)
+        };
+        completions
+            .sort_unstable_by_key(|completion| completion.manifest_index);
+        for chunk in completions.chunks(CONTENT_DATABASE_BATCH_SIZE) {
+            let records = chunk
+                .iter()
+                .filter_map(|completion| completion.record.clone())
+                .collect::<Vec<_>>();
+            if records.is_empty() {
+                continue;
+            }
+            let cancellation = content_context.reporter.cancellation_token();
+            let _permit = tokio::select! {
+                _ = cancellation.cancelled() => {
+                    return Err(crate::ErrorKind::OtherError(
+                        "modpack finalization canceled while waiting for database".to_string(),
+                    ).into());
+                }
+                result = tokio::time::timeout(
+                    FINALIZE_WAIT_TIMEOUT,
+                    state.install_db_semaphore.acquire(),
+                ) => result.map_err(|_| {
+                    crate::ErrorKind::NetworkError(
+                        "timed out waiting for modpack database".to_string(),
+                    )
+                })??,
+            };
+            content_context
+                .reporter
+                .preserve_failure_context(
+                    InstallErrorContext::new("record modpack content batch")
+                        .build(),
+                    crate::state::instances::commands::record_project_files_atomic(
+                        &content_context.instance_id,
+                        &records,
+                        state,
+                    )
+                    .await,
+                )
+                .await?;
+        }
+        content_context
+            .mark_files_settled(
+                completions
+                    .into_iter()
+                    .map(|completion| {
+                        (completion.settled_bytes, completion.event)
+                    })
+                    .collect(),
+            )
+            .await?;
         required_file_failures = pass_failures;
         if required_file_failures.is_empty() {
             break;
