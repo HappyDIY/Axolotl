@@ -148,7 +148,10 @@ mod tests {
             // Fullwidth solidus: not a separator the filesystem honours, but no
             // more welcome in a directory name than any other non-ASCII.
             ("a\u{ff0f}b", "red.ghs.axolotl-ab"),
-            ("café", "red.ghs.axolotl-caf"),
+            // Every non-ASCII character goes, so a suffix typed in another
+            // script keeps only its ASCII part - which may be nothing at all.
+            ("版本v2", "red.ghs.axolotl-v2"),
+            ("版本", "red.ghs.axolotl"),
         ] {
             assert_eq!(
                 data_dir_identifier("red.ghs.axolotl", Some(suffix)),
