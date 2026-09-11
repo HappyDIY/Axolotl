@@ -8117,7 +8117,8 @@ async fn download_installed_file(
     if let Some(download_metrics) = download_metrics {
         download_metrics.record(&result);
     }
-    let verified = verify_installed_curseforge_file(&full_path, file).await?;
+    let verified =
+        verify_installed_curseforge_file(download_path, file).await?;
     let provider_ref = ContentProviderRef::CurseForge {
         project_id: CurseForgeProjectId::new(file.mod_id)?,
         file_id: Some(CurseForgeFileId::new(file.id)?),
