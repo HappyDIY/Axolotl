@@ -1,22 +1,4 @@
 {
-  "app.crash-analysis.ai.settings.ai-source": {
-    "message": "AI 来源"
-  },
-  "app.crash-analysis.ai.settings.ai-source-custom": {
-    "message": "自定义 AI 服务商"
-  },
-  "app.crash-analysis.ai.settings.ai-source-description": {
-    "message": "两种来源都会发送经过脱敏和裁剪的崩溃上下文，AI 输出可能不准确。"
-  },
-  "app.crash-analysis.ai.settings.ai-source-logshare": {
-    "message": "LogShare AI"
-  },
-  "app.crash-analysis.ai.settings.description": {
-    "message": "选择崩溃解释按钮使用的 AI 来源。LogShare AI 在云端分析；自定义则使用 AI Providers 中配置的服务商。"
-  },
-  "app.crash-analysis.ai.settings.title": {
-    "message": "AI 崩溃分析"
-  },
   "app.log-share.ai.action": {
     "message": "AI 深度分析"
   },

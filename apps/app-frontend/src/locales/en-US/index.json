@@ -1031,21 +1031,6 @@
   "app.crash-analysis.ai.error": {
     "message": "AI explanation failed: {message}"
   },
-  "app.crash-analysis.ai.settings.ai-source": {
-    "message": "AI source"
-  },
-  "app.crash-analysis.ai.settings.ai-source-custom": {
-    "message": "Custom AI provider"
-  },
-  "app.crash-analysis.ai.settings.ai-source-description": {
-    "message": "Both sources send a sanitized and shortened crash context. AI output may be inaccurate."
-  },
-  "app.crash-analysis.ai.settings.ai-source-logshare": {
-    "message": "LogShare AI"
-  },
-  "app.crash-analysis.ai.settings.description": {
-    "message": "Choose an AI source for the crash explanation button. LogShare AI runs in the cloud; Custom uses a provider configured in AI Providers."
-  },
   "app.crash-analysis.ai.settings.enabled": {
     "message": "Enable AI explanations"
   },
@@ -1060,9 +1045,6 @@
   },
   "app.crash-analysis.ai.settings.provider": {
     "message": "AI provider"
-  },
-  "app.crash-analysis.ai.settings.title": {
-    "message": "AI crash analysis"
   },
   "app.crash-analysis.ai.title": {
     "message": "AI crash explanation"
