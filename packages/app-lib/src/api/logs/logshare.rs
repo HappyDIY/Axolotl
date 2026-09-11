@@ -8,7 +8,7 @@ use super::analyze_crash;
 use crate::emit_logshare_ai_event;
 use crate::State;
 
-const LOGSHARE_BASE_URL: &str = "http://127.0.0.1:9501";
+const LOGSHARE_BASE_URL: &str = "https://api.logshare.cn";
 const LOGSHARE_GZIP_THRESHOLD_BYTES: usize = 64 * 1024;
 const LOGSHARE_AI_READ_TIMEOUT_SECS: u64 = 300;
 const LOGSHARE_SOURCE_PREFIX: &str = "axolotl";
