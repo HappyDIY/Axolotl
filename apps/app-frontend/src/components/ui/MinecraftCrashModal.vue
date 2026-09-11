@@ -78,7 +78,6 @@ const modal = ref<InstanceType<typeof NewModal>>()
 const aiModal = ref<InstanceType<typeof CrashAIExplanationModal>>()
 const modChangesModal = ref<InstanceType<typeof CrashModChangesModal>>()
 const payload = ref<Partial<CrashModalPayload>>({})
-const sharing = ref(false)
 let lastAnalysis: CrashAnalysisResult | null = null
 const modChangesAvailable = ref(false)
 const activeRuns = new Map<string, string>()
@@ -98,6 +97,8 @@ const logShareSettings = ref<LogShareSettings>({
 	show_progress: true,
 })
 const uploadTicket = ref<LogShareTicket | null>(null)
+const shareUrl = ref('')
+const sharing = ref(false)
 const logShareSummary = ref('')
 const logShareSummaryLoading = ref(false)
 const aiOutput = ref('')
@@ -441,9 +442,13 @@ function show(modalPayload: CrashModalPayload, isPreview = false): boolean {
 	analysisVersion += 1
 	payload.value = modalPayload
 	uploadTicket.value = null
+	shareUrl.value = ''
+	sharing.value = false
 	logShareSummary.value = ''
 	logShareSummaryLoading.value = false
+	modChangesAvailable.value = false
 	aiOutput.value = ''
+	aiLoading.value = false
 	aiStatus.value = ''
 	aiQueued.value = false
 	modal.value?.show()
@@ -610,8 +615,6 @@ function showPreview(): void {
 	)
 }
 
-const shareUrl = ref('')
-
 function notifyNoLogContent(): void {
 	addNotification({
 		title: formatMessage(messages.noLogContent),
@@ -682,6 +685,8 @@ async function shareDiagnostic(): Promise<void> {
 		notifyNoLogContent()
 		return
 	}
+	const version = analysisVersion
+	const stale = () => version !== analysisVersion
 	sharing.value = true
 	shareUrl.value = ''
 	const instanceId = payload.value.instance_id!
@@ -689,7 +694,7 @@ async function shareDiagnostic(): Promise<void> {
 		if (logShareSettings.value.share_provider === 'logshare') {
 			const ticket = await uploadTicketForInstance(instanceId)
 			if (ticket?.url) {
-				shareUrl.value = ticket.url
+				if (!stale()) shareUrl.value = ticket.url
 				await recordShared({
 					id: ticket.id,
 					url: ticket.url,
@@ -714,7 +719,7 @@ async function shareDiagnostic(): Promise<void> {
 				type: 'warning',
 			})
 		}
-		shareUrl.value = result.url
+		if (!stale()) shareUrl.value = result.url
 		try {
 			await navigator.clipboard.writeText(result.url)
 			addNotification({
@@ -743,7 +748,7 @@ async function shareDiagnostic(): Promise<void> {
 			type: 'error',
 		})
 	} finally {
-		sharing.value = false
+		if (!stale()) sharing.value = false
 	}
 }
 
@@ -889,12 +894,11 @@ async function handleProcessEvent(event: ProcessEvent): Promise<void> {
 			return null
 		})
 		lastAnalysis = analysis
-		modChangesAvailable.value = !!analysis?.mod_changes.length
 		if (!mounted) return
 
 		const instance = await getInstance(event.instance_id).catch(() => null)
 		if (!mounted) return
-		show(
+		const shown = show(
 			applyAnalysis(
 				{
 					instance_id: event.instance_id,
@@ -903,6 +907,8 @@ async function handleProcessEvent(event: ProcessEvent): Promise<void> {
 				analysis,
 			),
 		)
+		if (!shown) return
+		modChangesAvailable.value = !!analysis?.mod_changes.length
 		void loadLogShareSummary(event.instance_id)
 	} finally {
 		if (activeRuns.get(event.instance_id) === event.uuid) activeRuns.delete(event.instance_id)
