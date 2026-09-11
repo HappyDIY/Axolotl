@@ -57,14 +57,11 @@ const messages = defineMessages({
 })
 
 function actionLabel(action: ShortcutAction) {
-	return formatMessage({ id: action.labelKey, defaultMessage: action.labelDefault })
+	return formatMessage(action.label)
 }
 
 function actionDescription(action: ShortcutAction) {
-	return formatMessage({
-		id: action.descriptionKey,
-		defaultMessage: action.descriptionDefault,
-	})
+	return formatMessage(action.description)
 }
 
 function bindingFor(action: ShortcutAction): KeyBinding {

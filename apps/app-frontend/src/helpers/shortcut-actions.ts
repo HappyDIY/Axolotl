@@ -1,4 +1,4 @@
-import type { KeyBinding } from '@modrinth/ui'
+import { defineMessages, type KeyBinding, type MessageDescriptor } from '@modrinth/ui'
 import type { RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { getLastBrowseContentProjectType, isBrowseContentProjectType } from '@/helpers/settings'
@@ -31,10 +31,8 @@ export interface ShortcutAction {
 	group: ShortcutGroupId
 	enabledField: ShortcutEnabledField
 	defaultBinding: KeyBinding
-	labelKey: string
-	labelDefault: string
-	descriptionKey: string
-	descriptionDefault: string
+	label: MessageDescriptor
+	description: MessageDescriptor
 	/** Navigation actions know where they lead. */
 	target?: (route: RouteLocationNormalizedLoaded) => string
 	/** Navigation actions that are not reachable right now. */
@@ -42,6 +40,98 @@ export interface ShortcutAction {
 	/** Scrolling actions move the page's own scroller. */
 	applyScroll?: (scroller: HTMLElement) => void
 }
+
+/**
+ * Declared here rather than assembled from the action ids, so the extractor can
+ * see them; an id built at runtime is one a translation pass would drop.
+ */
+const messages = defineMessages({
+	scrollTop: {
+		id: 'app.shortcut-settings.home-action',
+		defaultMessage: 'Scroll to the top',
+	},
+	scrollTopDescription: {
+		id: 'app.shortcut-settings.home-action-description',
+		defaultMessage: 'Moves the page you are reading to the top.',
+	},
+	scrollBottom: {
+		id: 'app.shortcut-settings.end-action',
+		defaultMessage: 'Scroll to the bottom',
+	},
+	scrollBottomDescription: {
+		id: 'app.shortcut-settings.end-action-description',
+		defaultMessage: 'Moves the page you are reading to the bottom.',
+	},
+	scrollUp: {
+		id: 'app.shortcut-settings.page-up-action',
+		defaultMessage: 'Scroll up one screen',
+	},
+	scrollUpDescription: {
+		id: 'app.shortcut-settings.page-up-action-description',
+		defaultMessage: 'Moves the page you are reading up by one screen.',
+	},
+	scrollDown: {
+		id: 'app.shortcut-settings.page-down-action',
+		defaultMessage: 'Scroll down one screen',
+	},
+	scrollDownDescription: {
+		id: 'app.shortcut-settings.page-down-action-description',
+		defaultMessage: 'Moves the page you are reading down by one screen.',
+	},
+	navHome: { id: 'app.shortcut-settings.nav-home', defaultMessage: 'Home' },
+	navHomeDescription: {
+		id: 'app.shortcut-settings.nav-home-description',
+		defaultMessage: 'Jump to the Home page.',
+	},
+	navWorlds: { id: 'app.shortcut-settings.nav-worlds', defaultMessage: 'Worlds' },
+	navWorldsDescription: {
+		id: 'app.shortcut-settings.nav-worlds-description',
+		defaultMessage: 'Jump to your worlds.',
+	},
+	navDiscover: {
+		id: 'app.shortcut-settings.nav-discover',
+		defaultMessage: 'Discover content',
+	},
+	navDiscoverDescription: {
+		id: 'app.shortcut-settings.nav-discover-description',
+		defaultMessage: 'Jump to browsing content.',
+	},
+	navSkins: { id: 'app.shortcut-settings.nav-skins', defaultMessage: 'Skin selector' },
+	navSkinsDescription: {
+		id: 'app.shortcut-settings.nav-skins-description',
+		defaultMessage: 'Jump to the skin selector.',
+	},
+	navMultiplayer: { id: 'app.shortcut-settings.nav-multiplayer', defaultMessage: 'Multiplayer' },
+	navMultiplayerDescription: {
+		id: 'app.shortcut-settings.nav-multiplayer-description',
+		defaultMessage: 'Jump to multiplayer.',
+	},
+	navLibrary: { id: 'app.shortcut-settings.nav-library', defaultMessage: 'Library' },
+	navLibraryDescription: {
+		id: 'app.shortcut-settings.nav-library-description',
+		defaultMessage: 'Jump to your library.',
+	},
+	navLab: { id: 'app.shortcut-settings.nav-lab', defaultMessage: 'Lab' },
+	navLabDescription: {
+		id: 'app.shortcut-settings.nav-lab-description',
+		defaultMessage: 'Jump to the Lab.',
+	},
+	navDownloads: { id: 'app.shortcut-settings.nav-downloads', defaultMessage: 'Downloads' },
+	navDownloadsDescription: {
+		id: 'app.shortcut-settings.nav-downloads-description',
+		defaultMessage: 'Jump to downloads.',
+	},
+	navCreate: { id: 'app.shortcut-settings.nav-create', defaultMessage: 'Create new instance' },
+	navCreateDescription: {
+		id: 'app.shortcut-settings.nav-create-description',
+		defaultMessage: 'Jump to creating a new instance.',
+	},
+	navSettings: { id: 'app.shortcut-settings.nav-settings', defaultMessage: 'Settings' },
+	navSettingsDescription: {
+		id: 'app.shortcut-settings.nav-settings-description',
+		defaultMessage: 'Jump to the settings.',
+	},
+})
 
 function keyboard(code: string, mod = false, alt = false, shift = false): KeyBinding {
 	return { device: 'keyboard', code, mod, alt, shift }
@@ -76,10 +166,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'scroll',
 		enabledField: 'quickScrollEnabled',
 		defaultBinding: keyboard('Home'),
-		labelKey: 'app.shortcut-settings.home-action',
-		labelDefault: 'Scroll to the top',
-		descriptionKey: 'app.shortcut-settings.home-action-description',
-		descriptionDefault: 'Moves the page you are reading to the top.',
+		label: messages.scrollTop,
+		description: messages.scrollTopDescription,
 		applyScroll: (scroller) => scroller.scrollTo({ top: 0, behavior: 'smooth' }),
 	},
 	{
@@ -87,10 +175,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'scroll',
 		enabledField: 'quickScrollEnabled',
 		defaultBinding: keyboard('End'),
-		labelKey: 'app.shortcut-settings.end-action',
-		labelDefault: 'Scroll to the bottom',
-		descriptionKey: 'app.shortcut-settings.end-action-description',
-		descriptionDefault: 'Moves the page you are reading to the bottom.',
+		label: messages.scrollBottom,
+		description: messages.scrollBottomDescription,
 		applyScroll: (scroller) =>
 			scroller.scrollTo({ top: scroller.scrollHeight, behavior: 'smooth' }),
 	},
@@ -99,10 +185,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'scroll',
 		enabledField: 'quickScrollEnabled',
 		defaultBinding: keyboard('PageUp'),
-		labelKey: 'app.shortcut-settings.page-up-action',
-		labelDefault: 'Scroll up one screen',
-		descriptionKey: 'app.shortcut-settings.page-up-action-description',
-		descriptionDefault: 'Moves the page you are reading up by one screen.',
+		label: messages.scrollUp,
+		description: messages.scrollUpDescription,
 		applyScroll: (scroller) => {
 			// Immediate scrolling keeps rapid key repeats responsive.
 			scroller.scrollTop = Math.max(0, scroller.scrollTop - scroller.clientHeight * 0.9)
@@ -113,10 +197,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'scroll',
 		enabledField: 'quickScrollEnabled',
 		defaultBinding: keyboard('PageDown'),
-		labelKey: 'app.shortcut-settings.page-down-action',
-		labelDefault: 'Scroll down one screen',
-		descriptionKey: 'app.shortcut-settings.page-down-action-description',
-		descriptionDefault: 'Moves the page you are reading down by one screen.',
+		label: messages.scrollDown,
+		description: messages.scrollDownDescription,
 		applyScroll: (scroller) => {
 			scroller.scrollTop = Math.min(
 				scroller.scrollHeight,
@@ -129,10 +211,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavHome',
 		defaultBinding: keyboard('Digit1', true),
-		labelKey: 'app.shortcut-settings.nav-home',
-		labelDefault: 'Home',
-		descriptionKey: 'app.shortcut-settings.nav-home-description',
-		descriptionDefault: 'Jump to the Home page.',
+		label: messages.navHome,
+		description: messages.navHomeDescription,
 		target: () => '/',
 	},
 	{
@@ -140,10 +220,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavWorlds',
 		defaultBinding: keyboard('Digit2', true),
-		labelKey: 'app.shortcut-settings.nav-worlds',
-		labelDefault: 'Worlds',
-		descriptionKey: 'app.shortcut-settings.nav-worlds-description',
-		descriptionDefault: 'Jump to your worlds.',
+		label: messages.navWorlds,
+		description: messages.navWorldsDescription,
 		target: () => '/worlds',
 		unavailable: (context) => !context.worldsTabEnabled,
 	},
@@ -152,10 +230,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavDiscover',
 		defaultBinding: keyboard('Digit3', true),
-		labelKey: 'app.shortcut-settings.nav-discover',
-		labelDefault: 'Discover content',
-		descriptionKey: 'app.shortcut-settings.nav-discover-description',
-		descriptionDefault: 'Jump to browsing content.',
+		label: messages.navDiscover,
+		description: messages.navDiscoverDescription,
 		target: (route) => discoverContentTarget(route),
 		unavailable: (context) => context.offline,
 	},
@@ -164,10 +240,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavSkins',
 		defaultBinding: keyboard('Digit4', true),
-		labelKey: 'app.shortcut-settings.nav-skins',
-		labelDefault: 'Skin selector',
-		descriptionKey: 'app.shortcut-settings.nav-skins-description',
-		descriptionDefault: 'Jump to the skin selector.',
+		label: messages.navSkins,
+		description: messages.navSkinsDescription,
 		target: () => '/skins',
 	},
 	{
@@ -175,10 +249,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavMultiplayer',
 		defaultBinding: keyboard('Digit5', true),
-		labelKey: 'app.shortcut-settings.nav-multiplayer',
-		labelDefault: 'Multiplayer',
-		descriptionKey: 'app.shortcut-settings.nav-multiplayer-description',
-		descriptionDefault: 'Jump to multiplayer.',
+		label: messages.navMultiplayer,
+		description: messages.navMultiplayerDescription,
 		target: () => '/multiplayer',
 	},
 	{
@@ -186,10 +258,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavLibrary',
 		defaultBinding: keyboard('Digit6', true),
-		labelKey: 'app.shortcut-settings.nav-library',
-		labelDefault: 'Library',
-		descriptionKey: 'app.shortcut-settings.nav-library-description',
-		descriptionDefault: 'Jump to your library.',
+		label: messages.navLibrary,
+		description: messages.navLibraryDescription,
 		target: () => '/library',
 	},
 	{
@@ -197,10 +267,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavLab',
 		defaultBinding: keyboard('Digit7', true),
-		labelKey: 'app.shortcut-settings.nav-lab',
-		labelDefault: 'Lab',
-		descriptionKey: 'app.shortcut-settings.nav-lab-description',
-		descriptionDefault: 'Jump to the Lab.',
+		label: messages.navLab,
+		description: messages.navLabDescription,
 		target: () => '/lab',
 	},
 	{
@@ -208,10 +276,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavDownloads',
 		defaultBinding: keyboard('Digit8', true),
-		labelKey: 'app.shortcut-settings.nav-downloads',
-		labelDefault: 'Downloads',
-		descriptionKey: 'app.shortcut-settings.nav-downloads-description',
-		descriptionDefault: 'Jump to downloads.',
+		label: messages.navDownloads,
+		description: messages.navDownloadsDescription,
 		target: () => '/downloads',
 	},
 	{
@@ -219,10 +285,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavCreate',
 		defaultBinding: keyboard('Digit9', true),
-		labelKey: 'app.shortcut-settings.nav-create',
-		labelDefault: 'Create new instance',
-		descriptionKey: 'app.shortcut-settings.nav-create-description',
-		descriptionDefault: 'Jump to creating a new instance.',
+		label: messages.navCreate,
+		description: messages.navCreateDescription,
 		target: () => '/create',
 		unavailable: (context) => context.offline,
 	},
@@ -231,10 +295,8 @@ export const SHORTCUT_ACTIONS: ShortcutAction[] = [
 		group: 'nav',
 		enabledField: 'shortcutNavSettings',
 		defaultBinding: keyboard('Comma', true),
-		labelKey: 'app.shortcut-settings.nav-settings',
-		labelDefault: 'Settings',
-		descriptionKey: 'app.shortcut-settings.nav-settings-description',
-		descriptionDefault: 'Jump to the settings.',
+		label: messages.navSettings,
+		description: messages.navSettingsDescription,
 		target: () => '/settings',
 	},
 ]
