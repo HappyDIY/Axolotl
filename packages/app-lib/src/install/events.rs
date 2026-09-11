@@ -282,8 +282,9 @@ impl InstallProgressReporter {
         app_state: &crate::State,
     ) -> crate::Result<()> {
         if !state.initialized_from_store {
-            state.job =
-                store::get_required(self.job_id, app_state).await?.state;
+            let record = store::get_required(self.job_id, app_state).await?;
+            state.job = record.state.clone();
+            state.last_snapshot = Some(record.snapshot());
             state.job.compact_transient_download_events();
             state.initialized_from_store = true;
         }
