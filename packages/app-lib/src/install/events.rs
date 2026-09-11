@@ -1150,10 +1150,15 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = store::get_required(job_id, &app_state)
-            .await
-            .unwrap()
-            .snapshot();
+        let snapshot = InstallProgressReporter::overlay_snapshot(
+            job_id,
+            store::get_required(job_id, &app_state)
+                .await
+                .unwrap()
+                .snapshot(),
+        )
+        .await
+        .unwrap();
         assert_eq!(snapshot.phase, InstallPhaseId::DownloadingMinecraft);
         let progress = snapshot.progress.unwrap();
         assert_eq!(progress.current, 0);
@@ -1178,12 +1183,17 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = store::get_required(job_id, &app_state)
-            .await
-            .unwrap()
-            .snapshot();
+        let snapshot = InstallProgressReporter::overlay_snapshot(
+            job_id,
+            store::get_required(job_id, &app_state)
+                .await
+                .unwrap()
+                .snapshot(),
+        )
+        .await
+        .unwrap();
         let progress = snapshot.progress.unwrap();
-        assert_eq!(progress.current, 0);
+        assert_eq!(progress.current, 1);
         assert_eq!(progress.total, 18);
         InstallProgressReporter::reset_job(job_id);
     }
@@ -1203,10 +1213,15 @@ mod tests {
             .await
             .unwrap();
 
-        let snapshot = store::get_required(job_id, &app_state)
-            .await
-            .unwrap()
-            .snapshot();
+        let snapshot = InstallProgressReporter::overlay_snapshot(
+            job_id,
+            store::get_required(job_id, &app_state)
+                .await
+                .unwrap()
+                .snapshot(),
+        )
+        .await
+        .unwrap();
         let progress = snapshot.progress.unwrap();
         assert_eq!(progress.current, 0);
         assert_eq!(progress.total, 20);

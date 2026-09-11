@@ -654,6 +654,8 @@ mod tests {
                 excluded_dependency_project_ids: Vec::new(),
                 force_dependency_project_ids: Vec::new(),
                 dependency_plan_id: None,
+                defer_persistence: false,
+                persistence_tx: None,
             },
             display_title: "CurseForge content".to_string(),
             display_icon: None,
