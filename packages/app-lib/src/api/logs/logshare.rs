@@ -9,7 +9,6 @@ use crate::State;
 use crate::emit_logshare_ai_event;
 
 const LOGSHARE_BASE_URL: &str = "https://api.logshare.cn";
-const LOGSHARE_GZIP_THRESHOLD_BYTES: usize = 64 * 1024;
 const LOGSHARE_AI_READ_TIMEOUT_SECS: u64 = 300;
 const LOGSHARE_SOURCE_PREFIX: &str = "axolotl";
 
@@ -209,12 +208,7 @@ fn source_identifier() -> String {
     format!("{LOGSHARE_SOURCE_PREFIX}/{}", env!("CARGO_PKG_VERSION"))
 }
 
-struct PreparedUpload {
-    body: UploadBody,
-    gzip: bool,
-}
-
-async fn prepare_upload(instance_id: &str) -> crate::Result<PreparedUpload> {
+async fn prepare_upload(instance_id: &str) -> crate::Result<UploadBody> {
     let settings = get_log_share_settings().await?;
     let analysis = analyze_crash(instance_id).await?;
 
@@ -253,17 +247,11 @@ async fn prepare_upload(instance_id: &str) -> crate::Result<PreparedUpload> {
         },
     ];
 
-    let body = UploadBody {
+    Ok(UploadBody {
         content,
         files,
         metadata,
         source: source_identifier(),
-    };
-    let payload = serde_json::to_vec(&body)?;
-    let payload_len = payload.len();
-    Ok(PreparedUpload {
-        body,
-        gzip: payload_len >= LOGSHARE_GZIP_THRESHOLD_BYTES,
     })
 }
 
@@ -282,33 +270,12 @@ pub async fn upload_crash(
 ) -> crate::Result<LogShareUploadResponse> {
     let prepared = prepare_upload(instance_id).await?;
     let client = request_client().await?;
-    let mut request = client
+    let body_value = serde_json::to_value(&prepared)?;
+    let request = client
         .post(format!("{LOGSHARE_BASE_URL}/v1/log"))
         .header("Accept", "application/json");
 
-    let body_value = serde_json::to_value(&prepared.body)?;
-    if prepared.gzip {
-        let bytes = serde_json::to_vec(&body_value)?;
-        let mut encoder = flate2::write::GzEncoder::new(
-            Vec::new(),
-            flate2::Compression::default(),
-        );
-        use std::io::Write as _;
-        encoder
-            .write_all(&bytes)
-            .map_err(|error| crate::ErrorKind::OtherError(error.to_string()))?;
-        let compressed = encoder
-            .finish()
-            .map_err(|error| crate::ErrorKind::OtherError(error.to_string()))?;
-        request = request
-            .header("Content-Encoding", "gzip")
-            .header("Content-Type", "application/json")
-            .body(compressed);
-    } else {
-        request = request.json(&body_value);
-    }
-
-    let response = request.send().await?;
+    let response = request.json(&body_value).send().await?;
     let status = response.status();
     let text = response.text().await?;
     if !status.is_success() {
@@ -388,7 +355,7 @@ pub async fn analyse_crash_direct(instance_id: &str) -> crate::Result<Value> {
     let response = client
         .post(format!("{LOGSHARE_BASE_URL}/v1/analyse"))
         .header("Accept", "application/json")
-        .json(&prepared.body)
+        .json(&prepared)
         .send()
         .await?;
     let status = response.status();
@@ -448,10 +415,10 @@ pub async fn ai_analyze_direct(instance_id: &str) -> crate::Result<String> {
     let prepared = prepare_upload(instance_id).await?;
     let url = format!("{LOGSHARE_BASE_URL}/v1/ai/analyse");
     let body = json!({
-        "content": prepared.body.content,
-        "files": prepared.body.files,
-        "metadata": prepared.body.metadata,
-        "source": prepared.body.source,
+        "content": prepared.content,
+        "files": prepared.files,
+        "metadata": prepared.metadata,
+        "source": prepared.source,
     });
     stream_ai(instance_id, url, Some(body)).await
 }
