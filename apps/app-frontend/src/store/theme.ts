@@ -1,5 +1,17 @@
 import { defineStore } from 'pinia'
 
+/**
+ * Mirrors `KeyBinding` from `@modrinth/ui`. Declared here so this module stays
+ * loadable without the UI package, which the settings tests rely on.
+ */
+export interface ShortcutBinding {
+	device: 'keyboard' | 'mouse'
+	code: string
+	mod: boolean
+	shift: boolean
+	alt: boolean
+}
+
 let systemThemeMq: MediaQueryList | null = null
 
 export const DEFAULT_FEATURE_FLAGS = {
@@ -143,6 +155,13 @@ export type ThemeStore = {
 	shortcutNavCreate: boolean
 	shortcutNavSettings: boolean
 
+	/**
+	 * The combination every shortcut answers to, keyed by action id. Kept here so
+	 * pages re-render when one is recorded; the value itself lives in local
+	 * storage, next to the enable flags.
+	 */
+	shortcutBindings: Record<string, ShortcutBinding>
+
 	devMode: boolean
 	featureFlags: FeatureFlags
 }
@@ -180,6 +199,8 @@ export const DEFAULT_THEME_STORE: ThemeStore = {
 	shortcutNavDownloads: false,
 	shortcutNavCreate: false,
 	shortcutNavSettings: false,
+
+	shortcutBindings: {},
 
 	devMode: false,
 	featureFlags: DEFAULT_FEATURE_FLAGS,
