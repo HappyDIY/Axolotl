@@ -33,6 +33,24 @@ export const ANNOUNCEMENT_CHANGE_TYPES: readonly AnnouncementChangeType[] = [
 
 export const launcherAnnouncements: readonly LauncherAnnouncement[] = [
 	{
+		id: 'launcher-1.9.6-beta.5',
+		version: '1.9.6-beta.5',
+		publishedAt: '2026-09-11',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.5',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.5',
+		},
+		changes: {
+			added: [
+				{
+					'en-US':
+						'Share crash diagnostics to LogShare.CN and get a link, together with a structured summary of the detected problems.',
+					'zh-CN': '引入 LogShare.CN 相关功能。',
+				}
+			]
+		},
+	},
+	{
 		id: 'launcher-1.9.6-beta.4',
 		version: '1.9.6-beta.4',
 		publishedAt: '2026-09-09',
