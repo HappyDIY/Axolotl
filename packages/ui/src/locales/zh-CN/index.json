@@ -4226,6 +4226,138 @@
   "ui.confirm-leave-modal.title": {
     "defaultMessage": "离开页面？"
   },
+  "ui.keybinding-modal.alt": {
+    "defaultMessage": "Alt"
+  },
+  "ui.keybinding-modal.cancel": {
+    "defaultMessage": "取消"
+  },
+  "ui.keybinding-modal.capture-hint": {
+    "defaultMessage": "然后按下你想让这个快捷键使用的按键。"
+  },
+  "ui.keybinding-modal.capture-title": {
+    "defaultMessage": "点击此处开始录制"
+  },
+  "ui.keybinding-modal.current": {
+    "defaultMessage": "当前快捷键"
+  },
+  "ui.keybinding-modal.device-keyboard": {
+    "defaultMessage": "键盘"
+  },
+  "ui.keybinding-modal.device-mouse": {
+    "defaultMessage": "鼠标"
+  },
+  "ui.keybinding-modal.group-digits": {
+    "defaultMessage": "数字键"
+  },
+  "ui.keybinding-modal.group-function": {
+    "defaultMessage": "功能键"
+  },
+  "ui.keybinding-modal.group-letters": {
+    "defaultMessage": "字母键"
+  },
+  "ui.keybinding-modal.group-mouse-buttons": {
+    "defaultMessage": "鼠标键"
+  },
+  "ui.keybinding-modal.group-navigation": {
+    "defaultMessage": "导航键"
+  },
+  "ui.keybinding-modal.group-punctuation": {
+    "defaultMessage": "符号键"
+  },
+  "ui.keybinding-modal.group-wheel": {
+    "defaultMessage": "滚轮"
+  },
+  "ui.keybinding-modal.issue-conflict": {
+    "defaultMessage": "已被「{label}」占用。"
+  },
+  "ui.keybinding-modal.issue-needs-modifier": {
+    "defaultMessage": "请同时按住 Ctrl/Cmd、Alt 或 Shift，或改选功能键、导航键。"
+  },
+  "ui.keybinding-modal.issue-reserved": {
+    "defaultMessage": "「{label}」由启动器保留。"
+  },
+  "ui.keybinding-modal.listening-hint": {
+    "defaultMessage": "请按下你想使用的按键。"
+  },
+  "ui.keybinding-modal.listening-title": {
+    "defaultMessage": "正在监听…"
+  },
+  "ui.keybinding-modal.mismatch": {
+    "defaultMessage": "组合不一致，已重新开始录制。"
+  },
+  "ui.keybinding-modal.mod": {
+    "defaultMessage": "Ctrl/Cmd"
+  },
+  "ui.keybinding-modal.modifiers": {
+    "defaultMessage": "修饰键"
+  },
+  "ui.keybinding-modal.mouse-back": {
+    "defaultMessage": "后退键"
+  },
+  "ui.keybinding-modal.mouse-forward": {
+    "defaultMessage": "前进键"
+  },
+  "ui.keybinding-modal.mouse-left": {
+    "defaultMessage": "鼠标左键"
+  },
+  "ui.keybinding-modal.mouse-middle": {
+    "defaultMessage": "鼠标中键"
+  },
+  "ui.keybinding-modal.mouse-right": {
+    "defaultMessage": "鼠标右键"
+  },
+  "ui.keybinding-modal.nothing-captured": {
+    "defaultMessage": "没有录制到按键。"
+  },
+  "ui.keybinding-modal.restore-default": {
+    "defaultMessage": "恢复默认"
+  },
+  "ui.keybinding-modal.save": {
+    "defaultMessage": "保存"
+  },
+  "ui.keybinding-modal.shift": {
+    "defaultMessage": "Shift"
+  },
+  "ui.keybinding-modal.special-hint": {
+    "defaultMessage": "鼠标键、滚轮以及与它们组合的按键只能在这里选择。"
+  },
+  "ui.keybinding-modal.title": {
+    "defaultMessage": "设置快捷键"
+  },
+  "ui.keybinding-modal.title-for": {
+    "defaultMessage": "设置「{action}」的快捷键"
+  },
+  "ui.keybinding-modal.tree-label": {
+    "defaultMessage": "快捷键可用的输入"
+  },
+  "ui.keybinding-modal.unset": {
+    "defaultMessage": "未设置"
+  },
+  "ui.keybinding-modal.use-capture": {
+    "defaultMessage": "改用按键录制"
+  },
+  "ui.keybinding-modal.use-special": {
+    "defaultMessage": "改用特殊方式选择"
+  },
+  "ui.keybinding-modal.verified-hint": {
+    "defaultMessage": "已确认，保存后生效。"
+  },
+  "ui.keybinding-modal.verified-title": {
+    "defaultMessage": "已确认"
+  },
+  "ui.keybinding-modal.verifying-hint": {
+    "defaultMessage": "用于确认组合是否被正确录制。"
+  },
+  "ui.keybinding-modal.verifying-title": {
+    "defaultMessage": "请再按一次以确认"
+  },
+  "ui.keybinding-modal.wheel-down": {
+    "defaultMessage": "滚轮向下"
+  },
+  "ui.keybinding-modal.wheel-up": {
+    "defaultMessage": "滚轮向上"
+  },
   "ui.scroll-to-top.tooltip": {
     "defaultMessage": "返回顶部"
   },
