@@ -117,8 +117,6 @@ struct RequiredFileFailure {
 struct DownloadedContentCompletion {
     manifest_index: usize,
     record: Option<crate::state::instances::commands::ProjectFileRecord>,
-    settled_bytes: u64,
-    event: InstallJobEventKind,
 }
 
 impl RequiredFileFailure {
@@ -405,22 +403,7 @@ impl ModpackContentInstallContext {
         settled_bytes: u64,
         event: InstallJobEventKind,
     ) -> crate::Result<()> {
-        self.mark_files_settled(vec![(settled_bytes, event)]).await
-    }
-
-    async fn mark_files_settled(
-        &self,
-        completions: Vec<(u64, InstallJobEventKind)>,
-    ) -> crate::Result<()> {
-        if completions.is_empty() {
-            return Ok(());
-        }
-        let settled_files = completions.len() as u64;
-        let settled_bytes = completions.iter().map(|(bytes, _)| *bytes).sum();
-        let current = self
-            .content_progress
-            .fetch_add(settled_files, Ordering::Relaxed)
-            + settled_files;
+        let current = self.content_progress.fetch_add(1, Ordering::Relaxed) + 1;
         let current_bytes = self
             .content_bytes_progress
             .fetch_add(settled_bytes, Ordering::Relaxed)
@@ -441,7 +424,7 @@ impl ModpackContentInstallContext {
                     ),
                 }),
                 self.modpack_details.clone(),
-                completions.into_iter().map(|(_, event)| event).collect(),
+                vec![event],
             )
             .await
     }
@@ -1348,12 +1331,16 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         bytes: downloaded_bytes,
                     }
                 };
+                // Publish progress as soon as this file is ready. Database
+                // registration is intentionally deferred and batched below,
+                // but the UI must not observe artificial 64-file plateaus.
+                content_context
+                    .mark_file_settled(downloaded_bytes, event.clone())
+                    .await?;
                 downloaded_completions.lock().await.push(
                     DownloadedContentCompletion {
                         manifest_index,
                         record,
-                        settled_bytes: downloaded_bytes,
-                        event,
                     },
                 );
                 Ok(())
@@ -1464,16 +1451,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 )
                 .await?;
         }
-        content_context
-            .mark_files_settled(
-                completions
-                    .into_iter()
-                    .map(|completion| {
-                        (completion.settled_bytes, completion.event)
-                    })
-                    .collect(),
-            )
-            .await?;
         required_file_failures = pass_failures;
         if required_file_failures.is_empty() {
             break;
