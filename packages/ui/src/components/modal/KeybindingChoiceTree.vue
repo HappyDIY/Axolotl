@@ -177,6 +177,11 @@ function toggle(row: TreeRow) {
 	if (next.has(row.id)) next.delete(row.id)
 	else next.add(row.id)
 	expanded.value = next
+
+	// Collapsing can leave the active row past the end, which would stop the
+	// keyboard from moving anywhere.
+	const lastIndex = visibleRows.value.length - 1
+	if (activeIndex.value > lastIndex) focusRow(lastIndex)
 }
 
 function parentIndexOf(row: TreeRow) {

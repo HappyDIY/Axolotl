@@ -85,14 +85,14 @@
 							v-for="modifier in modifierOptions"
 							:key="modifier.field"
 							size="small"
-							:type="modifierState[modifier.field] ? 'filled' : 'outlined'"
+							:type="modifierState[modifier.field] ? 'highlight' : 'outlined'"
 						>
 							<button
 								type="button"
 								:aria-pressed="modifierState[modifier.field]"
 								@click="modifierState[modifier.field] = !modifierState[modifier.field]"
 							>
-								{{ formatMessage(modifier.label) }}
+								{{ modifier.label }}
 							</button>
 						</ButtonStyled>
 					</div>
@@ -307,9 +307,9 @@ const headerText = computed(() =>
 )
 
 const modifierOptions = computed(() => [
-	{ field: 'mod' as const, label: messages.mod },
-	{ field: 'alt' as const, label: messages.alt },
-	{ field: 'shift' as const, label: messages.shift },
+	{ field: 'mod' as const, label: labels.value.mod },
+	{ field: 'alt' as const, label: labels.value.alt },
+	{ field: 'shift' as const, label: labels.value.shift },
 ])
 
 const liveParts = computed(() => {
