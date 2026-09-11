@@ -488,6 +488,8 @@ pub struct CurseForgeInstallRequest {
     /// lived and tied to the target instance revision.
     #[serde(default)]
     pub dependency_plan_id: Option<String>,
+    #[serde(skip)]
+    pub(crate) defer_persistence: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -699,6 +701,11 @@ pub struct CurseForgeInstallResult {
     pub skipped_dependencies: Vec<CurseForgeSkippedDependency>,
     #[serde(default)]
     pub cross_source_dependencies: Vec<CurseForgeCrossSourceDependency>,
+    #[serde(skip)]
+    pub(crate) deferred_records: Vec<(
+        crate::state::instances::commands::ProjectFileRecord,
+        Option<(CurseForgeProjectId, CurseForgeFileId)>,
+    )>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1679,7 +1686,7 @@ async fn install_file_with_metrics(
         };
 
         validate_file_name(&file.file_name)?;
-        let relative_path =
+        let downloaded =
             download_installed_file(DownloadInstalledFileRequest {
                 instance_id: &request.instance_id,
                 url: &download_url,
@@ -1691,8 +1698,16 @@ async fn install_file_with_metrics(
                 project_slug: &project.slug,
                 ownership_kind: request.ownership_kind,
                 download_metrics,
+                defer_persistence: request.defer_persistence,
             })
             .await?;
+        let relative_path = downloaded.relative_path.clone();
+        if request.defer_persistence {
+            result.deferred_records.push((downloaded.record, match downloaded.pending_completion {
+                CurseForgePendingCompletionProof::None => None,
+                CurseForgePendingCompletionProof::AuthoritativeSha1 | CurseForgePendingCompletionProof::AuthoritativeFingerprint => Some((CurseForgeProjectId::new(project_id)?, CurseForgeFileId::new(file_id)?)),
+            }));
+        }
         result.installed.push(CurseForgeInstalledFile {
             project_id,
             file_id,
@@ -2342,12 +2357,13 @@ async fn install_fixed_curseforge_content(
         project_slug: &project.slug,
         ownership_kind: request.ownership_kind,
         download_metrics,
+        defer_persistence: request.defer_persistence,
     })
     .await?;
     result.installed.push(CurseForgeInstalledFile {
         project_id,
         file_id,
-        relative_path,
+        relative_path: relative_path.relative_path,
         dependency,
     });
     Ok(true)
@@ -3636,6 +3652,10 @@ pub async fn install_modpack_with_reporter(
         "Resolved CurseForge modpack manifest files"
     );
     let content = Arc::new(Mutex::new(CurseForgeInstallResult::default()));
+    let deferred_records = Arc::new(Mutex::new(Vec::<(
+        crate::state::instances::commands::ProjectFileRecord,
+        Option<(CurseForgeProjectId, CurseForgeFileId)>,
+    )>::new()));
     let download_metrics = reporter.as_ref().map(|reporter| {
         Arc::new(CurseForgeDownloadMetrics::with_reporter(reporter.clone()))
     });
@@ -3667,6 +3687,7 @@ pub async fn install_modpack_with_reporter(
             let pack_details = pack_details.clone();
             let minecraft_version = minecraft_version.clone();
             let request = request.clone();
+            let deferred_records = deferred_records.clone();
             async move {
                 let expected_bytes = file_meta
                     .get(&manifest_file.file_id)
@@ -3773,6 +3794,9 @@ pub async fn install_modpack_with_reporter(
                     .await?;
                     return Ok(());
                 };
+                if !item_result.deferred_records.is_empty() {
+                    deferred_records.lock().expect("deferred records mutex").extend(item_result.deferred_records.iter().cloned());
+                }
                 let completed_path =
                     item_result.installed[0].relative_path.clone();
                 {
@@ -3801,6 +3825,27 @@ pub async fn install_modpack_with_reporter(
         },
     )
     .await?;
+
+    let deferred = std::mem::take(
+        &mut *deferred_records.lock().expect("deferred records mutex"),
+    );
+    let plain_records = deferred
+        .iter()
+        .filter_map(|(record, pending)| {
+            pending.is_none().then_some(record.clone())
+        })
+        .collect::<Vec<_>>();
+    crate::state::instances::commands::record_project_files_atomic(
+        &request.instance_id,
+        &plain_records,
+        &state,
+    )
+    .await?;
+    for (record, pending) in deferred {
+        if let Some((project_id, file_id)) = pending {
+            crate::state::instances::commands::record_verified_curseforge_project_file_atomic(&request.instance_id, &record.relative_path, &record.sha1, record.size, record.project_type, record.source_kind, record.ownership_kind, project_id, file_id, record.origin, &state).await?;
+        }
+    }
 
     if let (Some(reporter), Some(download_metrics)) =
         (reporter.as_ref(), download_metrics.as_ref())
@@ -4020,6 +4065,7 @@ async fn retry_modpack_file_install(
                 excluded_dependency_project_ids: Vec::new(),
                 force_dependency_project_ids: Vec::new(),
                 dependency_plan_id: None,
+                defer_persistence: true,
             },
             download_metrics,
         )
@@ -4029,7 +4075,7 @@ async fn retry_modpack_file_install(
                 let installed_path = &item_result.installed[0].relative_path;
                 if project_type == ProjectType::Mod.get_name()
                     && Path::new(installed_path).file_name()
-                    != Some(std::ffi::OsStr::new(expected_file_name))
+                        != Some(std::ffi::OsStr::new(expected_file_name))
                 {
                     failure_reason = format!(
                         "CurseForge install context mismatch: project_id={} file_id={} expected_file={} installed_path={}",
@@ -4038,7 +4084,8 @@ async fn retry_modpack_file_install(
                         expected_file_name,
                         installed_path,
                     );
-                    attempt_failures.push(format!("attempt {attempt}: {failure_reason}"));
+                    attempt_failures
+                        .push(format!("attempt {attempt}: {failure_reason}"));
                     continue;
                 }
                 installed_result = Some(item_result);
@@ -5219,12 +5266,17 @@ pub async fn get_local_modpack_target(
     let path = archive_path.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let file = std::fs::File::open(path)?;
-        let mut archive = zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
+        let mut archive =
+            zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
         let manifest = read_modpack_manifest(&mut archive)?;
-        let name = manifest.name.clone().filter(|name| !name.trim().is_empty())
+        let name = manifest
+            .name
+            .clone()
+            .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "CurseForge Modpack".to_string());
         Ok((name, modpack_target(&manifest)?))
-    }).await?
+    })
+    .await?
 }
 
 fn modpack_zip_error(error: zip::result::ZipError) -> crate::Error {
@@ -5469,6 +5521,7 @@ async fn install_selected_file(
         excluded_dependency_project_ids: Vec::new(),
         force_dependency_project_ids: Vec::new(),
         dependency_plan_id: None,
+        defer_persistence: false,
     })
     .await?;
     if ownership_kind
@@ -7991,11 +8044,18 @@ struct DownloadInstalledFileRequest<'a> {
     project_slug: &'a str,
     ownership_kind: crate::state::instances::ContentOwnershipKind,
     download_metrics: Option<&'a CurseForgeDownloadMetrics>,
+    defer_persistence: bool,
+}
+
+struct DownloadedCurseForgeFile {
+    relative_path: String,
+    record: crate::state::instances::commands::ProjectFileRecord,
+    pending_completion: CurseForgePendingCompletionProof,
 }
 
 async fn download_installed_file(
     request: DownloadInstalledFileRequest<'_>,
-) -> crate::Result<String> {
+) -> crate::Result<DownloadedCurseForgeFile> {
     let DownloadInstalledFileRequest {
         instance_id,
         url,
@@ -8007,6 +8067,7 @@ async fn download_installed_file(
         project_slug,
         ownership_kind,
         download_metrics,
+        defer_persistence,
     } = request;
     if file.mod_id != project_id || file.id != file_id {
         return Err(ErrorKind::InputError(
@@ -8056,6 +8117,41 @@ async fn download_installed_file(
     if let Some(download_metrics) = download_metrics {
         download_metrics.record(&result);
     }
+    let verified = verify_installed_curseforge_file(&full_path, file).await?;
+    let provider_ref = ContentProviderRef::CurseForge {
+        project_id: CurseForgeProjectId::new(file.mod_id)?,
+        file_id: Some(CurseForgeFileId::new(file.id)?),
+    };
+    let record = crate::state::instances::commands::ProjectFileRecord {
+        relative_path: relative_path.clone(),
+        sha1: verified.sha1.clone(),
+        size: verified.size,
+        project_type,
+        source_kind: ContentSourceKind::CurseForge,
+        ownership_kind,
+        provider_ref: Some(provider_ref),
+        origin: true,
+        known_modrinth_project_id: None,
+        known_modrinth_version_id: None,
+    };
+    if defer_persistence {
+        let _instance_lock = state.lock_instance_content(instance_id).await;
+        let previous_path = crate::state::materialize_project_download(
+            download_path,
+            &full_path,
+        )
+        .await?;
+        crate::util::io::remove_file(download_path).await?;
+        crate::state::finalize_project_materialization(
+            previous_path.as_deref(),
+        )
+        .await?;
+        return Ok(DownloadedCurseForgeFile {
+            relative_path,
+            record,
+            pending_completion: verified.pending_completion,
+        });
+    }
     // Transfers remain concurrent; publishing into an instance is bounded so
     // SQLite writer transactions cannot stampede each other.
     let _publish_permit =
@@ -8095,7 +8191,11 @@ async fn download_installed_file(
             return Err(error);
         }
     }
-    Ok(relative_path)
+    Ok(DownloadedCurseForgeFile {
+        relative_path,
+        record,
+        pending_completion: verified.pending_completion,
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9299,6 +9399,7 @@ mod tests {
                     excluded_dependency_project_ids: Vec::new(),
 					force_dependency_project_ids: Vec::new(),
                     dependency_plan_id: None,
+                    defer_persistence: false,
                 },
                 display_title: "CurseForge".to_string(),
                 display_icon: None,
