@@ -442,8 +442,10 @@ function show(modalPayload: CrashModalPayload, isPreview = false): boolean {
 	payload.value = modalPayload
 	uploadTicket.value = null
 	logShareSummary.value = ''
+	logShareSummaryLoading.value = false
 	aiOutput.value = ''
 	aiStatus.value = ''
+	aiQueued.value = false
 	modal.value?.show()
 	return true
 }
@@ -529,22 +531,27 @@ async function loadLogShareSummary(instanceId: string): Promise<void> {
 	if (
 		!useLogShareAi() ||
 		!logShareSettings.value.auto_upload ||
-		logShareSettings.value.no_storage
+		logShareSettings.value.no_storage ||
+		logShareSummaryLoading.value
 	) {
 		return
 	}
+	const version = analysisVersion
+	const stale = () => version !== analysisVersion || instanceId !== payload.value.instance_id
 	logShareSummaryLoading.value = true
 	logShareSummary.value = ''
 	try {
 		const ticket = await logshare_upload_crash(instanceId)
+		if (stale()) return
 		uploadTicket.value = ticket
 		const insights = await logshare_get_insights(ticket.id)
+		if (stale()) return
 		logShareSummary.value = formatInsights(insights)
 	} catch (error) {
 		console.error('Failed to gather LogShare summary', error)
-		logShareSummary.value = ''
+		if (!stale()) logShareSummary.value = ''
 	} finally {
-		logShareSummaryLoading.value = false
+		if (!stale()) logShareSummaryLoading.value = false
 	}
 }
 
