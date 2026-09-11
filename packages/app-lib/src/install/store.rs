@@ -322,8 +322,7 @@ pub async fn update_state_with_progress_columns(
     sqlx::query(
         "UPDATE install_jobs
          SET instance_id = (SELECT id FROM instances WHERE id = ?),
-             state = ?, modified = ?, provider = ?, files_total = ?,
-             files_completed = ?, bytes_total = ?, bytes_downloaded = ?
+             state = ?, modified = ?, provider = ?, files_total = ?, bytes_total = ?
          WHERE id = ?",
     )
     .bind(instance_id)
@@ -331,9 +330,7 @@ pub async fn update_state_with_progress_columns(
     .bind(modified)
     .bind(provider)
     .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
     .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
     .bind(id_value)
     .execute(&app_state.pool)
     .await?;
@@ -368,17 +365,14 @@ pub async fn update_progress_state(
 
     sqlx::query(
         "UPDATE install_jobs
-         SET state = ?, modified = ?, provider = ?, files_total = ?,
-             files_completed = ?, bytes_total = ?, bytes_downloaded = ?
+         SET state = ?, modified = ?, provider = ?, files_total = ?, bytes_total = ?
          WHERE id = ?",
     )
     .bind(json)
     .bind(modified)
     .bind(provider)
     .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
     .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
     .bind(id_value)
     .execute(&app_state.pool)
     .await?;
@@ -1181,15 +1175,12 @@ async fn sync_download_details(
     let summary = state.download_summary();
     sqlx::query(
         "UPDATE install_jobs
-         SET provider = ?, files_total = ?, files_completed = ?,
-             bytes_total = ?, bytes_downloaded = ?
+         SET provider = ?, files_total = ?, bytes_total = ?
          WHERE id = ?",
     )
     .bind(state.provider().as_str())
     .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
     .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
     .bind(&id_value)
     .execute(&app_state.pool)
     .await?;
