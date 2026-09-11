@@ -1857,7 +1857,17 @@ impl CachedEntry {
         // global application state and simply use SQLite's normal locking.
         let app_state = crate::State::get().await.ok();
         let _write_permit = match app_state.as_ref() {
-            Some(state) => state.install_db_semaphore.acquire().await.ok(),
+            Some(state) => match state.install_db_semaphore.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    tracing::debug!(
+                        cache_type = ?type_,
+                        entry_count = entries.len(),
+                        "Skipping cache refresh while database writer is busy"
+                    );
+                    return;
+                }
+            },
             None => None,
         };
         if let Err(error) = Self::upsert_many(entries, pool).await {
