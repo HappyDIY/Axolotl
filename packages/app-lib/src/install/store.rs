@@ -1,6 +1,5 @@
 use super::model::{
-    DownloadJobSummary, InstallJobKind, InstallJobSnapshot, InstallJobState,
-    InstallJobStatus,
+    InstallJobKind, InstallJobSnapshot, InstallJobState, InstallJobStatus,
 };
 use crate::state::{InstanceInstallStage, State};
 use chrono::{DateTime, TimeZone, Utc};
@@ -102,8 +101,6 @@ pub async fn insert(
     )
     .execute(&app_state.pool)
     .await?;
-
-    sync_download_details(id, state, app_state).await?;
 
     get(id, app_state).await?.ok_or_else(|| {
         crate::ErrorKind::OtherError(format!(
@@ -299,19 +296,14 @@ pub async fn update_state(
     .execute(&app_state.pool)
     .await?;
 
-    sync_download_details(id, state, app_state).await?;
-
     get_required(id, app_state).await
 }
 
-/// Updates the job state JSON and the denormalized download summary columns
-/// in a single statement, using a caller-supplied serialized state so the
-/// reporter mutex is not held across the DB write.
-pub async fn update_state_with_progress_columns(
+/// Updates a caller-supplied serialized job state so the reporter mutex is not
+/// held across the DB write.
+pub async fn update_serialized_state(
     id: Uuid,
     json: &str,
-    provider: &str,
-    summary: &DownloadJobSummary,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
     let now = Utc::now();
@@ -322,15 +314,12 @@ pub async fn update_state_with_progress_columns(
     sqlx::query(
         "UPDATE install_jobs
          SET instance_id = (SELECT id FROM instances WHERE id = ?),
-             state = ?, modified = ?, provider = ?, files_total = ?, bytes_total = ?
+             state = ?, modified = ?
          WHERE id = ?",
     )
     .bind(instance_id)
     .bind(json)
     .bind(modified)
-    .bind(provider)
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.bytes_total.map(|value| value as i64))
     .bind(id_value)
     .execute(&app_state.pool)
     .await?;
@@ -350,14 +339,12 @@ fn instance_id_from_json(json: &str) -> Option<String> {
         })
 }
 
-/// Persists a serialized job state. The caller serializes and summarizes
-/// under the reporter lock; this function only performs the DB write so the
-/// reporter mutex is never held across the transaction.
+/// Persists a serialized job state. The caller serializes under the reporter
+/// lock; this function only performs the DB write so the reporter mutex is
+/// never held across the transaction.
 pub async fn update_progress_state(
     id: Uuid,
     json: &str,
-    provider: &str,
-    summary: &DownloadJobSummary,
     app_state: &State,
 ) -> crate::Result<()> {
     let modified = Utc::now().timestamp();
@@ -365,14 +352,11 @@ pub async fn update_progress_state(
 
     sqlx::query(
         "UPDATE install_jobs
-         SET state = ?, modified = ?, provider = ?, files_total = ?, bytes_total = ?
+         SET state = ?, modified = ?
          WHERE id = ?",
     )
     .bind(json)
     .bind(modified)
-    .bind(provider)
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.bytes_total.map(|value| value as i64))
     .bind(id_value)
     .execute(&app_state.pool)
     .await?;
@@ -411,8 +395,6 @@ pub async fn update_status(
     .execute(&app_state.pool)
     .await?;
 
-    sync_download_details(id, state, app_state).await?;
-
     get_required(id, app_state).await
 }
 
@@ -446,7 +428,6 @@ pub async fn update_status_if(
         return Ok(None);
     }
 
-    sync_download_details(id, state, app_state).await?;
     Ok(Some(get_required(id, app_state).await?))
 }
 
@@ -537,13 +518,6 @@ pub async fn complete_running_job(
     }
     transaction.commit().await?;
 
-    if let Err(error) = sync_download_details(id, state, app_state).await {
-        tracing::warn!(
-            job_id = %id,
-            error = %error,
-            "Install job succeeded, but final download details could not be synchronized"
-        );
-    }
     Ok(Some(get_required(id, app_state).await?))
 }
 
@@ -1164,25 +1138,4 @@ fn timestamp(value: i64) -> DateTime<Utc> {
 
 fn optional_timestamp(value: i64) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(value, 0).single()
-}
-
-async fn sync_download_details(
-    id: Uuid,
-    state: &InstallJobState,
-    app_state: &State,
-) -> crate::Result<()> {
-    let id_value = id.to_string();
-    let summary = state.download_summary();
-    sqlx::query(
-        "UPDATE install_jobs
-         SET provider = ?, files_total = ?, bytes_total = ?
-         WHERE id = ?",
-    )
-    .bind(state.provider().as_str())
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(&id_value)
-    .execute(&app_state.pool)
-    .await?;
-    Ok(())
 }

@@ -17,7 +17,6 @@ use uuid::Uuid;
 const PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_millis(500);
 const CONTENT_PROGRESS_PERSIST_STEPS: u64 = 25;
 const LIVE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
-const LIVE_PROGRESS_PERSIST_INTERVAL: Duration = Duration::from_secs(3);
 const LIVE_PROGRESS_MIN_BYTES: u64 = 256 * 1024;
 
 static REPORTER_STATES: LazyLock<
@@ -43,7 +42,6 @@ struct InstallProgressReporterState {
     initialized_from_store: bool,
     postponed_java_versions: HashSet<u32>,
     last_live_emit_at: Instant,
-    last_live_persist_at: Instant,
     /// Paths with a pending stalled-download check task, so at most one
     /// delayed check is scheduled per active download at a time.
     pending_stall_checks: HashSet<String>,
@@ -116,7 +114,6 @@ impl InstallProgressReporter {
                             initialized_from_store: false,
                             postponed_java_versions: HashSet::new(),
                             last_live_emit_at: Instant::now(),
-                            last_live_persist_at: Instant::now(),
                             pending_stall_checks: HashSet::new(),
                         }));
                     entry.insert(Arc::downgrade(&state));
@@ -132,7 +129,6 @@ impl InstallProgressReporter {
                         initialized_from_store: false,
                         postponed_java_versions: HashSet::new(),
                         last_live_emit_at: Instant::now(),
-                        last_live_persist_at: Instant::now(),
                         pending_stall_checks: HashSet::new(),
                     }));
                 entry.insert(Arc::downgrade(&state));
@@ -236,21 +232,14 @@ impl InstallProgressReporter {
         }
 
         let json = serde_json::to_string(&state.job)?;
-        let provider = state.job.provider().as_str().to_string();
-        let summary = state.job.download_summary();
         drop(state);
-        let record = match store::update_progress_state(
-            self.job_id,
-            &json,
-            &provider,
-            &summary,
-            &app_state,
-        )
-        .await
-        {
-            Ok(()) => store::get_required(self.job_id, &app_state).await,
-            Err(error) => Err(error),
-        };
+        let record =
+            match store::update_progress_state(self.job_id, &json, &app_state)
+                .await
+            {
+                Ok(()) => store::get_required(self.job_id, &app_state).await,
+                Err(error) => Err(error),
+            };
         let record = match record {
             Ok(record) => record,
             Err(error) => {
@@ -440,17 +429,10 @@ impl InstallProgressReporter {
         // Serialize under the lock; the DB write runs without holding the
         // reporter mutex so per-file completion events never serialize on it.
         let json = serde_json::to_string(&state.job)?;
-        let provider = state.job.provider().as_str().to_string();
-        let summary = state.job.download_summary();
         drop(state);
-        let record = store::update_state_with_progress_columns(
-            self.job_id,
-            &json,
-            &provider,
-            &summary,
-            &app_state,
-        )
-        .await?;
+        let record =
+            store::update_serialized_state(self.job_id, &json, &app_state)
+                .await?;
         if let Ok(mut state) = self.state.try_lock() {
             state.mark_persisted();
         }
@@ -643,37 +625,9 @@ impl InstallProgressReporter {
         state.last_live_emit_at = Instant::now();
         let (speed_bytes_per_second, eta_seconds) =
             live_download_metrics(&state.job);
-        let should_persist = state.last_live_persist_at.elapsed()
-            >= LIVE_PROGRESS_PERSIST_INTERVAL;
         let schedule_stall_check =
             state.pending_stall_checks.insert(path.clone());
-        // Serialize and summarize under the lock (CPU only); the DB write
-        // below runs without holding the reporter mutex so progress
-        // callbacks from other files never block on the transaction.
-        let persisted = if should_persist {
-            state.last_live_persist_at = Instant::now();
-            Some((
-                serde_json::to_string(&state.job)?,
-                state.job.provider().as_str().to_string(),
-                state.job.download_summary(),
-            ))
-        } else {
-            None
-        };
         drop(state);
-        if let Some((json, provider, summary)) = persisted {
-            if let Err(error) = store::update_progress_state(
-                self.job_id,
-                &json,
-                &provider,
-                &summary,
-                &app_state,
-            )
-            .await
-            {
-                tracing::warn!(%error, "Failed to persist live download progress");
-            }
-        }
         emit_download_request_update(&DownloadRequestUpdate::Progress {
             job_id: self.job_id,
             id: path.clone(),
@@ -899,24 +853,17 @@ impl InstallProgressReporter {
             return Ok(());
         }
 
-        // Serialize and summarize under the lock (CPU only); the DB write
-        // below runs without holding the reporter mutex.
+        // Serialize under the lock (CPU only); the DB write below runs without
+        // holding the reporter mutex.
         let json = serde_json::to_string(&state.job)?;
-        let provider = state.job.provider().as_str().to_string();
-        let summary = state.job.download_summary();
         drop(state);
-        let record = match store::update_progress_state(
-            self.job_id,
-            &json,
-            &provider,
-            &summary,
-            &app_state,
-        )
-        .await
-        {
-            Ok(()) => store::get_required(self.job_id, &app_state).await,
-            Err(error) => Err(error),
-        };
+        let record =
+            match store::update_progress_state(self.job_id, &json, &app_state)
+                .await
+            {
+                Ok(()) => store::get_required(self.job_id, &app_state).await,
+                Err(error) => Err(error),
+            };
         let record = match record {
             Ok(record) => record,
             Err(error) => {
