@@ -1005,12 +1005,10 @@ pub async fn update_crash_analysis_ai_settings(
     .await?;
     // Keep the single source of truth mirrored into the log sharing table so
     // the crash modal can keep reading one place without the two drifting.
-    sqlx::query(
-        "UPDATE log_share_settings SET ai_source = ? WHERE id = 0",
-    )
-    .bind(ai_source)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("UPDATE log_share_settings SET ai_source = ? WHERE id = 0")
+        .bind(ai_source)
+        .execute(&state.pool)
+        .await?;
     Ok(())
 }
 

@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::analyze_crash;
-use crate::emit_logshare_ai_event;
 use crate::State;
+use crate::emit_logshare_ai_event;
 
 const LOGSHARE_BASE_URL: &str = "https://api.logshare.cn";
 const LOGSHARE_GZIP_THRESHOLD_BYTES: usize = 64 * 1024;
@@ -160,9 +160,7 @@ pub async fn list_shared_logs() -> crate::Result<Vec<SharedLog>> {
 
 pub async fn record_shared_log(log: SharedLog) -> crate::Result<()> {
     let state = State::get().await?;
-    let created_at = log
-        .created_at
-        .max(now_seconds());
+    let created_at = log.created_at.max(now_seconds());
     sqlx::query(
         "INSERT INTO shared_logs (id, url, raw, token, provider, instance_id, instance_name, truncated, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET url = excluded.url, raw = excluded.raw, token = excluded.token, provider = excluded.provider, instance_id = excluded.instance_id, instance_name = excluded.instance_name, truncated = excluded.truncated",
@@ -279,7 +277,9 @@ async fn request_client() -> crate::Result<reqwest::Client> {
     proxy.apply(builder)?.build().map_err(Into::into)
 }
 
-pub async fn upload_crash(instance_id: &str) -> crate::Result<LogShareUploadResponse> {
+pub async fn upload_crash(
+    instance_id: &str,
+) -> crate::Result<LogShareUploadResponse> {
     let prepared = prepare_upload(instance_id).await?;
     let client = request_client().await?;
     let mut request = client
@@ -318,8 +318,11 @@ pub async fn upload_crash(instance_id: &str) -> crate::Result<LogShareUploadResp
         ))
         .into());
     }
-    let value: Value = serde_json::from_str(&text)
-        .map_err(|_| crate::ErrorKind::OtherError("LogShare returned invalid JSON".to_string()))?;
+    let value: Value = serde_json::from_str(&text).map_err(|_| {
+        crate::ErrorKind::OtherError(
+            "LogShare returned invalid JSON".to_string(),
+        )
+    })?;
     if value.get("success").and_then(Value::as_bool) != Some(true) {
         return Err(crate::ErrorKind::OtherError(format!(
             "LogShare upload failed: {}",
@@ -372,7 +375,10 @@ pub async fn get_insights(id: &str) -> crate::Result<Value> {
         .into());
     }
     serde_json::from_str(&text).map_err(|_| {
-        crate::ErrorKind::OtherError("LogShare returned invalid insights JSON".to_string()).into()
+        crate::ErrorKind::OtherError(
+            "LogShare returned invalid insights JSON".to_string(),
+        )
+        .into()
     })
 }
 
@@ -395,11 +401,17 @@ pub async fn analyse_crash_direct(instance_id: &str) -> crate::Result<Value> {
         .into());
     }
     serde_json::from_str(&text).map_err(|_| {
-        crate::ErrorKind::OtherError("LogShare returned invalid analysis JSON".to_string()).into()
+        crate::ErrorKind::OtherError(
+            "LogShare returned invalid analysis JSON".to_string(),
+        )
+        .into()
     })
 }
 
-pub async fn delete_log(id: &str, token: &str) -> crate::Result<LogShareDeleteResponse> {
+pub async fn delete_log(
+    id: &str,
+    token: &str,
+) -> crate::Result<LogShareDeleteResponse> {
     let client = request_client().await?;
     let response = client
         .delete(format!("{LOGSHARE_BASE_URL}/v1/log/{id}"))
@@ -417,11 +429,17 @@ pub async fn delete_log(id: &str, token: &str) -> crate::Result<LogShareDeleteRe
         .into());
     }
     serde_json::from_str(&text).map_err(|_| {
-        crate::ErrorKind::OtherError("LogShare returned invalid deletion JSON".to_string()).into()
+        crate::ErrorKind::OtherError(
+            "LogShare returned invalid deletion JSON".to_string(),
+        )
+        .into()
     })
 }
 
-pub async fn ai_analyze_stored(instance_id: &str, id: &str) -> crate::Result<String> {
+pub async fn ai_analyze_stored(
+    instance_id: &str,
+    id: &str,
+) -> crate::Result<String> {
     let url = format!("{LOGSHARE_BASE_URL}/v1/ai/{id}");
     stream_ai(instance_id, url, None).await
 }
@@ -488,7 +506,9 @@ async fn stream_ai(
         )
         .await
         .map_err(|_| {
-            crate::ErrorKind::OtherError("LogAgent analysis timed out".to_string())
+            crate::ErrorKind::OtherError(
+                "LogAgent analysis timed out".to_string(),
+            )
         })?;
         let Some(chunk) = maybe else {
             break;
@@ -567,12 +587,15 @@ impl SseParser {
             let lf_pos = find_bytes(&self.buffer, b"\n\n");
             let crlf_pos = find_bytes(&self.buffer, b"\r\n\r\n");
             let (pos, separator_len) = match (lf_pos, crlf_pos) {
-                (Some(lf_pos), Some(crlf_pos)) if crlf_pos < lf_pos => (crlf_pos, 4),
+                (Some(lf_pos), Some(crlf_pos)) if crlf_pos < lf_pos => {
+                    (crlf_pos, 4)
+                }
                 (Some(lf_pos), _) => (lf_pos, 2),
                 (None, Some(crlf_pos)) => (crlf_pos, 4),
                 (None, None) => break,
             };
-            let block = String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
+            let block =
+                String::from_utf8_lossy(&self.buffer[..pos]).into_owned();
             self.buffer.drain(..pos + separator_len);
             if let Some(event) = parse_sse_block(&block) {
                 events.push(event);
@@ -619,7 +642,10 @@ fn parse_sse_block(block: &str) -> Option<ParsedEvent> {
                 serde_json::from_str::<Value>(&data_text)
                     .ok()
                     .and_then(|value| {
-                        value.get("error").and_then(Value::as_str).map(str::to_string)
+                        value
+                            .get("error")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
                     })
                     .unwrap_or_else(|| data_text.clone()),
             ),

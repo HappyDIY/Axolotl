@@ -218,9 +218,7 @@ pub async fn logs_logshare_upload_crash(
 }
 
 #[tauri::command]
-pub async fn logs_logshare_get_insights(
-    id: &str,
-) -> Result<serde_json::Value> {
+pub async fn logs_logshare_get_insights(id: &str) -> Result<serde_json::Value> {
     Ok(logs::get_insights(id).await?)
 }
 
