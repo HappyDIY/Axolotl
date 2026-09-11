@@ -37,6 +37,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 #[path = "curseforge_validation.rs"]
 mod curseforge_validation;
@@ -3678,6 +3679,10 @@ pub async fn install_modpack_with_reporter(
     let bytes_done = Arc::new(AtomicU64::new(0));
     let active_downloads = Arc::new(AtomicU64::new(0));
     let minecraft_version = manifest.minecraft.version.clone();
+    let cancellation = reporter
+        .as_ref()
+        .map(InstallProgressReporter::cancellation_token)
+        .unwrap_or_default();
 
     loading_try_for_each_concurrent(
         stream::iter(selected_files.into_iter().map(Ok::<_, crate::Error>)),
@@ -3701,7 +3706,11 @@ pub async fn install_modpack_with_reporter(
             let minecraft_version = minecraft_version.clone();
             let request = request.clone();
             let db_tasks = db_tasks.clone();
+            let cancellation = cancellation.clone();
             async move {
+                if cancellation.is_cancelled() {
+                    return Err(ErrorKind::OtherError("download canceled".to_string()).into());
+                }
                 let expected_bytes = file_meta
                     .get(&manifest_file.file_id)
                     .map(|file| file.file_length)
@@ -3735,8 +3744,13 @@ pub async fn install_modpack_with_reporter(
                             .get(&manifest_file.file_id)
                             .map(|file| file.file_name.as_str())
                             .unwrap_or("<unknown>"),
+                        cancellation.clone(),
                     )
                     .await;
+
+                if cancellation.is_cancelled() {
+                    return Err(ErrorKind::OtherError("download canceled".to_string()).into());
+                }
 
                 let Some(item_result) = installed_result else {
                     active_downloads.fetch_sub(1, Ordering::Relaxed);
@@ -3810,9 +3824,14 @@ pub async fn install_modpack_with_reporter(
                 if !item_result.deferred_records.is_empty() {
                     for (record, pending) in item_result.deferred_records.iter().cloned() {
                         let instance_id = request.instance_id.clone();
+                        let cancellation = cancellation.clone();
                         db_tasks.lock().expect("db task mutex").push(tokio::spawn(async move {
                             let state = State::get().await?;
-                            let _permit = state.install_db_semaphore.acquire().await.map_err(|_| ErrorKind::OtherError("install database semaphore closed".to_string()))?;
+                            let _permit = tokio::select! {
+                                _ = cancellation.cancelled() => return Ok(()),
+                                permit = state.install_db_semaphore.acquire() => permit.map_err(|_| ErrorKind::OtherError("install database semaphore closed".to_string()))?,
+                            };
+                            if cancellation.is_cancelled() { return Ok(()); }
                             if let Some((project_id, file_id)) = pending {
                                 crate::state::instances::commands::record_verified_curseforge_project_file_atomic(&instance_id, &record.relative_path, &record.sha1, record.size, record.project_type, record.source_kind, record.ownership_kind, project_id, file_id, record.origin, &state).await
                             } else {
@@ -4049,6 +4068,7 @@ async fn retry_modpack_file_install(
     manual_operation_kind: crate::state::instances::ManualDownloadOperationKind,
     download_metrics: Option<&CurseForgeDownloadMetrics>,
     expected_file_name: &str,
+    cancellation: CancellationToken,
 ) -> (
     Option<CurseForgeInstallResult>,
     Option<CurseForgeInstallResult>,
@@ -4059,6 +4079,9 @@ async fn retry_modpack_file_install(
     let mut failure_reason = "no file was installed".to_string();
     let mut attempt_failures = Vec::new();
     for attempt in 1..=MODPACK_FILE_INSTALL_ATTEMPTS {
+        if cancellation.is_cancelled() {
+            return (None, None, "download canceled".to_string());
+        }
         match install_file_with_metrics(
             CurseForgeInstallRequest {
                 instance_id: instance_id.to_string(),
@@ -4130,8 +4153,10 @@ async fn retry_modpack_file_install(
             "Failed to install required CurseForge file"
         );
         if attempt < MODPACK_FILE_INSTALL_ATTEMPTS {
-            tokio::time::sleep(Duration::from_millis(250 * attempt as u64))
-                .await;
+            tokio::select! {
+                _ = cancellation.cancelled() => return (None, None, "download canceled".to_string()),
+                _ = tokio::time::sleep(Duration::from_millis(250 * attempt as u64)) => {}
+            }
         }
     }
     if !attempt_failures.is_empty() {
@@ -4466,6 +4491,7 @@ pub(crate) async fn install_local_manifest_files(
                         crate::state::instances::ManualDownloadOperationKind::PackUpdate,
                         Some(&download_metrics),
                         expected_file_name,
+                        reporter.cancellation_token(),
                     )
                     .await;
 
