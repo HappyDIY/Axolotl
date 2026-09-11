@@ -346,23 +346,23 @@ const messages = defineMessages({
 										'smart-clickable:allow-pointer-events': serverStatus,
 									}"
 								/>
-								<Tooltip :disabled="!hasPlayersTooltip">
-									<span :class="{ 'cursor-help': hasPlayersTooltip }">
-										{{
-											formatMessage(messages.playersOnline, {
-												count: formatNumber(serverStatus.players?.online ?? 0),
-											})
-										}}
-									</span>
-									<template #popper>
-										<div class="flex flex-col gap-1">
-											<span v-for="player in serverStatus.players?.sample" :key="player.name">
-												{{ player.name }}
-											</span>
-										</div>
-									</template>
-								</Tooltip>
 							</template>
+							<Tooltip :disabled="!hasPlayersTooltip">
+								<span :class="{ 'cursor-help': hasPlayersTooltip }">
+									{{
+										formatMessage(messages.playersOnline, {
+											count: formatNumber(serverStatus.players?.online ?? 0),
+										})
+									}}
+								</span>
+								<template #popper>
+									<div class="flex flex-col gap-1">
+										<span v-for="player in serverStatus.players?.sample" :key="player.name">
+											{{ player.name }}
+										</span>
+									</div>
+								</template>
+							</Tooltip>
 						</template>
 						<template v-else>
 							<NoSignalIcon aria-hidden="true" stroke-width="3px" class="shrink-0" />

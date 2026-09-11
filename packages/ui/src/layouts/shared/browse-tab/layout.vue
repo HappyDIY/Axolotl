@@ -9,6 +9,7 @@ import LoadingIndicator from '#ui/components/base/LoadingIndicator.vue'
 import NavTabs from '#ui/components/base/NavTabs.vue'
 import Pagination from '#ui/components/base/Pagination.vue'
 import PopoutMenu from '#ui/components/base/PopoutMenu.vue'
+import ScrollToTopButton from '#ui/components/base/ScrollToTopButton.vue'
 import StyledInput from '#ui/components/base/StyledInput.vue'
 import ProjectCard from '#ui/components/project/card/ProjectCard.vue'
 import ProjectCardList from '#ui/components/project/ProjectCardList.vue'
@@ -115,9 +116,15 @@ const selectedDisplayMode = computed(() =>
 	</template>
 	<SelectedProjectsFloatingBar v-if="ctx.installContext?.value && ctx.variant !== 'web'" />
 
-	<div class="flex items-center justify-between">
-		<NavTabs v-if="ctx.showProjectTypeTabs.value" :links="ctx.selectableProjectTypes.value" />
-		<slot name="nav-tabs-actions" />
+	<div class="flex min-w-0 items-center gap-2">
+		<NavTabs
+			v-if="ctx.showProjectTypeTabs.value"
+			:links="ctx.selectableProjectTypes.value"
+			class="min-w-0 flex-1"
+		/>
+		<div class="shrink-0">
+			<slot name="nav-tabs-actions" />
+		</div>
 	</div>
 
 	<div class="flex items-center gap-2">
@@ -405,4 +412,5 @@ const selectedDisplayMode = computed(() =>
 	</div>
 
 	<slot name="after" />
+	<ScrollToTopButton />
 </template>

@@ -5,6 +5,7 @@
 #![recursion_limit = "256"]
 
 use native_dialog::{DialogBuilder, MessageLevel};
+use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::{
     env, fs,
@@ -24,6 +25,13 @@ mod lightweight_mode;
 mod mod_translation;
 mod portable;
 mod seed_map;
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdatePreferences {
+    immediate_update_fetch: bool,
+    updates_paused: bool,
+}
 
 #[cfg(target_os = "macos")]
 mod macos;
@@ -154,13 +162,18 @@ fn is_allowed_blockbench_skin_request(
         return true;
     }
 
-    request
+    let Some(referer) = request
         .headers()
         .get(header::REFERER)
         .and_then(|value| value.to_str().ok())
-        .is_some_and(|referer| {
-            is_skin_editor_referer(referer, &is_allowed_source)
-        })
+    else {
+        // WKWebView omits both Origin and Referer for custom-scheme iframe
+        // navigations and their subresources. The handler only exposes packaged
+        // editor assets, so a host-validated request remains safe to serve.
+        return true;
+    };
+
+    is_skin_editor_referer(referer, &is_allowed_source)
 }
 
 fn is_skin_editor_referer(
@@ -209,6 +222,149 @@ async fn initialize_state(app: tauri::AppHandle) -> api::Result<()> {
     app.fs_scope()
         .allow_directory(state.directories.servers_dir(), true)?;
 
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_update_channel(app: tauri::AppHandle) -> api::Result<String> {
+    let settings_dir = update_channel_settings_dir(&app)?;
+    let state = theseus::read_update_channel_state(&settings_dir).await?;
+    let channel = state
+        .active_channel
+        .unwrap_or_else(|| theseus::default_update_channel().to_string());
+
+    match channel.as_str() {
+        "release" | "beta" => Ok(channel),
+        _ => Err(theseus::Error::from(theseus::ErrorKind::FSError(
+            "Update channel settings are invalid".to_string(),
+        ))
+        .into()),
+    }
+}
+
+#[tauri::command]
+async fn get_current_app_database_path(
+    app: tauri::AppHandle,
+) -> api::Result<String> {
+    Ok(theseus::current_app_database_path(&app.config().identifier)
+        .await?
+        .to_string_lossy()
+        .into_owned())
+}
+
+#[tauri::command]
+async fn set_update_channel(
+    app: tauri::AppHandle,
+    channel: String,
+) -> api::Result<()> {
+    if !matches!(channel.as_str(), "release" | "beta") {
+        return Err(theseus::Error::from(theseus::ErrorKind::FSError(
+            "Invalid update channel".to_string(),
+        ))
+        .into());
+    }
+
+    let settings_dir = update_channel_settings_dir(&app)?;
+    let mut state = theseus::read_update_channel_state(&settings_dir).await?;
+    state.active_channel = Some(channel);
+    write_update_channel_state(&app, &state)
+}
+
+#[tauri::command]
+async fn get_update_preferences(
+    app: tauri::AppHandle,
+) -> api::Result<UpdatePreferences> {
+    let settings_dir = update_channel_settings_dir(&app)?;
+    let state = theseus::read_update_channel_state(&settings_dir).await?;
+    let is_beta = match state.active_channel.as_deref() {
+        Some("beta") => true,
+        Some("release") => false,
+        _ => theseus::default_update_channel() == "beta",
+    };
+    Ok(UpdatePreferences {
+        immediate_update_fetch: is_beta
+            || state.immediate_update_fetch.unwrap_or(false),
+        updates_paused: state.updates_paused.unwrap_or(false),
+    })
+}
+
+#[tauri::command]
+async fn set_update_preferences(
+    app: tauri::AppHandle,
+    immediate_update_fetch: bool,
+    updates_paused: bool,
+) -> api::Result<()> {
+    let settings_dir = update_channel_settings_dir(&app)?;
+    let mut state = theseus::read_update_channel_state(&settings_dir).await?;
+    state.immediate_update_fetch = Some(immediate_update_fetch);
+    state.updates_paused = Some(updates_paused);
+    write_update_channel_state(&app, &state)
+}
+
+fn update_channel_settings_dir(app: &tauri::AppHandle) -> api::Result<PathBuf> {
+    theseus::DirectoryInfo::initial_settings_dir_path(&app.config().identifier)
+        .ok_or_else(|| {
+            theseus::Error::from(theseus::ErrorKind::FSError(
+                "Could not find update channel settings directory".to_string(),
+            ))
+            .into()
+        })
+}
+
+fn write_update_channel_state(
+    app: &tauri::AppHandle,
+    state: &theseus::UpdateChannelState,
+) -> api::Result<()> {
+    let settings_dir = update_channel_settings_dir(app)?;
+    let path = theseus::update_channel_state_file_path(&settings_dir);
+    std::fs::create_dir_all(&settings_dir)?;
+    let temporary_path = settings_dir.join("update-channel.json.tmp");
+    let contents = serde_json::to_vec(state).map_err(|error| {
+        theseus::Error::from(theseus::ErrorKind::OtherError(error.to_string()))
+    })?;
+    std::fs::write(&temporary_path, contents)?;
+    std::fs::rename(temporary_path, path)?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_release_database_to_beta(
+    app: tauri::AppHandle,
+) -> api::Result<()> {
+    theseus::copy_release_database_to_beta(&app.config().identifier).await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn copy_database_between_channels(
+    app: tauri::AppHandle,
+    source_channel: String,
+    target_channel: String,
+) -> api::Result<()> {
+    theseus::copy_database_between_channels(
+        &app.config().identifier,
+        &source_channel,
+        &target_channel,
+    )
+    .await?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn beta_database_exists(app: tauri::AppHandle) -> api::Result<bool> {
+    Ok(theseus::beta_database_exists(&app.config().identifier).await?)
+}
+
+#[tauri::command]
+async fn backup_app_db_for_update(
+    app: tauri::AppHandle,
+    version: String,
+) -> api::Result<()> {
+    theseus::backup_current_app_db_for_update(
+        &app.config().identifier,
+        &version,
+    )
+    .await?;
     Ok(())
 }
 
@@ -301,9 +457,7 @@ fn is_dev() -> bool {
 
 #[tauri::command]
 fn are_updates_enabled() -> bool {
-    cfg!(feature = "updater")
-        && env::var("MODRINTH_EXTERNAL_UPDATE_PROVIDER").is_err()
-        && !portable::is_portable_mode()
+    true
 }
 
 #[cfg(feature = "updater")]
@@ -326,6 +480,11 @@ async fn toggle_decorations(b: bool, window: tauri::Window) -> api::Result<()> {
 #[tauri::command]
 fn restart_app(app: tauri::AppHandle) {
     app.restart();
+}
+
+#[tauri::command]
+fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
 }
 
 #[tauri::command]
@@ -539,9 +698,14 @@ fn main() {
                 ));
             }
 
-            if let Some(win) = app.get_window("main") {
-                let _ = win.set_focus();
-            }
+            // A second launch must restore the launcher UI. The main window
+            // may be hidden or destroyed when the app is in lightweight mode,
+            // so focusing it is not enough (see #490).
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ =
+                    app.state::<lightweight_mode::LightweightMode>().exit(&app);
+            });
         }))
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_os::init())
@@ -645,6 +809,7 @@ fn main() {
         .plugin(api::planet_minecraft::init())
         .plugin(api::settings::init())
         .plugin(api::storage::init())
+        .plugin(api::system_accent::init())
         .plugin(api::seed_map::init())
         .plugin(api::schematic_preview::init())
         .plugin(api::shortcuts::init())
@@ -668,6 +833,15 @@ fn main() {
         .manage(PendingUpdateData::default())
         .invoke_handler(tauri::generate_handler![
             initialize_state,
+            get_update_channel,
+            get_current_app_database_path,
+            set_update_channel,
+            get_update_preferences,
+            set_update_preferences,
+            copy_release_database_to_beta,
+            copy_database_between_channels,
+            beta_database_exists,
+            backup_app_db_for_update,
             set_discord_activity,
             is_dev,
             portable::is_portable_mode,
@@ -677,15 +851,18 @@ fn main() {
             enqueue_update_for_installation,
             remove_enqueued_update,
             set_restart_after_pending_update,
+            is_apt_linux,
             toggle_decorations,
             set_transparent_window_frame,
             show_window,
             restart_app,
+            exit_app,
             check_symlink_capability,
             is_elevated,
             allow_symlink_target,
             lightweight_mode::lightweight_mode_frontend_ready,
             lightweight_mode::lightweight_mode_set_route,
+            lightweight_mode::lightweight_mode_enter,
         ]);
 
     tracing::info!("Initializing app...");
@@ -741,39 +918,50 @@ fn main() {
                             }
                         }
 
-                        let update = if should_restart {
-                            (**update).clone()
+                        let version = update.version.clone();
+                        let install_result = if is_apt_linux() {
+                            tauri::async_runtime::block_on(
+                                install_apt_package(&version, data),
+                            )
+                            .map_err(|error| error.to_string())
                         } else {
-                            (**update).clone().restart_after_install(false)
+                            let update = if should_restart {
+                                (**update).clone()
+                            } else {
+                                (**update).clone().restart_after_install(false)
+                            };
+
+                            // Persist the trigger before installing: on Windows
+                            // the updater plugin launches the NSIS installer and
+                            // exits the process via `std::process::exit(0)`
+                            // without returning, so the success path below never
+                            // runs there.
+                            #[cfg(target_os = "windows")]
+                            set_changelog_toast(Some(update.version.clone()));
+
+                            update.install(data).map_err(|error| error.to_string())
                         };
 
-                        // Persist the trigger before installing: on Windows the
-                        // updater plugin launches the NSIS installer and exits the
-                        // process via `std::process::exit(0)` without returning, so
-                        // the success path below never runs there.
-                        #[cfg(target_os = "windows")]
-                        set_changelog_toast(Some(update.version.clone()));
-
-                        match update.install(data) {
+                        match install_result {
                             Ok(()) => {
-                                set_changelog_toast(Some(update.version.clone()));
+                                set_changelog_toast(Some(version.clone()));
                                 if should_restart {
                                     tracing::info!(
                                         "Pending update installed successfully (version {}); restarting because user requested reload",
-                                        update.version
+                                        version
                                     );
                                     app.restart();
                                 } else {
                                     tracing::info!(
                                         "Pending update installed successfully (version {}); exiting without relaunch (user did not request reload)",
-                                        update.version
+                                        version
                                     );
                                 }
                             }
                             Err(e) => {
                                 tracing::error!(
                                     "Pending update install failed (version {}): {e}",
-                                    update.version
+                                    version
                                 );
                                 set_changelog_toast(None);
 

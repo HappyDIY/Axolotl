@@ -10,6 +10,12 @@ export type GameInstance = {
 	icon_path?: string
 	symlink_target?: string | null
 	game_dir_override?: string | null
+	linked_launcher?: string | null
+	linked_launcher_root?: string | null
+	linked_dot_minecraft?: string | null
+	linked_version_id?: string | null
+	linked_version_json_path?: string | null
+	linked_game_dir_mode?: 'automatic' | 'isolated' | 'shared' | null
 
 	game_version: string
 	protocol_version?: number
@@ -36,7 +42,9 @@ export type GameInstance = {
 
 	memory?: MemorySettings
 	force_fullscreen?: boolean
+	maximize_window?: boolean
 	game_resolution?: [number, number]
+	launch_preparation_timeout?: number | null
 	hooks: Hooks
 }
 
@@ -190,7 +198,7 @@ type AppSettings = {
 	max_concurrent_writes: number
 
 	theme: 'dark' | 'light' | 'oled' | 'system'
-	accent_color: 'pink' | 'orange' | 'green' | 'blue' | 'purple' | `custom:#${string}`
+	accent_color: 'pink' | 'orange' | 'green' | 'blue' | 'purple' | 'system' | `custom:#${string}`
 	default_page: 'Home' | 'DiscoverContent' | 'Library'
 	collapsed_navigation: boolean
 	advanced_rendering: boolean
@@ -205,6 +213,7 @@ type AppSettings = {
 	worlds_in_home: boolean
 	home_layout: 'standard' | 'minimal'
 	minimal_home_instance_id: string | null
+	close_behavior: 'ask' | 'close' | 'lightweight'
 	home_widgets: import('@/components/home/home-dashboard').HomeDashboardConfig | null
 
 	telemetry: boolean
@@ -219,6 +228,7 @@ type AppSettings = {
 	custom_env_vars: [string, string][]
 	memory: MemorySettings
 	force_fullscreen: boolean
+	maximize_window: boolean
 	game_resolution: [number, number]
 	hide_on_process_start: boolean
 	enter_lightweight_mode_on_game_launch: boolean

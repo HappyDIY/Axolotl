@@ -619,7 +619,9 @@ where
         custom_env_vars: input.custom_env_vars,
         memory: input.memory,
         force_fullscreen: input.force_fullscreen,
+        maximize_window: None,
         game_resolution: input.game_resolution,
+        launch_preparation_timeout: None,
         hooks: input.hooks,
     };
     let launch_overrides_data = serde_json::to_string(

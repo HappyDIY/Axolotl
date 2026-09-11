@@ -4,7 +4,7 @@ use std::{
 };
 
 use daedalus::minecraft::{
-    AssetsIndex, DownloadType, LoggingConfiguration, LoggingSide,
+    AssetsIndex, DownloadType, Library, LoggingConfiguration, LoggingSide,
     VersionInfo as GameVersionInfo,
 };
 use dashmap::DashMap;
@@ -15,9 +15,10 @@ use tokio_util::sync::CancellationToken;
 use crate::instance::QuickPlayType;
 use crate::launcher::download::{
     ArtifactAvailability, LocalRuntimeSource, classify_local_artifact,
-    legacy_library_sha1, local_asset_index_path, local_asset_object_path,
-    local_client_path, local_library_path, local_log_config_path,
-    local_native_library_path,
+    is_native_library, legacy_library_sha1, library_native_classifier,
+    local_asset_index_path, local_asset_object_path, local_client_path,
+    local_library_path, local_log_config_path, local_native_library_path,
+    native_library_artifact_path, needs_java_artifact,
 };
 use crate::launcher::parse_rules;
 use crate::state::{ModLoader, State};
@@ -148,7 +149,7 @@ async fn run_import_plan(
         return Ok(());
     }
 
-    let source = resolve_source(request);
+    let source = resolve_source(request)?;
     let import_path = source.to_string_lossy().to_string();
     let dotminecraft = if source.join(".minecraft").is_dir() {
         source.join(".minecraft")
@@ -338,6 +339,15 @@ struct RequiredArtifact {
     expected_size: Option<u64>,
 }
 
+fn library_classifier_coordinate_is_native(library: &Library) -> bool {
+    library
+        .name
+        .split(':')
+        .nth(3)
+        .and_then(|classifier| classifier.split('@').next())
+        .is_some_and(|classifier| classifier.starts_with("natives-"))
+}
+
 fn snapshot_for(
     request: &ImportPlanRequest,
     stage: ImportPlanStage,
@@ -368,41 +378,22 @@ fn snapshot_for(
     }
 }
 
-fn resolve_source(request: &ImportPlanRequest) -> PathBuf {
-    if let Some(instance_path) = &request.instance_path {
-        return PathBuf::from(instance_path);
+fn resolve_source(request: &ImportPlanRequest) -> crate::Result<PathBuf> {
+    let Some(instance_path) = &request.instance_path else {
+        return Err(crate::ErrorKind::InputError(
+            "Import source path is required".to_string(),
+        )
+        .into());
+    };
+    let source = PathBuf::from(instance_path);
+    if !source.is_dir() {
+        return Err(crate::ErrorKind::InputError(format!(
+            "Import source path does not exist: {}",
+            source.display()
+        ))
+        .into());
     }
-
-    if let Some(rest) = request.instance_folder.strip_prefix("versions/") {
-        return request.base_path.join("versions").join(rest);
-    }
-
-    if request
-        .base_path
-        .file_name()
-        .map(|name| name.to_string_lossy().to_string())
-        .as_deref()
-        == Some(request.instance_folder.as_str())
-    {
-        return request.base_path.clone();
-    }
-
-    match request.launcher_type {
-        crate::api::pack::import::ImportLauncherType::Curseforge => request
-            .base_path
-            .join("Instances")
-            .join(&request.instance_folder),
-        crate::api::pack::import::ImportLauncherType::GDLauncher => request
-            .base_path
-            .join("instances")
-            .join(&request.instance_folder),
-        crate::api::pack::import::ImportLauncherType::Axolotl
-            if request.base_path.join("axolotl_config.json").is_file() =>
-        {
-            request.base_path.clone()
-        }
-        _ => request.base_path.join(&request.instance_folder),
-    }
+    Ok(source)
 }
 
 fn detect_import_plan_info(
@@ -728,47 +719,84 @@ fn library_artifacts(
             continue;
         }
 
-        if let Some((os_key, classifiers)) =
-            library.natives_os_key_and_classifiers(java_arch)
-        {
-            let parsed_key =
-                os_key.replace("${arch}", crate::util::platform::ARCH_WIDTH);
-            if let Some(native) = classifiers.get(&parsed_key) {
-                natives.push(RequiredArtifact {
-                    relative_path: local_native_library_path(
-                        library,
-                        native,
-                        &parsed_key,
-                    )?,
-                    destination: state
-                        .directories
-                        .caches_dir()
-                        .join("minecraft-natives")
-                        .join(format!("{}.jar", native.sha1)),
-                    expected_sha1: Some(native.sha1.clone()),
-                    expected_size: Some(native.size as u64),
-                });
+        // Native library artifact for this platform, if any.
+        if is_native_library(library) {
+            if let Some(classifier) =
+                library_native_classifier(library, java_arch)
+            {
+                let native = library
+                    .downloads
+                    .as_ref()
+                    .and_then(|downloads| downloads.classifiers.as_ref())
+                    .and_then(|classifiers| classifiers.get(&classifier));
+                if let Some(native) = native {
+                    natives.push(RequiredArtifact {
+                        relative_path: local_native_library_path(
+                            library,
+                            native,
+                            &classifier,
+                        )?,
+                        destination: state
+                            .directories
+                            .caches_dir()
+                            .join("minecraft-natives")
+                            .join(format!("{}.jar", native.sha1)),
+                        expected_sha1: Some(native.sha1.clone()),
+                        expected_size: Some(native.size as u64),
+                    });
+                } else if library_classifier_coordinate_is_native(library) {
+                    // Forge and newer manifests may represent a native as a
+                    // four-part coordinate (group:artifact:version:natives-*),
+                    // with its metadata in downloads.artifact rather than the
+                    // legacy downloads.classifiers map. Keep that artifact in
+                    // libraries/ so native preparation can consume it directly.
+                    if let Some(artifact) = library
+                        .downloads
+                        .as_ref()
+                        .and_then(|downloads| downloads.artifact.as_ref())
+                        .filter(|artifact| !artifact.url.is_empty())
+                    {
+                        let artifact_path =
+                            native_library_artifact_path(library, &classifier)?;
+                        natives.push(RequiredArtifact {
+                            relative_path: Path::new("libraries")
+                                .join(&artifact_path),
+                            destination: state
+                                .directories
+                                .libraries_dir()
+                                .join(&artifact_path),
+                            expected_sha1: Some(artifact.sha1.clone()),
+                            expected_size: Some(artifact.size as u64),
+                        });
+                    }
+                }
             }
-            continue;
         }
 
-        let artifact_path = daedalus::get_path_from_artifact(&library.name)?;
-        let (expected_sha1, expected_size) = if let Some(artifact) = library
-            .downloads
-            .as_ref()
-            .and_then(|downloads| downloads.artifact.as_ref())
-            .filter(|artifact| !artifact.url.is_empty())
-        {
-            (Some(artifact.sha1.clone()), Some(artifact.size as u64))
-        } else {
-            (legacy_library_sha1(library).map(str::to_string), None)
-        };
-        libraries.push(RequiredArtifact {
-            relative_path: local_library_path(&library.name)?,
-            destination: state.directories.libraries_dir().join(&artifact_path),
-            expected_sha1,
-            expected_size,
-        });
+        // Java artifact (regular JAR). Mixed libraries carry both.
+        if needs_java_artifact(library) {
+            let artifact_path =
+                daedalus::get_path_from_artifact(&library.name)?;
+            let (expected_sha1, expected_size) = if let Some(artifact) = library
+                .downloads
+                .as_ref()
+                .and_then(|downloads| downloads.artifact.as_ref())
+                .filter(|artifact| !artifact.url.is_empty())
+            {
+                (Some(artifact.sha1.clone()), Some(artifact.size as u64))
+            } else {
+                (legacy_library_sha1(library).map(str::to_string), None)
+            };
+            libraries.push(RequiredArtifact {
+                relative_path: local_library_path(&library.name)?,
+                destination: state
+                    .directories
+                    .libraries_dir()
+                    .join(&artifact_path),
+                expected_sha1,
+                expected_size,
+            });
+        }
     }
 
     Ok((libraries, natives))

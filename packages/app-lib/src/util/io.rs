@@ -545,26 +545,30 @@ pub async fn copy(
     from: impl AsRef<std::path::Path>,
     to: impl AsRef<std::path::Path>,
 ) -> Result<u64, IOError> {
-    let from: &Path = from.as_ref();
-    let to = to.as_ref();
+    let from = from.as_ref().to_path_buf();
+    let to = to.as_ref().to_path_buf();
 
     // Never follow symlinks / reparse points — recreate the link at the
     // destination instead of copying the target's content.
-    let meta = tokio::fs::symlink_metadata(from)
+    let meta = tokio::fs::symlink_metadata(&from)
         .await
-        .map_err(|e| io_error_with_lock_info(e, from))?;
+        .map_err(|e| io_error_with_lock_info(e, &from))?;
 
     if is_symlink_or_reparse(&meta) {
-        let target = tokio::fs::read_link(from)
+        let target = tokio::fs::read_link(&from)
             .await
-            .map_err(|e| io_error_with_lock_info(e, from))?;
-        create_symlink(&target, to).await?;
+            .map_err(|e| io_error_with_lock_info(e, &from))?;
+        create_symlink(&target, &to).await?;
         return Ok(0);
     }
 
-    tokio::fs::copy(from, to)
-        .await
-        .map_err(|e| io_error_with_lock_info(e, from))
+    retry_windows_sharing_violation(&to, "copying", || {
+        let from = from.clone();
+        let to = to.clone();
+        async move { tokio::fs::copy(from, to).await }
+    })
+    .await
+    .map_err(|e| io_error_with_lock_info(e, &from))
 }
 
 /// Recursively copy a directory from `from` to `to`.

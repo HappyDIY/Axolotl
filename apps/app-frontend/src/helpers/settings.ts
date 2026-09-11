@@ -42,7 +42,11 @@ Memorysettings {
 
 */
 
-export type UpdateSource = 'miawa' | 'cnb' | 'github'
+export type UpdateChannel = 'release' | 'beta'
+export type UpdatePreferences = {
+	immediateUpdateFetch: boolean
+	updatesPaused: boolean
+}
 export type DownloadSourceMode =
 	| 'auto'
 	| 'official_only'
@@ -63,17 +67,40 @@ export type ProxyTestResult = {
 	message: string
 }
 
-const UPDATE_SOURCE_STORAGE_KEY = 'axolotl-update-source-v2'
-
-export function getUpdateSource(): UpdateSource {
-	const value = localStorage.getItem(UPDATE_SOURCE_STORAGE_KEY)
-	if (value === 'cnb') return 'cnb'
-	if (value === 'github' || value === 'official') return 'github'
-	return 'miawa'
+export async function getUpdateChannel(): Promise<UpdateChannel> {
+	const channel = await invoke<string>('get_update_channel')
+	return channel === 'beta' ? 'beta' : 'release'
 }
 
-export function setUpdateSource(source: UpdateSource) {
-	localStorage.setItem(UPDATE_SOURCE_STORAGE_KEY, source)
+export async function setUpdateChannel(channel: UpdateChannel): Promise<void> {
+	await invoke('set_update_channel', { channel })
+}
+
+export async function copyReleaseDatabaseToBeta(): Promise<void> {
+	await invoke('copy_release_database_to_beta')
+}
+
+export async function betaDatabaseExists(): Promise<boolean> {
+	return await invoke('beta_database_exists')
+}
+
+export async function getCurrentAppDatabasePath(): Promise<string> {
+	return await invoke('get_current_app_database_path')
+}
+
+export async function copyDatabaseBetweenChannels(
+	sourceChannel: UpdateChannel,
+	targetChannel: UpdateChannel,
+): Promise<void> {
+	await invoke('copy_database_between_channels', { sourceChannel, targetChannel })
+}
+
+export async function getUpdatePreferences(): Promise<UpdatePreferences> {
+	return await invoke('get_update_preferences')
+}
+
+export async function setUpdatePreferences(preferences: UpdatePreferences): Promise<void> {
+	await invoke('set_update_preferences', preferences)
 }
 
 export type BrowseContentSource =
@@ -144,6 +171,7 @@ export type AppSettings = {
 	auto_hide_downloads_button: boolean
 	home_layout: HomeLayout
 	minimal_home_instance_id: string | null
+	close_behavior: 'ask' | 'close' | 'lightweight'
 	home_widgets: HomeDashboardConfig | null
 	terracotta_public_nodes: string[]
 
@@ -158,6 +186,7 @@ export type AppSettings = {
 	custom_env_vars: [string, string][]
 	memory: MemorySettings
 	force_fullscreen: boolean
+	maximize_window: boolean
 	game_resolution: [number, number]
 	hide_on_process_start: boolean
 	enter_lightweight_mode_on_game_launch: boolean
@@ -191,6 +220,7 @@ type LegacyMirrorSettings = {
 }
 
 function normalizeDownloadSettings(settings: AppSettings & LegacyMirrorSettings): AppSettings {
+	settings.close_behavior ??= 'ask'
 	const hasLegacySettings =
 		typeof settings.use_minecraft_mirror === 'boolean' &&
 		typeof settings.use_modrinth_mirror === 'boolean' &&

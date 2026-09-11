@@ -1,5 +1,11 @@
 <template>
-	<NewModal ref="modal" max-width="560px" :closable="true" @hide="emit('cancel')">
+	<NewModal
+		ref="modal"
+		max-width="560px"
+		:closable="true"
+		:close-on-click-outside="true"
+		:on-hide="() => emit('cancel')"
+	>
 		<template #title>
 			<span class="text-contrast">{{
 				formatMessage(messages.title, { type: contentTypeLabel })

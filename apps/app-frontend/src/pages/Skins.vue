@@ -32,8 +32,7 @@ import type AccountsCard from '@/components/ui/AccountsCard.vue'
 import EditSkinModal from '@/components/ui/skin/EditSkinModal.vue'
 import VirtualSkinSectionList from '@/components/ui/skin/VirtualSkinSectionList.vue'
 import { useNetworkStatus } from '@/composables/useNetworkStatus'
-import { trackEvent } from '@/helpers/analytics'
-import { check_reachable, get_default_user, login as login_flow, users } from '@/helpers/auth'
+import { check_reachable, get_default_user, users } from '@/helpers/auth'
 import type { RenderResult } from '@/helpers/rendering/batch-skin-renderer.ts'
 import { skinBlobUrlMap } from '@/helpers/rendering/batch-skin-renderer.ts'
 import type { Cape, Skin, SkinTextureUrl } from '@/helpers/skins.ts'
@@ -51,7 +50,6 @@ import {
 	save_custom_skin,
 	set_custom_skin_order,
 } from '@/helpers/skins.ts'
-import { handleSevereError } from '@/store/error'
 import { useTheming } from '@/store/state'
 
 async function generateSkinPreviews(skins: Skin[], capes: Cape[]) {
@@ -225,6 +223,7 @@ const capes = ref<Cape[]>([])
 const { browserOffline, offline, setNetworkReachable } = useNetworkStatus()
 
 const accountsCard = inject('accountsCard') as Ref<typeof AccountsCard>
+const accountChangeRevision = computed(() => accountsCard.value?.accountChangeRevision)
 const currentUser = ref(undefined)
 const currentUserId = ref<string | undefined>(undefined)
 const currentAccountType = ref<'microsoft' | 'offline' | 'yggdrasil' | undefined>(undefined)
@@ -784,6 +783,17 @@ async function loadCurrentUser() {
 	}
 }
 
+async function refreshSelectedAccount() {
+	await loadCurrentUser()
+	await loadCapes()
+	await loadSkins()
+}
+
+watch(accountChangeRevision, (revision, previousRevision) => {
+	if (revision === undefined || previousRevision === undefined) return
+	void refreshSelectedAccount()
+})
+
 function getBakedSkinTextures(skin: Skin): RenderResult | undefined {
 	const key = `${skin.texture_key}+${skin.variant}+${skin.cape_id ?? 'no-cape'}`
 	return skinBlobUrlMap.get(key)
@@ -791,16 +801,7 @@ function getBakedSkinTextures(skin: Skin): RenderResult | undefined {
 
 async function login() {
 	if (offline.value) return
-
-	accountsCard.value.setLoginDisabled(true)
-	const loggedIn = await login_flow().catch(handleSevereError)
-
-	if (loggedIn && accountsCard) {
-		await accountsCard.value.refreshValues()
-	}
-
-	trackEvent('AccountLogIn')
-	accountsCard.value.setLoginDisabled(false)
+	accountsCard.value?.login()
 }
 
 function openAddSkinFileBrowser() {
@@ -986,9 +987,7 @@ async function checkUserChanges() {
 	try {
 		const defaultId = await get_default_user(offline.value)
 		if (defaultId !== currentUserId.value) {
-			await loadCurrentUser()
-			await loadCapes()
-			await loadSkins()
+			await refreshSelectedAccount()
 		}
 	} catch (error) {
 		if (currentUser.value && error instanceof Error) {

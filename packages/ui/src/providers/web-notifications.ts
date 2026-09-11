@@ -2,6 +2,7 @@ import { createContext } from '.'
 
 export interface WebNotification {
 	id: string | number
+	createdAt?: number
 	title?: string
 	text?: string
 	type?: 'error' | 'warning' | 'success' | 'info'
@@ -9,6 +10,8 @@ export interface WebNotification {
 	count?: number
 	autoCloseMs?: number | null // null means do not dismiss automatically
 	timer?: NodeJS.Timeout
+	/** Hidden from the toast stack but retained in notification history. */
+	collapsed?: boolean
 	supportData?: Record<string, unknown>
 }
 
@@ -16,6 +19,7 @@ export type NotificationPanelLocation = 'left' | 'right'
 
 export abstract class AbstractWebNotificationManager {
 	protected readonly DEFAULT_AUTO_DISMISS_DELAY_MS = 30 * 1000
+	private lastGeneratedNotificationId = 0
 
 	abstract getNotifications(): WebNotification[]
 	abstract getNotificationLocation(): NotificationPanelLocation
@@ -30,6 +34,8 @@ export abstract class AbstractWebNotificationManager {
 		const existingNotif = this.findExistingNotification(notification)
 
 		if (existingNotif) {
+			existingNotif.createdAt = Date.now()
+			existingNotif.collapsed = false
 			this.refreshNotificationTimer(existingNotif)
 			existingNotif.count = (existingNotif.count || 0) + 1
 			return existingNotif
@@ -101,8 +107,24 @@ export abstract class AbstractWebNotificationManager {
 		const delay = notification.autoCloseMs ?? this.DEFAULT_AUTO_DISMISS_DELAY_MS
 
 		notification.timer = setTimeout(() => {
-			this.removeNotification(notification.id)
+			this.collapseNotification(notification.id)
 		}, delay)
+	}
+
+	collapseNotification = (id: string | number): void => {
+		const notification = this.getNotifications().find((n) => n.id === id)
+		if (notification) {
+			this.clearNotificationTimer(notification)
+			notification.collapsed = true
+		}
+	}
+
+	expandNotification = (id: string | number): void => {
+		const notification = this.getNotifications().find((n) => n.id === id)
+		if (notification) {
+			notification.collapsed = false
+			this.setNotificationTimer(notification)
+		}
 	}
 
 	stopNotificationTimer = (notification: WebNotification): void => {
@@ -132,9 +154,16 @@ export abstract class AbstractWebNotificationManager {
 	}
 
 	private createNotification(notification: Partial<WebNotification>): WebNotification {
+		// Notifications can be created in the same millisecond. Keep generated
+		// ids unique so dismissing one item never targets its siblings.
+		const now = Date.now()
+		const id = Math.max(now, this.lastGeneratedNotificationId + 1)
+		this.lastGeneratedNotificationId = id
+
 		return {
 			...notification,
-			id: new Date().getTime(),
+			id,
+			createdAt: Date.now(),
 			count: 1,
 		} as WebNotification
 	}

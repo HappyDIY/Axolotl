@@ -14,13 +14,13 @@ import {
 
 test('consumes a matching browse snapshot only once', () => {
 	const url = '/browse/mod?m=100&o=100'
-	saveBrowseReturnSnapshot({ url, scrollTop: 480, state: { hits: ['a'] } })
+	saveBrowseReturnSnapshot({ url, scrollTop: 480, state: { currentPage: 2, hits: ['a'] } })
 	assert.equal(prepareBrowseReturnNavigation(url, '/project/sodium'), true)
 
 	assert.deepEqual(consumeBrowseReturnSnapshot(url), {
 		url,
 		scrollTop: 480,
-		state: { hits: ['a'] },
+		state: { currentPage: 2, hits: ['a'] },
 	})
 	assert.equal(consumeBrowseReturnSnapshot(url), null)
 	assert.equal(isBrowseReturnNavigation(url), true)
@@ -34,6 +34,13 @@ test('does not consume a snapshot for a different browse URL', () => {
 	assert.equal(consumeBrowseReturnSnapshot('/browse/mod?page=3'), null)
 	assert.equal(hasBrowseReturnSnapshot('/browse/mod?page=2'), true)
 	clearBrowseReturnSnapshot()
+})
+
+test('consumes a matching snapshot without a route guard marker', () => {
+	const url = '/browse/mod?source=modrinth'
+	saveBrowseReturnSnapshot({ url, scrollTop: 480, state: {} })
+
+	assert.deepEqual(consumeBrowseReturnSnapshot(url), { url, scrollTop: 480, state: {} })
 })
 
 test('clears snapshots for ordinary Browse navigation', () => {

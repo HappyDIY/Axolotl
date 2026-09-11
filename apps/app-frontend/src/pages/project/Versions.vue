@@ -30,6 +30,7 @@
 						<CheckIcon v-else />
 					</button>
 				</ButtonStyled>
+				<!-- 开服功能暂有问题，隐藏该按钮
 				<ButtonStyled v-if="serverCapable && startServer" circular type="transparent">
 					<button
 						v-tooltip="formatMessage(messages.startServer)"
@@ -38,6 +39,7 @@
 						<ServerIcon />
 					</button>
 				</ButtonStyled>
+				-->
 				<ButtonStyled circular type="transparent">
 					<OverflowMenu
 						v-if="false"

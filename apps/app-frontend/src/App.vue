@@ -27,6 +27,7 @@ import {
 	Avatar,
 	BigOptionButton,
 	ButtonStyled,
+	Checkbox,
 	clientInstallableLoaders,
 	commonMessages,
 	ContentInstallModal,
@@ -56,6 +57,7 @@ import SymlinkMethodCards from '@modrinth/ui/src/components/flows/drop/SymlinkMe
 import { useQuery } from '@tanstack/vue-query'
 import { getVersion } from '@tauri-apps/api/app'
 import { convertFileSrc, invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
 import { Effect, getCurrentWindow } from '@tauri-apps/api/window'
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -84,6 +86,7 @@ import InstallToPlayModal from '@/components/ui/modal/InstallToPlayModal.vue'
 import InstanceIconPickerModal from '@/components/ui/modal/InstanceIconPickerModal.vue'
 import JavaDownloadConfirmationModal from '@/components/ui/modal/JavaDownloadConfirmationModal.vue'
 import ModpackAlreadyInstalledModal from '@/components/ui/modal/ModpackAlreadyInstalledModal.vue'
+import ModpackInstallModal from '@/components/ui/modal/ModpackInstallModal.vue'
 import PrivacyConsentModal from '@/components/ui/modal/PrivacyConsentModal.vue'
 import SurveyAnnouncementModal from '@/components/ui/modal/SurveyAnnouncementModal.vue'
 import UpdateToPlayModal from '@/components/ui/modal/UpdateToPlayModal.vue'
@@ -91,6 +94,7 @@ import NavButton from '@/components/ui/NavButton.vue'
 import NavRail from '@/components/ui/NavRail.vue'
 import OnboardingOverlay from '@/components/ui/onboarding/OnboardingOverlay.vue'
 import QuickInstanceSwitcher from '@/components/ui/QuickInstanceSwitcher.vue'
+import RemoteAnnouncements from '@/components/ui/RemoteAnnouncements.vue'
 import SplashScreen from '@/components/ui/SplashScreen.vue'
 import WindowControls from '@/components/ui/WindowControls.vue'
 import { useCheckDisableMouseover } from '@/composables/macCssFix.js'
@@ -102,6 +106,7 @@ import { trackEvent } from '@/helpers/analytics'
 import { check_reachable } from '@/helpers/auth.js'
 import { get_user, get_version } from '@/helpers/cache.js'
 import { configureCurseForgeManualDownloadWatcher } from '@/helpers/curseforge'
+import { DIRECT_LINKS_SYNCED_EVENT, syncConfiguredDirectLinks } from '@/helpers/direct-link-sync'
 import { getMissingContentScannerSettings } from '@/helpers/downloads-scanner'
 import { classifyDroppedItem } from '@/helpers/drop'
 import {
@@ -111,7 +116,7 @@ import {
 	warning_listener,
 } from '@/helpers/events.js'
 import { install_create_modpack_instance, install_get_modpack_preview } from '@/helpers/install'
-import { get as getInstance, run } from '@/helpers/instance'
+import { type DirectLinkSyncReport, get as getInstance, run } from '@/helpers/instance'
 import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
@@ -119,7 +124,8 @@ import {
 	get as getSettings,
 	getLastBrowseContentProjectType,
 	getPrivacySettings,
-	getUpdateSource,
+	getUpdateChannel,
+	getUpdatePreferences,
 	isBrowseContentProjectType,
 	type PrivacySettings,
 	savePrivacySettings,
@@ -129,6 +135,7 @@ import { getSidebarExpanded, setSidebarExpanded } from '@/helpers/sidebar-state.
 import { get_opening_command, initialize_state, set_discord_activity } from '@/helpers/state'
 import {
 	areUpdatesEnabled,
+	backupAppDbForUpdate,
 	checkAppUpdate,
 	enqueueUpdateForInstallation,
 	exportErrorLogs,
@@ -137,6 +144,7 @@ import {
 	isDev,
 	isElevated,
 	isNetworkMetered,
+	restartApp,
 	setRestartAfterPendingUpdate,
 } from '@/helpers/utils.js'
 import { start_join_server, start_join_singleplayer_world } from '@/helpers/worlds.ts'
@@ -203,13 +211,6 @@ const APP_SIDEBAR_WIDTH = 300
 const credentials = ref()
 const sidebarToggled = ref(getSidebarExpanded())
 
-function collapseSidebar() {
-	if (!sidebarToggled.value) return
-
-	sidebarToggled.value = false
-	setSidebarExpanded(false)
-}
-
 function toggleSidebar() {
 	sidebarToggled.value = !sidebarToggled.value
 	setSidebarExpanded(sidebarToggled.value)
@@ -218,7 +219,10 @@ function toggleSidebar() {
 const forceSidebar = computed(
 	() => route.path.startsWith('/browse') || route.path.startsWith('/project'),
 )
-const sidebarVisible = computed(() => sidebarToggled.value || forceSidebar.value)
+const forceSidebarHidden = computed(() => route.path === '/settings')
+const sidebarVisible = computed(
+	() => !forceSidebarHidden.value && (sidebarToggled.value || forceSidebar.value),
+)
 const customBackgroundStyle = computed(() => {
 	// A custom image would sit between the desktop and the UI, defeating the
 	// transparent window entirely, so the two are mutually exclusive.
@@ -248,6 +252,14 @@ providePopupNotificationManager(popupNotificationManager)
 const { addPopupNotification } = popupNotificationManager
 
 const appVersion = getVersion()
+const isBetaBuild = ref(false)
+void appVersion
+	.then((version) => {
+		isBetaBuild.value = version.includes('-beta')
+	})
+	.catch((error) => {
+		console.warn('Failed to read the app version for the Beta label', error)
+	})
 const tauriApiClient = new TauriModrinthClient({
 	userAgent: async () => AxolotlBrandConfig.userAgent(await appVersion, await getOsType()),
 	labrinthBaseUrl: config.labrinthBaseUrl,
@@ -366,6 +378,16 @@ const privacyConsentPending = ref(false)
 const communityAnnouncementModal = ref()
 const surveyModal = ref()
 const updateAnnouncementModal = ref()
+const closeChoiceModal = ref<InstanceType<typeof NewModal>>()
+const closeChoiceOpen = ref(false)
+const closeChoiceRemember = ref(false)
+const closeRequestInProgress = ref(false)
+let allowWindowClose = false
+let unlistenCloseRequested: (() => void) | undefined
+let unlistenLightweightModeError: (() => void) | undefined
+let unlistenSystemAccentColor: (() => void) | undefined
+let maximizedStateTimer: ReturnType<typeof setTimeout> | undefined
+let unlistenWindowResize: (() => void) | undefined
 const minecraftCrashModal = ref()
 const javaDownloadConfirmationModal = ref()
 const pendingUpdateAnnouncementVersion = ref(null)
@@ -415,6 +437,7 @@ const {
 	availableUpdate,
 	updateSize,
 	updatesEnabled,
+	updatesPaused,
 } = appUpdateState
 let delayedUpdatePopupTimeout = null
 
@@ -427,6 +450,11 @@ async function checkUpdates() {
 	}
 
 	updatesEnabled.value = true
+	updatesPaused.value = (await getUpdatePreferences()).updatesPaused
+	if (updatesPaused.value) {
+		setTimeout(checkUpdates, 5 * 60 * 1000)
+		return
+	}
 	if (!offline.value) {
 		await performUpdateCheck().catch((error) => {
 			console.warn('Failed to check for launcher updates', error)
@@ -440,20 +468,126 @@ async function checkUpdates() {
 	)
 }
 
+/**
+ * Keep browser/webview shortcuts from escaping the launcher UI. F12 remains
+ * available when the in-app developer mode is enabled so development tools
+ * can still be opened intentionally.
+ */
+function handleGlobalKeydown(event: KeyboardEvent) {
+	const key = event.key.toLowerCase()
+	const isFindShortcut = key === 'f' && (event.ctrlKey || event.metaKey)
+	const isBlockedDevtoolsShortcut = event.key === 'F12' && !themeStore.devMode
+
+	if (isFindShortcut || isBlockedDevtoolsShortcut) {
+		event.preventDefault()
+		event.stopPropagation()
+	}
+}
+
 onMounted(async () => {
+	unlistenLightweightModeError = await listen<string>('lightweight-mode-error', ({ payload }) => {
+		allowWindowClose = false
+		closeRequestInProgress.value = false
+		if (!closeChoiceOpen.value) {
+			closeChoiceOpen.value = true
+			closeChoiceRemember.value = false
+			closeChoiceModal.value?.show()
+		}
+		handleError(payload)
+	})
 	await useCheckDisableMouseover()
 
+	window.addEventListener('keydown', handleGlobalKeydown, true)
+	unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
 	document.querySelector('body').addEventListener('click', handleClick)
 	document.querySelector('body').addEventListener('auxclick', handleAuxClick)
+	window.addEventListener(DIRECT_LINKS_SYNCED_EVENT, handleDirectLinkSyncReport)
 
 	checkUpdates()
 	void warnIfRunningElevated()
+	startDirectLinkSync()
 })
 
+let directLinkSync: (() => Promise<void>) | undefined
+let stopDirectLinkSync: (() => void) | undefined
+let directLinkSyncErrorSignature = ''
+
+function handleDirectLinkSyncReport(event: Event) {
+	if (!(event instanceof CustomEvent)) return
+	const report = event.detail as DirectLinkSyncReport
+	if (!Array.isArray(report?.errors)) return
+
+	const details = report.errors.join('\n')
+	if (!details) {
+		directLinkSyncErrorSignature = ''
+		return
+	}
+	if (details === directLinkSyncErrorSignature) return
+
+	directLinkSyncErrorSignature = details
+	addNotification({
+		title: formatMessage(messages.directLinkSyncIssuesTitle),
+		text: details,
+		type: 'warning',
+	})
+}
+
+function startDirectLinkSync() {
+	const readRoots = () => {
+		try {
+			const parsed = JSON.parse(localStorage.getItem('axolotl-minecraft-directories') ?? '[]')
+			return Array.isArray(parsed)
+				? parsed.flatMap((value) => {
+						if (typeof value === 'string' && value.trim()) {
+							return [{ path: value, mode: 'isolated' as const }]
+						}
+						if (
+							value &&
+							typeof value === 'object' &&
+							typeof value.path === 'string' &&
+							value.path.trim()
+						) {
+							return [
+								{
+									path: value.path,
+									mode: value.mode === 'shared' ? ('shared' as const) : ('isolated' as const),
+								},
+							]
+						}
+						return []
+					})
+				: []
+		} catch {
+			return []
+		}
+	}
+	const sync = () => syncConfiguredDirectLinks(readRoots()).catch(handleError)
+	const handleWindowFocus = () => {
+		void sync()
+	}
+
+	directLinkSync = sync
+	window.addEventListener('focus', handleWindowFocus)
+	void sync()
+	stopDirectLinkSync = () => {
+		window.removeEventListener('focus', handleWindowFocus)
+		if (directLinkSync === sync) directLinkSync = undefined
+		if (stopDirectLinkSync) stopDirectLinkSync = undefined
+	}
+}
+
 onUnmounted(async () => {
+	if (maximizedStateTimer) clearTimeout(maximizedStateTimer)
+	unlistenWindowResize?.()
+	window.removeEventListener('keydown', handleGlobalKeydown, true)
+	unlistenCloseRequested?.()
+	unlistenLightweightModeError?.()
+	unlistenSystemAccentColor?.()
 	document.querySelector('body').removeEventListener('click', handleClick)
 	document.querySelector('body').removeEventListener('auxclick', handleAuxClick)
+	window.removeEventListener(DIRECT_LINKS_SYNCED_EVENT, handleDirectLinkSyncReport)
 	clearDelayedUpdatePopup()
+	stopDirectLinkSync?.()
 	await unlistenUpdateDownload?.()
 	downloadManager.dispose()
 })
@@ -554,6 +688,10 @@ const messages = defineMessages({
 		id: 'app.update.complete-toast.text',
 		defaultMessage: 'Click here to view the changelog.',
 	},
+	directLinkSyncIssuesTitle: {
+		id: 'app.direct-link-sync.issues-title',
+		defaultMessage: 'External Minecraft instances need attention',
+	},
 	authUnreachableHeader: {
 		id: 'app.auth-servers.unreachable.header',
 		defaultMessage: 'Cannot reach authentication servers',
@@ -571,6 +709,26 @@ const messages = defineMessages({
 	restarting: {
 		id: 'app.restarting',
 		defaultMessage: 'Restarting...',
+	},
+	closeLauncherTitle: {
+		id: 'app.close-launcher.title',
+		defaultMessage: 'Choose how to close Axolotl Launcher',
+	},
+	closeLauncherDirect: {
+		id: 'app.close-launcher.direct',
+		defaultMessage: 'Close directly',
+	},
+	closeLauncherTray: {
+		id: 'app.close-launcher.tray',
+		defaultMessage: 'Hide to tray',
+	},
+	closeLauncherRemember: {
+		id: 'app.close-launcher.remember',
+		defaultMessage: 'Remember my choice',
+	},
+	betaBuild: {
+		id: 'app.build.beta',
+		defaultMessage: 'Beta',
 	},
 	home: {
 		id: 'app.navigation.home',
@@ -921,6 +1079,7 @@ async function setupApp() {
 		auto_hide_downloads_button,
 		home_layout,
 		minimal_home_instance_id,
+		close_behavior,
 		developer_mode,
 		feature_flags,
 		pending_update_toast_for_version,
@@ -957,6 +1116,7 @@ async function setupApp() {
 	if (os.value !== 'MacOS') await getCurrentWindow().setDecorations(native_decorations)
 
 	themeStore.setThemeState(theme)
+	await initializeSystemAccentColor()
 	themeStore.setAccentColor(accent_color)
 	themeStore.collapsedNavigation = collapsed_navigation
 	themeStore.advancedRendering = advanced_rendering
@@ -975,6 +1135,7 @@ async function setupApp() {
 	themeStore.autoHideDownloadsButton = auto_hide_downloads_button
 	themeStore.homeLayout = home_layout
 	themeStore.minimalHomeInstanceId = minimal_home_instance_id
+	themeStore.closeBehavior = close_behavior
 	themeStore.devMode = developer_mode
 	themeStore.featureFlags = feature_flags
 	stateInitialized.value = true
@@ -992,11 +1153,37 @@ async function setupApp() {
 
 	isMaximized.value = await getCurrentWindow().isMaximized()
 
-	await getCurrentWindow().onResized(async () => {
-		isMaximized.value = await getCurrentWindow().isMaximized()
+	unlistenWindowResize = await getCurrentWindow().onResized(() => {
+		// Display mode/DPI changes can emit a burst of resize events. Coalesce
+		// them so WebView2 does not receive one IPC request per event.
+		if (maximizedStateTimer) clearTimeout(maximizedStateTimer)
+		maximizedStateTimer = setTimeout(async () => {
+			maximizedStateTimer = undefined
+			try {
+				isMaximized.value = await getCurrentWindow().isMaximized()
+			} catch (error) {
+				console.warn('Failed to refresh maximized state after resize', error)
+			}
+		}, 100)
 	})
 
-	if (!dev) document.addEventListener('contextmenu', (event) => event.preventDefault())
+	if (!dev) {
+		document.addEventListener('contextmenu', (event) => {
+			// Keep the launcher's custom context-menu behavior for regular content,
+			// but let native editing controls and selected text expose copy/paste actions.
+			const target = event.target
+			const hasSelectedText = window.getSelection()?.toString().length > 0
+			if (
+				target instanceof HTMLInputElement ||
+				target instanceof HTMLTextAreaElement ||
+				(target instanceof HTMLElement && target.isContentEditable) ||
+				hasSelectedText
+			) {
+				return
+			}
+			event.preventDefault()
+		})
+	}
 
 	const osType = await getOsType()
 	if (osType === 'macos') {
@@ -1041,6 +1228,32 @@ async function setupApp() {
 		generateSkinPreviews(skins, capes)
 	} catch (error) {
 		console.warn('Failed to generate skin previews in app setup.', error)
+	}
+}
+
+type SystemAccentColorPayload = {
+	hex: string
+	r: number
+	g: number
+	b: number
+}
+
+async function initializeSystemAccentColor() {
+	try {
+		unlistenSystemAccentColor = await listen<SystemAccentColorPayload>(
+			'system-accent-color-changed',
+			({ payload }) => themeStore.setSystemAccentColor(payload.hex),
+		)
+	} catch (error) {
+		console.warn('Failed to listen for system accent color changes', error)
+	}
+
+	try {
+		const color = await invoke<SystemAccentColorPayload>('plugin:system-accent|system_accent_color')
+		themeStore.setSystemAccentColor(color.hex)
+	} catch (error) {
+		themeStore.setSystemAccentUnavailable()
+		console.warn('Failed to read the system accent color', error)
 	}
 }
 
@@ -1159,6 +1372,10 @@ provide(
 		(await minecraftCrashModal.value?.handleLaunchError(launchError, payload)) ?? false,
 )
 provide('previewMinecraftCrashModal', () => minecraftCrashModal.value?.showPreview())
+const remoteAnnouncementPreview = ref<InstanceType<typeof RemoteAnnouncements>>()
+provide('previewRemoteAnnouncement', (type: 'modal' | 'notification', withAction = false) => {
+	remoteAnnouncementPreview.value?.preview(type, withAction)
+})
 provide('previewPrivacyConsentModal', previewPrivacyConsentModal)
 provide('previewUpdateAnnouncement', (version = null) => {
 	const previewVersion = version ?? pendingUpdateAnnouncementVersion.value
@@ -1187,10 +1404,92 @@ stateInitialization
 		error.showError(err, null, false, 'state_init')
 	})
 
-const handleClose = async () => {
-	await saveWindowState(StateFlags.ALL)
-	await getCurrentWindow().close()
+async function closeWindowImmediately() {
+	if (closeRequestInProgress.value) return
+	closeRequestInProgress.value = true
+	allowWindowClose = true
+	try {
+		await saveWindowState(StateFlags.ALL)
+		await invoke('exit_app')
+	} catch (error) {
+		allowWindowClose = false
+		closeRequestInProgress.value = false
+		handleError(error)
+	}
 }
+
+async function enterLightweightModeOnClose() {
+	closeRequestInProgress.value = true
+	try {
+		await saveWindowState(StateFlags.ALL)
+		await invoke('lightweight_mode_enter')
+	} catch (error) {
+		allowWindowClose = false
+		closeRequestInProgress.value = false
+		handleError(error)
+	}
+}
+
+async function applyCloseChoice(choice: 'close' | 'lightweight', remember: boolean) {
+	if (closeRequestInProgress.value) return
+	closeRequestInProgress.value = true
+	const previousCloseBehavior = themeStore.closeBehavior
+	let closeBehaviorPersisted = false
+	try {
+		if (remember) {
+			const settings = await getSettings()
+			settings.close_behavior = choice
+			await setSettings(settings)
+			themeStore.closeBehavior = choice
+			closeBehaviorPersisted = true
+		}
+		if (choice === 'close') {
+			allowWindowClose = true
+			await saveWindowState(StateFlags.ALL)
+			await invoke('exit_app')
+		} else {
+			await enterLightweightModeOnClose()
+		}
+	} catch (error) {
+		if (remember && !closeBehaviorPersisted) {
+			themeStore.closeBehavior = previousCloseBehavior
+		}
+		allowWindowClose = false
+		closeRequestInProgress.value = false
+		closeChoiceOpen.value = true
+		handleError(error)
+	}
+}
+
+function onCloseChoiceModalHide() {
+	// Closing the choice dialog is a cancellation; it must not trigger either
+	// close behavior and must allow a subsequent close request to show it again.
+	closeChoiceOpen.value = false
+	closeChoiceRemember.value = false
+}
+
+async function handleCloseRequested(event: { preventDefault: () => void }) {
+	if (allowWindowClose) return
+	event.preventDefault()
+	if (closeRequestInProgress.value) return
+	if (closeChoiceOpen.value) return
+
+	const behavior = themeStore.closeBehavior
+	if (behavior === 'close') {
+		await closeWindowImmediately()
+		return
+	}
+	if (behavior === 'lightweight') {
+		await enterLightweightModeOnClose()
+		return
+	}
+
+	closeChoiceOpen.value = true
+	closeChoiceRemember.value = false
+	closeChoiceModal.value?.show()
+}
+
+const handleClose = closeWindowImmediately
 
 const loading = setupLoadingStateProvider()
 loading.setEnabled(false)
@@ -1236,7 +1535,10 @@ router.afterEach((to, from, failure) => {
 		fromPath: from.path,
 		failed: failure,
 	})
-	if (!failure && stateInitialized.value) syncDiscordActivity(to)
+	if (!failure) {
+		void directLinkSync?.()
+		if (stateInitialized.value) syncDiscordActivity(to)
+	}
 	setTimeout(() => {
 		if (!suspensePending && stateInitialized.value) {
 			if (initialLoadToken) {
@@ -1296,14 +1598,6 @@ watch(offline, (isOffline) => {
 watch(
 	() => route.path,
 	(path) => {
-		if (path === '/settings') collapseSidebar()
-	},
-	{ immediate: true },
-)
-
-watch(
-	() => route.path,
-	(path) => {
 		if (
 			path.startsWith('/instance/') &&
 			onboardingSettings.value?.onboarded &&
@@ -1346,10 +1640,9 @@ const {
 	handleCancel: handleContentInstallCancel,
 	setContentInstallModal,
 	setContentInstallPreviewModal,
-	setModpackAlreadyInstalledModal: setContentInstallModpackAlreadyInstalledModal,
-	handleModpackDuplicateCreateAnyway: handleContentInstallModpackDuplicateCreateAnyway,
-	handleModpackDuplicateGoToInstance: handleContentInstallModpackDuplicateGoToInstance,
-	handleModpackDuplicateCancel,
+	setModpackInstallModal: setContentInstallModpackInstallModal,
+	handleModpackInstall: handleContentInstallModpackInstall,
+	handleModpackInstallCancel: handleContentInstallModpackInstallCancel,
 	setCurseForgeManualDownloadsModal: setContentInstallCurseForgeManualDownloadsModal,
 	handleCurseForgeManualDownloadsImported: handleContentInstallCurseForgeManualDownloadsImported,
 	setIncompatibilityWarningModal: setContentIncompatibilityWarningModal,
@@ -1376,7 +1669,9 @@ const {
 const modInstallModal = ref()
 const contentInstallPreviewModal = ref<InstanceType<typeof ContentInstallPreviewModal> | null>(null)
 const modpackAlreadyInstalledModal = ref()
-const contentInstallModpackAlreadyInstalledModal = ref()
+const contentInstallModpackInstallModal = ref<InstanceType<typeof ModpackInstallModal> | null>(null)
+const handleContentInstallModpackDuplicateGoToInstance = (instanceId: string) =>
+	router.push(`/instance/${encodeURIComponent(instanceId)}`)
 const contentInstallCurseForgeManualDownloadsModal = ref()
 const addServerToInstanceModal = ref()
 const incompatibilityWarningModal = ref()
@@ -1544,7 +1839,7 @@ onMounted(() => {
 	setContentInstallModal(modInstallModal.value)
 	setContentInstallPreviewModal(contentInstallPreviewModal.value)
 	contentSelection.setPreviewModal(contentInstallPreviewModal.value)
-	setContentInstallModpackAlreadyInstalledModal(contentInstallModpackAlreadyInstalledModal.value)
+	setContentInstallModpackInstallModal(contentInstallModpackInstallModal.value!)
 	setContentInstallCurseForgeManualDownloadsModal(
 		contentInstallCurseForgeManualDownloadsModal.value,
 	)
@@ -1666,11 +1961,6 @@ const updatePopupMessages = defineMessages({
 		id: 'app.update-popup.body.download-complete',
 		defaultMessage: `Axolotl Launcher v{version} has finished downloading. Reload to update now, or automatically when you close Axolotl Launcher.`,
 	},
-	linuxBody: {
-		id: 'app.update-popup.body.linux',
-		defaultMessage:
-			'Axolotl Launcher v{version} is available. Use your package manager to update for the latest features and fixes!',
-	},
 	reload: {
 		id: 'app.update-popup.reload',
 		defaultMessage: 'Reload to update',
@@ -1785,22 +2075,40 @@ function showDelayedUpdatePopup() {
 	markAppUpdatePopupShown(update.version, stage)
 }
 
-let lastUpdateSource = 'cnb'
+let lastUpdateChannel = 'release'
 
 async function performUpdateCheck() {
-	const source = getUpdateSource()
-	if (source !== lastUpdateSource) {
+	const channel = await getUpdateChannel()
+	const preferences = await getUpdatePreferences()
+	updatesPaused.value = preferences.updatesPaused
+	if (updatesPaused.value) return 'paused'
+	if (channel !== lastUpdateChannel) {
 		availableUpdate.value = null
 		updateSize.value = null
 		appUpdateDownload.progress.value = 0
 		finishedDownloading.value = false
 		downloading.value = false
-		lastUpdateSource = source
+		lastUpdateChannel = channel
 	}
 
-	const update = await checkAppUpdate(source)
+	const update = await checkAppUpdate(channel)
 	if (!update) {
 		console.log('No update available')
+		return 'up-to-date'
+	}
+
+	const publishedAt = Date.parse(update.publishedAt ?? '')
+	if (
+		channel === 'release' &&
+		!preferences.immediateUpdateFetch &&
+		!update.forceUpdate &&
+		(!Number.isFinite(publishedAt) || Date.now() < publishedAt + 24 * 60 * 60 * 1000)
+	) {
+		console.warn(
+			Number.isFinite(publishedAt)
+				? `Update ${update.version} is waiting for the release delay.`
+				: `Update ${update.version} has no valid published_at timestamp.`,
+		)
 		return 'up-to-date'
 	}
 
@@ -1821,6 +2129,7 @@ async function performUpdateCheck() {
 	console.log(`Update ${update.version} is available.`)
 
 	metered.value = await isNetworkMetered()
+
 	if (!metered.value) {
 		console.log('Starting download of update')
 		downloadUpdate(update)
@@ -1843,6 +2152,8 @@ async function manualUpdateCheck() {
 	}
 
 	updatesEnabled.value = true
+	updatesPaused.value = (await getUpdatePreferences()).updatesPaused
+	if (updatesPaused.value) return 'paused'
 	if (offline.value) {
 		return 'offline'
 	}
@@ -1854,9 +2165,7 @@ async function downloadAvailableUpdate() {
 	return downloadUpdate(availableUpdate.value)
 }
 
-const UPDATE_SOURCE_ORDER = ['miawa', 'cnb', 'github']
-
-async function downloadUpdate(versionToDownload, source = getUpdateSource()) {
+async function downloadUpdate(versionToDownload) {
 	if (!versionToDownload) {
 		handleError(`Failed to download update: no version available`)
 		return
@@ -1867,7 +2176,7 @@ async function downloadUpdate(versionToDownload, source = getUpdateSource()) {
 		return
 	}
 
-	console.log(`Downloading update ${versionToDownload.version} from ${source}`)
+	console.log(`Downloading update ${versionToDownload.version} from Update Server`)
 	downloading.value = true
 
 	try {
@@ -1888,7 +2197,7 @@ async function downloadUpdate(versionToDownload, source = getUpdateSource()) {
 				unlistenUpdateDownload?.().then(() => {
 					unlistenUpdateDownload = null
 				})
-				retryUpdateFromNextSource(source, error)
+				handleError(error)
 			})
 		unlistenUpdateDownload = await subscribeToDownloadProgress(
 			appUpdateDownload,
@@ -1897,44 +2206,15 @@ async function downloadUpdate(versionToDownload, source = getUpdateSource()) {
 	} catch (error) {
 		downloading.value = false
 		appUpdateDownload.progress.value = 0
-		retryUpdateFromNextSource(source, error)
+		handleError(error)
 	}
-}
-
-// Any download failure falls back to the next update source in line
-// (miawa → cnb → github): re-check there and download its installer, so a
-// broken mirror never strands users on an outdated build.
-async function retryUpdateFromNextSource(failedSource, originalError) {
-	const startIndex = UPDATE_SOURCE_ORDER.indexOf(failedSource)
-	const remaining = startIndex >= 0 ? UPDATE_SOURCE_ORDER.slice(startIndex + 1) : []
-
-	for (const next of remaining) {
-		console.warn(`Update download failed via ${failedSource}; retrying via ${next}`, originalError)
-		try {
-			const fallbackUpdate = await checkAppUpdate(next)
-			if (!fallbackUpdate) {
-				console.warn(`No update available via ${next}`)
-				continue
-			}
-			availableUpdate.value = fallbackUpdate
-			updateSize.value = null
-			getUpdateSize(fallbackUpdate.rid)
-				.then((size) => (updateSize.value = size))
-				.catch((error) => console.warn('Failed to fetch update size', error))
-			await downloadUpdate(fallbackUpdate, next)
-			return
-		} catch (error) {
-			console.warn(`Update check via ${next} failed`, error)
-		}
-	}
-
-	handleError(originalError)
 }
 
 async function installUpdate() {
 	restarting.value = true
 
 	try {
+		await backupAppDbForUpdate(availableUpdate.value?.version)
 		await setRestartAfterPendingUpdate(true)
 	} catch (e) {
 		restarting.value = false
@@ -2216,7 +2496,15 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 		</div>
 		<div data-tauri-drag-region class="app-grid-statusbar bg-bg-raised h-[--top-bar-height] flex">
 			<div data-tauri-drag-region class="flex min-w-0 flex-1 overflow-hidden p-3">
-				<AxolotlLogo class="h-full w-auto shrink-0 pointer-events-none" />
+				<div data-tauri-drag-region class="flex shrink-0 items-center gap-2">
+					<AxolotlLogo class="h-full w-auto shrink-0 pointer-events-none" />
+					<span
+						v-if="isBetaBuild"
+						class="inline-flex shrink-0 rounded-full bg-[#b6e9ff] px-2 py-0.5 text-xs font-semibold leading-none text-[#005bda]"
+					>
+						{{ formatMessage(messages.betaBuild) }}
+					</span>
+				</div>
 				<div data-tauri-drag-region class="flex shrink-0 items-center gap-1 ml-3">
 					<button
 						class="cursor-pointer p-0 m-0 text-contrast border-none outline-none bg-button-bg rounded-full flex items-center justify-center w-6 h-6 hover:brightness-75 transition-all"
@@ -2302,7 +2590,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 			class="app-sidebar mt-px shrink-0 flex flex-col border-0 border-l-[1px] border-[--brand-gradient-border] border-solid"
 		>
 			<button
-				v-if="!forceSidebar"
+				v-if="!forceSidebar && !forceSidebarHidden"
 				v-tooltip.left="
 					sidebarToggled
 						? formatMessage(messages.collapseSidebar)
@@ -2357,8 +2645,57 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 	<JavaDownloadConfirmationModal ref="javaDownloadConfirmationModal" />
 	<PrivacyConsentModal ref="privacyConsentModal" @saved="handlePrivacyConsentSaved" />
 	<CommunityAnnouncementModal ref="communityAnnouncementModal" />
+	<RemoteAnnouncements
+		:ready="
+			stateInitialized && !privacyConsentPending && !showOnboarding && !updateAnnouncementShowing
+		"
+	/>
+	<RemoteAnnouncements
+		ref="remoteAnnouncementPreview"
+		preview-only
+		:ready="
+			stateInitialized && !privacyConsentPending && !showOnboarding && !updateAnnouncementShowing
+		"
+	/>
 	<SurveyAnnouncementModal ref="surveyModal" />
 	<UpdateAnnouncementModal ref="updateAnnouncementModal" @closed="handleUpdateAnnouncementClosed" />
+	<NewModal
+		ref="closeChoiceModal"
+		:header="formatMessage(messages.closeLauncherTitle)"
+		:closable="true"
+		:close-on-click-outside="true"
+		:disable-close="closeRequestInProgress"
+		:on-hide="onCloseChoiceModalHide"
+		max-width="30rem"
+	>
+		<div class="grid grid-cols-2 gap-3">
+			<ButtonStyled color="brand">
+				<button
+					type="button"
+					:disabled="closeRequestInProgress"
+					@click="applyCloseChoice('close', closeChoiceRemember)"
+				>
+					{{ formatMessage(messages.closeLauncherDirect) }}
+				</button>
+			</ButtonStyled>
+			<ButtonStyled>
+				<button
+					type="button"
+					:disabled="closeRequestInProgress"
+					@click="applyCloseChoice('lightweight', closeChoiceRemember)"
+				>
+					{{ formatMessage(messages.closeLauncherTray) }}
+				</button>
+			</ButtonStyled>
+		</div>
+		<div class="mt-4">
+			<Checkbox
+				v-model="closeChoiceRemember"
+				:disabled="closeRequestInProgress"
+				:label="formatMessage(messages.closeLauncherRemember)"
+			/>
+		</div>
+	</NewModal>
 	<ErrorModal ref="errorModal" />
 	<MinecraftAuthErrorModal ref="minecraftAuthErrorModal" />
 	<ContentInstallModal
@@ -2383,7 +2720,6 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 		ref="modpackAlreadyInstalledModal"
 		@create-anyway="handleModpackDuplicateCreateAnyway"
 		@go-to-instance="handleModpackDuplicateGoToInstance"
-		@cancel="handleModpackDuplicateCancel"
 	/>
 	<AddServerToInstanceModal
 		ref="addServerToInstanceModal"
@@ -2407,10 +2743,10 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 		@cancel="handleIncompatibilityWarningCancel"
 		@search-compat="handleDropInstallSearchCompat"
 	/>
-	<ModpackAlreadyInstalledModal
-		ref="contentInstallModpackAlreadyInstalledModal"
-		@create-anyway="handleContentInstallModpackDuplicateCreateAnyway"
-		@go-to-instance="handleContentInstallModpackDuplicateGoToInstance"
+	<ModpackInstallModal
+		ref="contentInstallModpackInstallModal"
+		@install="handleContentInstallModpackInstall"
+		@cancel="handleContentInstallModpackInstallCancel"
 	/>
 	<CurseForgeManualDownloadsModal
 		ref="contentInstallCurseForgeManualDownloadsModal"

@@ -245,11 +245,13 @@ const {
 	selectedTypeFilter,
 	selectedStatusFilters,
 	row1FilterOptions,
+	row2FilterOptions,
 	totalCount,
 	filterCounts,
 	filteredItems: pipelineFilteredItems,
 	filteredModpackItems: pipelineFilteredModpackItems,
 	toggleTypeFilter,
+	toggleStatusFilter,
 } = useContentPipeline({
 	items: ctx.items,
 	modpackItems: ctx.modpackItems,
@@ -412,7 +414,6 @@ watch(
 )
 
 const showScrollToTop = ref(false)
-const sidebarVisible = ref(false)
 const SCROLL_THRESHOLD = 300
 
 function getScrollContainer(): Element | null {
@@ -468,11 +469,6 @@ function restoreContentViewScroll() {
 	})
 }
 
-function checkSidebarVisibility() {
-	const appContents = document.querySelector('.app-contents')
-	sidebarVisible.value = appContents?.classList.contains('sidebar-enabled') ?? false
-}
-
 function handleScroll() {
 	const container = getScrollContainer()
 	if (container) {
@@ -492,14 +488,6 @@ onMounted(() => {
 	if (container) {
 		container.addEventListener('scroll', handleScroll, { passive: true })
 		handleScroll()
-		checkSidebarVisibility()
-	}
-	const observer = new MutationObserver(() => {
-		checkSidebarVisibility()
-	})
-	const appContents = document.querySelector('.app-contents')
-	if (appContents) {
-		observer.observe(appContents, { attributes: true, attributeFilter: ['class'] })
 	}
 })
 
@@ -1101,14 +1089,55 @@ const confirmUnlinkModal = ref<InstanceType<typeof ConfirmUnlinkModal>>()
 					@visible-items="handleVisibleTableItems"
 				>
 					<template #header-project>
-						<ContentMetadataFilterBar
-							v-model:expanded="metadataFilterExpanded"
-							:categories="metadataFilterCategories"
-							:model-value="metadataFilterSelectedValues"
-							:filtering-keys="metadataFilteringKeys"
-							:active-filter-count="activeMetadataFilterCount"
-							@update:category="setCategorySelection"
-						/>
+						<div class="flex min-w-0 flex-1 items-center gap-4">
+							<div class="flex shrink-0 items-center gap-4">
+								<button
+									class="relative pb-1 text-base font-semibold transition-colors"
+									:class="
+										selectedStatusFilters.length === 0
+											? 'text-brand'
+											: 'text-secondary hover:text-primary'
+									"
+									:aria-pressed="selectedStatusFilters.length === 0"
+									@click="selectedStatusFilters = []"
+								>
+									{{ formatMessage(commonMessages.allProjectType) }}
+									<span
+										v-if="selectedStatusFilters.length === 0"
+										class="absolute bottom-0 left-0 right-0 h-0.5 rounded-full bg-brand"
+									/>
+								</button>
+								<button
+									v-for="option in row2FilterOptions"
+									:key="option.id"
+									class="relative pb-1 text-base font-semibold transition-colors"
+									:class="
+										selectedStatusFilters.includes(option.id)
+											? 'text-brand'
+											: 'text-secondary hover:text-primary'
+									"
+									:aria-pressed="selectedStatusFilters.includes(option.id)"
+									@click="toggleStatusFilter(option.id)"
+								>
+									{{ option.label }}
+									<span class="ml-1 text-sm font-normal opacity-70">{{
+										filterCounts[option.id] ?? 0
+									}}</span>
+									<span
+										v-if="selectedStatusFilters.includes(option.id)"
+										class="absolute bottom-0 left-0 right-0 h-0.5 rounded-full bg-brand"
+									/>
+								</button>
+							</div>
+							<ContentMetadataFilterBar
+								v-model:expanded="metadataFilterExpanded"
+								:categories="metadataFilterCategories"
+								:model-value="metadataFilterSelectedValues"
+								:filtering-keys="metadataFilteringKeys"
+								:active-filter-count="activeMetadataFilterCount"
+								@update:category="setCategorySelection"
+							/>
+						</div>
 					</template>
 					<template #header-actions>
 						<ContentTableHeaderActions
@@ -1309,7 +1338,6 @@ const confirmUnlinkModal = ref<InstanceType<typeof ConfirmUnlinkModal>>()
 			<button
 				v-if="showScrollToTop"
 				class="scroll-to-top-btn"
-				:class="{ 'sidebar-visible': sidebarVisible }"
 				aria-label="Scroll to top"
 				@click="scrollToTop"
 			>
@@ -1321,12 +1349,7 @@ const confirmUnlinkModal = ref<InstanceType<typeof ConfirmUnlinkModal>>()
 
 <style scoped>
 .scroll-to-top-btn {
-	@apply fixed bottom-6 z-50 flex items-center justify-center rounded-full bg-brand p-3 text-brand-inverted shadow-lg transition-all duration-200 hover:brightness-110 hover:shadow-xl active:scale-95;
-	right: 24px;
-}
-
-.scroll-to-top-btn.sidebar-visible {
-	right: calc(300px + 24px);
+	@apply fixed bottom-10 left-24 z-50 flex items-center justify-center rounded-full bg-brand p-3 text-brand-inverted shadow-lg transition-all duration-200 hover:brightness-110 hover:shadow-xl active:scale-95;
 }
 
 .scroll-to-top-enter-active,

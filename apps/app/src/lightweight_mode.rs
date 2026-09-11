@@ -4,7 +4,7 @@ use std::{
     sync::Mutex,
 };
 use tauri::{
-    AppHandle, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
+    AppHandle, Emitter, Listener, Manager, WebviewUrl, WebviewWindowBuilder,
     menu::{
         CheckMenuItem, IsMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu,
     },
@@ -93,11 +93,23 @@ pub struct LightweightMode(Mutex<LightweightModeState>);
 
 impl LightweightMode {
     fn enter(&self, app: &AppHandle) -> Result<(), String> {
+        self.enter_internal(app, true)
+    }
+
+    pub fn enter_for_close(&self, app: &AppHandle) -> Result<(), String> {
+        self.enter_internal(app, false)
+    }
+
+    fn enter_internal(
+        &self,
+        app: &AppHandle,
+        require_running: bool,
+    ) -> Result<(), String> {
         let state = self.0.lock().map_err(|error| error.to_string())?;
         if state.active {
             return Ok(());
         }
-        if state.running_processes == 0 {
+        if require_running && state.running_processes == 0 {
             return Err(
                 "Lightweight mode requires a running Minecraft instance"
                     .to_string(),
@@ -238,6 +250,13 @@ impl LightweightMode {
             None if payload.event == "launched" => {
                 let app = app.clone();
                 tauri::async_runtime::spawn(async move {
+                    if payload.maximize_window {
+                        maximize_minecraft_window(
+                            payload.pid,
+                            payload.launch_preparation_timeout,
+                        )
+                        .await;
+                    }
                     let settings = match theseus::settings::get().await {
                         Ok(settings) => settings,
                         Err(error) => {
@@ -313,10 +332,127 @@ impl LightweightMode {
 struct ProcessEventPayload {
     instance_id: String,
     uuid: String,
+    #[serde(default)]
+    pid: u32,
+    #[serde(default)]
+    maximize_window: bool,
+    #[serde(default)]
+    launch_preparation_timeout: Option<u64>,
     event: String,
     crashed: Option<bool>,
     #[serde(default)]
     lightweight_replay: bool,
+}
+
+#[cfg(target_os = "windows")]
+use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
+
+#[cfg(target_os = "windows")]
+static MAXIMIZE_PROCESS_ID: AtomicU32 = AtomicU32::new(0);
+#[cfg(target_os = "windows")]
+static MAXIMIZE_WINDOW_HANDLE: AtomicIsize = AtomicIsize::new(0);
+#[cfg(target_os = "windows")]
+static MAXIMIZE_WINDOW_ENUMERATION: Mutex<()> = Mutex::new(());
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn maximize_if_owned_by_process(
+    hwnd: windows::Win32::Foundation::HWND,
+    _: windows::Win32::Foundation::LPARAM,
+) -> windows::core::BOOL {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetClassNameW, GetWindowTextW, GetWindowThreadProcessId,
+        IsWindowVisible,
+    };
+    use windows::core::BOOL;
+
+    let mut class_name = [0_u16; 256];
+    let class_name_length = unsafe { GetClassNameW(hwnd, &mut class_name) };
+    let class_name =
+        String::from_utf16_lossy(&class_name[..class_name_length as usize]);
+    if !matches!(class_name.as_str(), "GLFW30" | "LWJGL" | "SunAwtFrame") {
+        return BOOL(1);
+    }
+
+    let mut window_title = [0_u16; 512];
+    let window_title_length =
+        unsafe { GetWindowTextW(hwnd, &mut window_title) };
+    let window_title =
+        String::from_utf16_lossy(&window_title[..window_title_length as usize]);
+    if !(window_title.starts_with("FML")
+        || (window_title != "PopupMessageWindow"
+            && !window_title.starts_with("GLFW")))
+    {
+        return BOOL(1);
+    }
+
+    // FML and Quilt Loader windows are transitional launcher windows. Keep
+    // enumerating until the actual Minecraft window appears.
+    if window_title.starts_with("FML")
+        || window_title.starts_with("Quilt Loader")
+    {
+        return BOOL(1);
+    }
+
+    let mut window_pid = 0;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut window_pid)) };
+    if window_pid == MAXIMIZE_PROCESS_ID.load(Ordering::Relaxed)
+        && unsafe { IsWindowVisible(hwnd).as_bool() }
+    {
+        MAXIMIZE_WINDOW_HANDLE.store(hwnd.0 as isize, Ordering::Relaxed);
+        return BOOL(0);
+    }
+    BOOL(1)
+}
+
+#[cfg(target_os = "windows")]
+async fn maximize_minecraft_window(
+    pid: u32,
+    launch_preparation_timeout: Option<u64>,
+) {
+    if pid == 0 {
+        return;
+    }
+
+    let timeout = std::time::Duration::from_secs(
+        launch_preparation_timeout.unwrap_or(60),
+    );
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let found = {
+            let _guard = MAXIMIZE_WINDOW_ENUMERATION.lock();
+            MAXIMIZE_PROCESS_ID.store(pid, Ordering::Relaxed);
+            MAXIMIZE_WINDOW_HANDLE.store(0, Ordering::Relaxed);
+            unsafe {
+                use windows::Win32::Foundation::LPARAM;
+                use windows::Win32::UI::WindowsAndMessaging::EnumWindows;
+                let _ =
+                    EnumWindows(Some(maximize_if_owned_by_process), LPARAM(0));
+            }
+            MAXIMIZE_WINDOW_HANDLE.load(Ordering::Relaxed)
+        };
+        if found != 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let hwnd = windows::Win32::Foundation::HWND(found as *mut _);
+            unsafe {
+                use windows::Win32::UI::WindowsAndMessaging::{
+                    SW_MAXIMIZE, ShowWindow,
+                };
+                let _ = ShowWindow(hwnd, SW_MAXIMIZE);
+            }
+            return;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn maximize_minecraft_window(
+    _pid: u32,
+    _launch_preparation_timeout: Option<u64>,
+) {
 }
 
 #[tauri::command]
@@ -343,6 +479,24 @@ pub struct FrontendReadyPayload {
 #[tauri::command]
 pub fn lightweight_mode_set_route(app: AppHandle, route: String) {
     app.state::<LightweightMode>().set_route(route);
+}
+
+#[tauri::command]
+pub fn lightweight_mode_enter(app: AppHandle) -> Result<(), String> {
+    // Schedule the window destruction after returning from the IPC command.
+    // Destroying the webview synchronously would leave the invoke caller
+    // waiting for a response from a window that is already being destroyed.
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        if let Err(error) = app.state::<LightweightMode>().enter_for_close(&app)
+        {
+            tracing::warn!(
+                "Failed to enter lightweight mode on close: {error}"
+            );
+            let _ = app.emit("lightweight-mode-error", error);
+        }
+    });
+    Ok(())
 }
 
 fn destroy_main_window(app: &AppHandle) -> Result<(), String> {

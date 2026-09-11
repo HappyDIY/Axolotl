@@ -258,8 +258,8 @@ onMounted(() => {
 						v-model:model-id="modelId"
 					/>
 					<div class="flex flex-col gap-1.5">
-						<ButtonStyled color="brand" :disabled="!canStart">
-							<button class="start-button" @click="startTranslation">
+						<ButtonStyled color="brand">
+							<button class="start-button" @click="startTranslation" :disabled="!canStart">
 								<PlayIcon />{{ formatMessage(messages.start) }}
 							</button>
 						</ButtonStyled>

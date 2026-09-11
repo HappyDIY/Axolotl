@@ -33,6 +33,566 @@ export const ANNOUNCEMENT_CHANGE_TYPES: readonly AnnouncementChangeType[] = [
 
 export const launcherAnnouncements: readonly LauncherAnnouncement[] = [
 	{
+		id: 'launcher-1.9.6-beta.4',
+		version: '1.9.6-beta.4',
+		publishedAt: '2026-09-09',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.4',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.4',
+		},
+		changes: {
+			added: [
+				{
+					'en-US': 'Supports hiding added mods on the content page.',
+					'zh-CN': '支持在内容页隐藏已添加的 Mod。',
+				},
+				{
+					'en-US': 'Minecraft can now launch in a maximized window on Windows.',
+					'zh-CN': 'Windows 平台现在可使 Minecraft 以最大化窗口的方式启动。',
+				},
+			],
+			changed: [
+				{
+					'en-US': 'Add close buttons to certain modal dialogs.',
+					'zh-CN': '为部分模态框添加关闭按钮。',
+				},
+				{
+					'en-US': 'Add the native context menu (Copy, Paste, etc.) to input fields.',
+					'zh-CN': '为输入框添加原生右键菜单（复制、粘贴等）。',
+				},
+			],
+			fixed: [
+				{
+					'en-US':
+						'Fixed an issue in version 1.6.4 where resource files (languages and sounds) could not be loaded properly.',
+					'zh-CN': '修复了 1.6.4 版本无法正常加载资源文件（语言、声音）的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where content page tabs were displayed incorrectly when translation was enabled.',
+					'zh-CN': '修复了启用翻译时内容页选项卡显示不正确的问题。',
+				},
+				{
+					'en-US': 'Fixed logic issues related to loader handling.',
+					'zh-CN': '修复了与加载器处理相关的逻辑问题。',
+				},
+				{
+					'en-US': 'Fixed an issue where CurseForge modpacks did not use dual-progress downloads.',
+					'zh-CN': '修复了 Curseforge 整合包不使用双进度下载的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where clicking the sign-in prompt dialog that appears when launching a world without being signed in to any account caused an error.',
+					'zh-CN': '修复了启动世界且未登录任何账户时弹出的提示登录对话框点击导致出错的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where installations using the Beta package initially incorrectly used the Release database.',
+					'zh-CN': '修复了使用首次 Beta 安装包安装却使用 Release 数据库的问题。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.6-beta.3',
+		version: '1.9.6-beta.3',
+		publishedAt: '2026-09-08',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.3',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.3',
+		},
+		changes: {
+			added: [
+				{
+					'en-US': 'The Forge server now supports input completion.',
+					'zh-CN': 'Forge 服务器现在有输入补全机制。',
+				},
+				{
+					'en-US': 'Minecraft can now launch in a maximized window on Windows.',
+					'zh-CN': 'Windows 平台现在可使 Minecraft 以最大化窗口的方式启动。',
+				},
+				{
+					'en-US':
+						'The launcher now uses modern oauth authentication for official account login, with the option to sign in through a browser or via the device code flow.',
+					'zh-CN':
+						'现在启动器执行正版登录时将使用现代 oauth 登录，并可选择在浏览器登录或使用设备代码流登录。',
+				},
+			],
+			fixed: [
+				{
+					'en-US': 'Fix the lag caused by individual real-time log messages being too long.',
+					'zh-CN': '修复实时日志单条消息过长导致的卡顿问题。',
+				},
+				{
+					'en-US':
+						'Mitigates application freezes caused by changing the resolution and DPI scaling.',
+					'zh-CN': '缓解修改分辨率与 DPI 缩放导致的应用冻结问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where returning to the module details page always redirects to the first page.',
+					'zh-CN': '修复返回模组详情页后总是跳转第一页的问题。',
+				},
+				{
+					'en-US':
+						'Fix an issue where mods and Minecraft were not downloaded simultaneously when installing ZIP-format modpacks.',
+					'zh-CN': '修复 zip 格式的整合包在安装时 Mod 与 Minecraft 不同步下载的问题。',
+				},
+				{
+					'en-US':
+						'Fix an issue where the skin preview does not update immediately after switching accounts.',
+					'zh-CN': '修复切换账户后皮肤预览不会立刻更新的问题。',
+				},
+				{
+					'en-US': 'Fixed the issue where the skin preview shadow styling was incorrect.',
+					'zh-CN': '修复皮肤预览阴影样式不正确的问题。',
+				},
+				{
+					'en-US':
+						'Fix an issue where low-version installations such as OptiFine 1.7.10 could not launch due to missing libraries.',
+					'zh-CN': '修复 1.7.10 Optifine 等低版本安装时缺少库导致无法启动的问题。',
+				},
+				{
+					'en-US': 'Fix incorrect behavior when importing instances.',
+					'zh-CN': '修复导入实例时的错误行为。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.6-beta.2',
+		version: '1.9.6-beta.2',
+		publishedAt: '2026-09-07',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.2',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.2',
+		},
+		changes: {
+			added: [
+				{
+					'en-US': 'Add announcement system.',
+					'zh-CN': '添加公告系统。',
+				},
+				{
+					'en-US': 'Now pages such as the content page will render Minecraft color codes.',
+					'zh-CN': '现在内容页等页面会渲染 Minecraft 颜色代码。',
+				},
+				{
+					'en-US': "Now it can correctly identify the system's primary colors.",
+					'zh-CN': '现在可正确识别系统主要颜色。',
+				},
+			],
+			changed: [
+				{
+					'en-US': 'Sync the latest LLM model list.',
+					'zh-CN': '同步最新 LLM 模型列表。',
+				},
+				{
+					'en-US': 'Greatly improve download performance.',
+					'zh-CN': '大幅提升下载性能（对的对的）。',
+				},
+			],
+			fixed: [
+				{
+					'en-US':
+						'Fix the issue where the handling and identification of .minecraft folder instances are inconsistent with industry standards.',
+					'zh-CN': '修复 .minecraft 文件夹实例处理与识别方式与行业规范不一致的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the app would still launch automatically even when "Launch when completed" was not checked.',
+					'zh-CN': '修复未勾选“完成后启动”仍自动启动的问题。',
+				},
+				{
+					'en-US':
+						'Fixed a severe performance degradation issue when extracting and overwriting files.',
+					'zh-CN': '修复解压覆盖文件时的严重性能降级问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where notifications in the notification center could not be completely cleared.',
+					'zh-CN': '修复通知中心中的通知无法彻底清除的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where Minecraft-related files still display as "downloading" after the download has finished.',
+					'zh-CN': '修复 Minecraft 相关文件下载结束后仍显示正在下载的问题。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.6-beta.1',
+		version: '1.9.6-beta.1',
+		publishedAt: '2026-09-05',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.6-beta.1',
+			'zh-CN': 'Axolotl Launcher 1.9.6-beta.1',
+		},
+		changes: {
+			added: [
+				{
+					'en-US':
+						'Added the ability to directly use the .minecraft folder as an instance manager (currently in beta, unexpected errors may occur).',
+					'zh-CN':
+						'新增可直接使用 .minecraft 文件夹作为实例管理（当前处于测试阶段，可能会有意想不到的错误）。',
+				},
+				{
+					'en-US': 'Custom instance startup timeout is now supported.',
+					'zh-CN': '现在支持自定义实例启动超时时间。',
+				},
+				{
+					'en-US': 'Now there is a new page specifically for displaying disabled mods.',
+					'zh-CN': '现在有了新的页面专门显示禁用的 Mod。',
+				},
+			],
+			changed: [
+				{
+					'en-US': 'Optimize the Easter egg game and adjust some mechanics.',
+					'zh-CN': '优化彩蛋游戏，修改部分机制。',
+				},
+				{
+					'en-US':
+						'Linux systems using apt will now be upgraded via deb packages instead of the built-in updater.',
+					'zh-CN': '使用 apt 的 Linux 系统现在将通过 deb 包进行升级，而不是内置 updater。',
+				},
+				{
+					'en-US': 'Now telemetry no longer collects all error information.',
+					'zh-CN': '现在遥测不再收集所有错误信息。',
+				},
+			],
+			fixed: [
+				{
+					'en-US': 'Fix the issue where DNS TTL was incorrectly refreshed.',
+					'zh-CN': '修复 DNS TTL 被错误刷新的问题。',
+				},
+				{
+					'en-US':
+						'Fix the incorrect failure handling mechanism when Minecraft Assets download fails.',
+					'zh-CN': '修复 Minecraft Assets 下载失败时错误的失败处理机制。',
+				},
+				{
+					'en-US': 'Fix the issue where the 1.16.5 Forge version cannot start.',
+					'zh-CN': '修复 1.16.5 Forge 版本无法启动的问题。',
+				},
+				{
+					'en-US':
+						"Fix the issue where the launcher cannot be invoked by running the launcher's main program in lightweight mode.",
+					'zh-CN': '修复轻量模式下无法通过运行启动器主程序的方式唤起启动器。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the launcher could still launch automatically after the user unchecked "Launch when complete" during installation/update.',
+					'zh-CN': '修复安装/更新启动器时，用户取消勾选“完成后启动”后仍可能出现自动启动的情况。',
+				},
+				{
+					'en-US':
+						'Fix the issue where searching for any text on the settings page causes the page to become blank.',
+					'zh-CN': '修复设置页面搜索任意文字使得页面变为空页面的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where switching from the AI page to other pages in Settings causes the launcher to freeze.',
+					'zh-CN': '修复设置从 AI 页面切换到其他页面会导致启动器冻结的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the multi-select action box on the content page obscures the left and right action buttons.',
+					'zh-CN': '修复内容页多选操作框遮挡左右操作按钮的问题。',
+				},
+				{
+					'en-US': 'Fix the slow loading issue on the Explore content page.',
+					'zh-CN': '修复探索内容页面加载过慢的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the multiplayer game page played unnecessary extra animations.',
+					'zh-CN': '修复多人游戏页面播放额外的不需要的动画的问题。',
+				},
+				{
+					'en-US':
+						'Fixed download tasks showing stale progress, a cancel action, or an active-download shortcut.',
+					'zh-CN': '修复了已完成的下载任务会显示过期进度、取消操作或活动下载快捷方式的问题。',
+				},
+				{
+					'en-US': 'Fixed an issue where some placeholder text could be selected with Ctrl+A.',
+					'zh-CN': '修复部分占位符文字可被 Ctrl+A 选中。',
+				},
+				{
+					'en-US': 'Fix memory leaks caused by Vue in some scenarios.',
+					'zh-CN': '修复部分 Vue 导致的内存泄漏问题。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.5',
+		version: '1.9.5',
+		publishedAt: '2026-09-04',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.5',
+			'zh-CN': 'Axolotl Launcher 1.9.5',
+		},
+		changes: {
+			added: [
+				{
+					'en-US': 'Added multi-update channel option.',
+					'zh-CN': '添加多更新渠道选项。',
+				},
+				{
+					'en-US': 'Add relevant instructions and tips about database isolation.',
+					'zh-CN': '添加数据库隔离的相关说明与提示。',
+				},
+				{
+					'en-US': 'Add a Beta badge to the beta software.',
+					'zh-CN': '为测试版软件添加 Beta 角标。',
+				},
+				{
+					'en-US': 'Added an option to select the main world biome height in the seed map.',
+					'zh-CN': '新增种子地图中选择主世界群系高度的选项。',
+				},
+				{
+					'en-US': 'Add a "Back to Top" button on the content page.',
+					'zh-CN': '在内容页添加“回到顶部”按钮。',
+				},
+				{
+					'en-US': 'Add a notification center to show hidden download progress and warnings.',
+					'zh-CN': '添加通知中心，展示隐藏的下载进度和警告。',
+				},
+				{
+					'en-US': 'Added option to hide to tray on app close (lightweight mode).',
+					'zh-CN': '现在可在关闭应用时选择隐藏到托盘（轻量模式）。',
+				},
+			],
+			changed: [
+				{
+					'en-US': 'Improved the software update mechanism and logic.',
+					'zh-CN': '优化软件更新机制与逻辑。',
+				},
+				{
+					'en-US': 'Disable the corresponding buttons when database operations are unavailable.',
+					'zh-CN': '当数据库操作不可用时禁用相应按钮。',
+				},
+				{
+					'en-US': 'Include the Mod downloads in the download center display.',
+					'zh-CN': '在下载中心显示 Mod 下载。',
+				},
+				{
+					'en-US': 'Skin preview now uses a 3D-rendered outer layer.',
+					'zh-CN': '皮肤预览现在使用 3D 渲染外层。',
+				},
+				{
+					'en-US': 'Skin preview now has anti-aliased rendering.',
+					'zh-CN': '皮肤预览现在具有抗锯齿渲染。',
+				},
+				{
+					'en-US': 'Disable the translation button when translation is not ready.',
+					'zh-CN': '在翻译未就绪时禁用翻译按钮。',
+				},
+				{
+					'en-US': "Ctrl+F will no longer trigger the browser's built-in search box.",
+					'zh-CN': '现在 Ctrl+F 不会再呼出浏览器自带搜索框。',
+				},
+				{
+					'en-US': 'Pressing F12 will no longer open DevTools when developer mode is not enabled.',
+					'zh-CN': '现在当未启用开发者模式时按下 F12 不会再呼出 DevTools。',
+				},
+				{
+					'en-US':
+						'Server population info will now be displayed even when the server version is incompatible.',
+					'zh-CN': '现在即使服务器版本不兼容也会显示人数信息。',
+				},
+			],
+			fixed: [
+				{
+					'en-US':
+						'Fixed the issue where updating within the software would not update the version number, causing a loop of automatic updates.',
+					'zh-CN': '修复了在软件内更新不会更新版本号导致循环自动更新的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where update packages on the Windows platform might not send UAC requests when requiring privilege elevation.',
+					'zh-CN': '修复 Windows 平台上更新包可能不会在需要权限提升时发出 UAC 请求的问题。',
+				},
+				{
+					'en-US':
+						'Fix a potential issue where forward slashes (/) may be incorrectly used on the Windows platform.',
+					'zh-CN': '修复 Windows 平台上可能错误地使用正斜杠（/）的问题。',
+				},
+				{
+					'en-US': 'Fixed the issue where not reusing the HTTP client caused slow download speeds.',
+					'zh-CN': '修复不会复用 HTTP 客户端导致下载速度过慢的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the global Mutex in RangeOutput causes slow download speeds.',
+					'zh-CN': '修复 RangeOutput 全局 Mutex 导致下载速度过慢的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an issue where incorrectly using the official source could lead to slow download speeds.',
+					'zh-CN': '修复可能错误使用官方源导致下载速度过慢的问题。',
+				},
+				{
+					'en-US': 'Fix the issue where the settings page loads too slowly.',
+					'zh-CN': '修复设置页面载入速度过慢的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the 1.16.5 Forge version failed to start due to a missing LWJGL library.',
+					'zh-CN': '修复 1.16.5 Forge 版本因缺少 LWJGL 库导致启动失败的问题。',
+				},
+				{
+					'en-US': 'Fix the distance issue on the seed map caused by floating point precision.',
+					'zh-CN': '修复种子地图因浮点数精度导致的距离问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where map tiles rendered by the seed map are inconsistent at different zoom levels.',
+					'zh-CN': '修复种子地图在不同缩放下渲染的地图图块不一致的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the spawn point marker on the seed map lacks focused highlighting.',
+					'zh-CN': '修复种子地图出生点标记无焦点突出显示的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the seed map could not open the biome selector in fullscreen mode.',
+					'zh-CN': '修复种子地图在全屏状态下无法打开群系选择器的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where versions 1.13 ~ 1.18 could not start due to incorrectly obtaining LWJGL information.',
+					'zh-CN': '修复因错误获取 LWJGL 信息导致 1.13 ~ 1.18 版本无法启动的问题。',
+				},
+				{
+					'en-US': 'Fixed the issue where translation preference settings could not be saved.',
+					'zh-CN': '修复无法保存翻译偏好设置的问题。',
+				},
+				{
+					'en-US':
+						'Fix the issue where the settings page title loads out of sync with the main content.',
+					'zh-CN': '修复设置页标题与主内容不同步加载的问题。',
+				},
+				{
+					'en-US': 'Fix a performance issue where extra validation caused slower download speeds.',
+					'zh-CN': '修复因额外校验导致下载速度变慢的性能问题。',
+				},
+				{
+					'en-US': 'Fixed the issue of slow download speeds for additional files during import.',
+					'zh-CN': '修复导入时下载额外文件速度慢的问题。',
+				},
+				{
+					'en-US': 'Fixed the invalid path issue when importing instances using symbolic links.',
+					'zh-CN': '修复使用符号链接导入实例时的路径非法问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the same data packages from different worlds were accidentally marked as duplicates.',
+					'zh-CN': '修复将不同世界中的相同数据包被意外标记为重复的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the top and legs conflicted in rendering during skin preview.',
+					'zh-CN': '修复皮肤预览上衣与腿部渲染冲突的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the issue where the taskbar icon may not be centered on Windows platforms.',
+					'zh-CN': '修复在 Windows 平台上任务栏图标可能不居中的问题。',
+				},
+				{
+					'en-US':
+						'Fixed an error that occurred when editing instance contents while importing instances via hard links.',
+					'zh-CN': '修复使用符号链接导入实例时编辑实例内容出现错误的问题。',
+				},
+				{
+					'en-US': 'Fixed batch download adaptation issue for Minecraft Assets.',
+					'zh-CN': '修复 Minecraft Assets 批量下载无法自适应的问题。',
+				},
+				{
+					'en-US': 'Fixed race conditions and redundant downloads in Minecraft Assets temp files.',
+					'zh-CN': '修复 Minecraft Assets 临时文件异常竞争与重复下载的问题。',
+				},
+				{
+					'en-US': 'Fixed DNS cache not refreshing when DNS is unreachable.',
+					'zh-CN': '修复即使 DNS 不可达也不会刷新 DNS 缓存的问题。',
+				},
+				{
+					'en-US': 'Fixed fallback to re-download on local resource copy failure.',
+					'zh-CN': '修复本地资源复制失败而转为重新下载的问题。',
+				},
+				{
+					'en-US': 'Fixed "Back to Top" button obscuring bottom-right corner content.',
+					'zh-CN': '修复“返回顶部”按钮遮挡右下角内容的问题。',
+				},
+				{
+					'en-US': 'Fixed real-time logs disappearing when switching pages.',
+					'zh-CN': '修复切换页面导致实时日志丢失显示的问题。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.4',
+		version: '1.9.4',
+		publishedAt: '2026-08-29',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.4',
+			'zh-CN': 'Axolotl Launcher 1.9.4',
+		},
+		changes: {
+			fixed: [
+				{
+					'en-US': 'Fix the issue introduced in 1.9.2 where instances fail to start.',
+					'zh-CN': '修复从 1.9.2 引入的实例无法启动的问题。',
+				},
+			],
+		},
+	},
+	{
+		id: 'launcher-1.9.2',
+		version: '1.9.2',
+		publishedAt: '2026-08-29',
+		title: {
+			'en-US': 'Axolotl Launcher 1.9.2',
+			'zh-CN': 'Axolotl Launcher 1.9.2',
+		},
+		changes: {
+			fixed: [
+				{
+					'en-US':
+						'Fixed the Skin editor failing to open in macOS builds when its embedded editor resources were rejected with a 403 error.',
+					'zh-CN': '修复 macOS 构建中皮肤编辑器的嵌入资源被 403 拒绝，导致无法打开的问题。',
+				},
+				{
+					'en-US':
+						'Fixed the path concatenation error when importing instances; the path is no longer constructed from the instance name.',
+					'zh-CN': '修复导入实例拼接路径错误，现在不再从实例名拼接路径。',
+				},
+				{
+					'en-US': 'Fix the cmd window appearing after launch.',
+					'zh-CN': '修复启动后显示cmd窗口。',
+				},
+				{
+					'en-US': 'Disable global text selection; keep only specific text selectable.',
+					'zh-CN': '全局文字禁止选择，仅保留部分文字可被选中。',
+				},
+				{
+					'en-US': 'Unify scrollbar position.',
+					'zh-CN': '统一滚动条位置',
+				},
+			],
+			added: [
+				{
+					'en-US': 'Added an Easter egg to the About page! It might be hard to find~',
+					'zh-CN': '关于页面新增彩蛋！可能较难发现哦~',
+				},
+			],
+		},
+	},
+	{
 		id: 'launcher-1.9.1',
 		version: '1.9.1',
 		publishedAt: '2026-08-27',
@@ -41,7 +601,31 @@ export const launcherAnnouncements: readonly LauncherAnnouncement[] = [
 			'zh-CN': 'Axolotl Launcher 1.9.1',
 		},
 		changes: {
+			added: [
+				{
+					'en-US':
+						'Added a modpack installation confirmation dialog for Modrinth and CurseForge, with version selection and a custom instance name.',
+					'zh-CN': 'Modrinth 与 CurseForge 整合包安装新增确认弹窗，可选择版本并自定义实例名称。',
+				},
+			],
+			changed: [
+				{
+					'en-US':
+						'Modpack installation now shows existing installs and the collision-safe instance folder name before creating a separate instance.',
+					'zh-CN':
+						'安装整合包前现在会显示已有安装状态及避免重名冲突后的实例文件夹名称，并可创建独立实例。',
+				},
+			],
 			fixed: [
+				{
+					'en-US':
+						'Fixed the Discover page source selection changing to CurseForge after browsing maps.',
+					'zh-CN': '修复浏览地图后“发现内容”页的来源选择被切换为 CurseForge 的问题。',
+				},
+				{
+					'en-US': 'Fixed the right sidebar remaining collapsed after leaving the Settings page.',
+					'zh-CN': '修复从设置页面返回其他页面后右侧边栏仍保持收起的问题。',
+				},
 				{
 					'en-US':
 						'Fixed CurseForge showing no content under Discover when no search query is entered — browsing CurseForge now loads content again.',

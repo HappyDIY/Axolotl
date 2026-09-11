@@ -37,8 +37,20 @@ export async function check_mojang_services() {
  * @property {string} verification_uri - The URL to go to complete the flow.
  * @property {string} user_code - The code to enter on the verification_uri page.
  */
-export async function login() {
-	return await invoke('plugin:auth|login')
+export async function login(troubleLinks) {
+	return await invoke('plugin:auth|login', { troubleLinks })
+}
+
+export async function browser_login() {
+	return await invoke('plugin:auth|browser_login')
+}
+
+export async function begin_device_login() {
+	return await invoke('plugin:auth|begin_device_login')
+}
+
+export async function poll_device_login(deviceCode) {
+	return await invoke('plugin:auth|poll_device_login', { deviceCode })
 }
 
 export async function begin_yggdrasil_login(apiRoot, login, password) {

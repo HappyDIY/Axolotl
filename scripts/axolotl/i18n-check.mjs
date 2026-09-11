@@ -24,6 +24,8 @@ const allowedUntranslatedMessages = new Set([
 	'/path/to/java',
 	'https://example.com/api/yggdrasil',
 	'Fabric',
+	'Forge',
+	'Paper',
 	'Cleanroom',
 	'LiteLoader',
 	'LogShare.CN',
@@ -59,6 +61,8 @@ const allowedUntranslatedMessages = new Set([
 	'{type} · {version}',
 	'{value} MB',
 	'> {command}',
+	'Beta',
+	'Release',
 ])
 
 function messageText(value) {

@@ -59,9 +59,14 @@ export async function delete_logs(instanceId) {
   }
 */
 
-// From latest.log directly
+// From the launcher's launcher_log.txt directly
 export async function get_latest_log_cursor(instanceId, cursor) {
 	return await invoke('plugin:logs|logs_get_latest_log_cursor', { instanceId, cursor })
+}
+
+/// Read Minecraft's logs/latest.log from a cursor.
+export async function get_minecraft_latest_log_cursor(instanceId, cursor) {
+	return await invoke('plugin:logs|logs_get_minecraft_latest_log_cursor', { instanceId, cursor })
 }
 
 /// Get all buffered live log lines for an instance from the Rust ring buffer

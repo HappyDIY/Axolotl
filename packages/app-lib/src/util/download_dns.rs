@@ -2,20 +2,95 @@ use parking_lot::Mutex;
 use reqwest::dns::{Addrs, Name, Resolve, Resolving};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-#[derive(Clone, Default)]
-pub struct DownloadDnsResolver {
-    reliability: Arc<Mutex<HashMap<IpAddr, f64>>>,
-    last_resolved: Arc<Mutex<HashMap<String, Vec<IpAddr>>>>,
-    #[cfg(test)]
-    test_addresses: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
+/// `lookup_host` does not expose the authoritative record TTL. Keep entries
+/// long enough to retain the connection-reuse benefit, but short enough that
+/// a changed CDN, VPN, or network is not pinned until the application exits.
+const CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const CONNECTION_FAILURES_BEFORE_REFRESH: u8 = 2;
+
+#[derive(Clone)]
+struct CachedAddresses {
+    addresses: Vec<IpAddr>,
+    resolved_at: Instant,
+    consecutive_connection_failures: u8,
 }
 
-static PRE_RESOLVE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
+impl CachedAddresses {
+    fn is_fresh(&self) -> bool {
+        self.resolved_at.elapsed() < CACHE_TTL
+    }
+}
+
+#[derive(Clone)]
+pub struct DownloadDnsResolver {
+    reliability: Arc<Mutex<HashMap<IpAddr, f64>>>,
+    last_resolved: Arc<Mutex<HashMap<String, CachedAddresses>>>,
+    /// Locks only a single hostname's lookup. The map is held just long
+    /// enough to obtain the per-host lock, never while DNS is awaited.
+    resolving_hosts: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    host_overrides: Arc<Mutex<HashMap<String, String>>>,
+    #[cfg(test)]
+    test_addresses: Arc<Mutex<HashMap<String, Vec<SocketAddr>>>>,
+    #[cfg(test)]
+    test_lookup_delays: Arc<Mutex<HashMap<String, Duration>>>,
+}
+
+impl Default for DownloadDnsResolver {
+    fn default() -> Self {
+        Self {
+            reliability: Arc::default(),
+            last_resolved: Arc::default(),
+            resolving_hosts: Arc::default(),
+            host_overrides: Arc::default(),
+            #[cfg(test)]
+            test_addresses: Arc::default(),
+            #[cfg(test)]
+            test_lookup_delays: Arc::default(),
+        }
+    }
+}
 
 impl DownloadDnsResolver {
+    /// Resolves `host` through `resolver_host` while preserving the original
+    /// URL host for HTTP Host headers and TLS SNI.
+    #[allow(dead_code)]
+    pub fn set_host_override(
+        &self,
+        host: &str,
+        resolver_host: &str,
+    ) -> Result<(), &'static str> {
+        let host = normalize_host(host)?;
+        let resolver_host = normalize_host(resolver_host)?;
+        let mut overrides = self.host_overrides.lock();
+        if host == resolver_host {
+            overrides.remove(&host);
+        } else {
+            overrides.insert(host.clone(), resolver_host);
+        }
+        drop(overrides);
+        self.last_resolved.lock().remove(&host);
+        Ok(())
+    }
+
+    #[allow(dead_code)]
+    pub fn clear_host_override(&self, host: &str) -> Result<(), &'static str> {
+        let host = normalize_host(host)?;
+        self.host_overrides.lock().remove(&host);
+        self.last_resolved.lock().remove(&host);
+        Ok(())
+    }
+
+    pub fn host_override(&self, host: &str) -> Option<String> {
+        let host = normalize_host(host).ok()?;
+        self.host_overrides.lock().get(&host).cloned()
+    }
+
+    fn resolution_host(&self, host: &str) -> String {
+        self.host_override(host).unwrap_or_else(|| host.to_string())
+    }
     pub fn record_result(&self, address: IpAddr, result: f64) {
         let mut reliability = self.reliability.lock();
         reliability
@@ -25,12 +100,13 @@ impl DownloadDnsResolver {
     }
 
     pub fn record_host_success(&self, host: &str, address: IpAddr) {
-        if self
-            .last_resolved
-            .lock()
-            .get(host)
-            .is_some_and(|addresses| addresses.contains(&address))
+        let mut cached = self.last_resolved.lock();
+        if let Some(entry) = cached
+            .get_mut(host)
+            .filter(|entry| entry.addresses.contains(&address))
         {
+            entry.consecutive_connection_failures = 0;
+            drop(cached);
             self.record_result(address, 0.5);
         }
     }
@@ -39,8 +115,97 @@ impl DownloadDnsResolver {
         self.last_resolved
             .lock()
             .get(host)
+            .filter(|entry| entry.is_fresh())
+            .map(|entry| &entry.addresses)
             .cloned()
             .unwrap_or_default()
+    }
+
+    /// Marks a failed connection attempt for `host`. The second consecutive
+    /// failure expires its cache entry, so the next request or prewarm does a
+    /// fresh lookup. A single transient failure keeps the hot cache intact.
+    /// Returns whether this call expired the entry.
+    pub fn record_connection_failure(&self, host: &str) -> bool {
+        let mut cached = self.last_resolved.lock();
+        let Some(entry) = cached.get_mut(host) else {
+            return false;
+        };
+        entry.consecutive_connection_failures =
+            entry.consecutive_connection_failures.saturating_add(1);
+        if entry.consecutive_connection_failures
+            < CONNECTION_FAILURES_BEFORE_REFRESH
+        {
+            return false;
+        }
+        entry.resolved_at = Instant::now() - CACHE_TTL;
+        true
+    }
+
+    fn cache_addresses(&self, host: String, addresses: Vec<SocketAddr>) {
+        self.last_resolved.lock().insert(
+            host,
+            CachedAddresses {
+                addresses: addresses
+                    .iter()
+                    .map(|address| address.ip())
+                    .collect(),
+                resolved_at: Instant::now(),
+                consecutive_connection_failures: 0,
+            },
+        );
+    }
+
+    fn resolving_lock(&self, host: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.resolving_hosts
+            .lock()
+            .entry(host.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
+    }
+
+    async fn lookup_addresses(
+        &self,
+        resolution_host: &str,
+    ) -> std::io::Result<Vec<SocketAddr>> {
+        #[cfg(test)]
+        {
+            let delay =
+                self.test_lookup_delays.lock().get(resolution_host).copied();
+            if let Some(delay) = delay {
+                tokio::time::sleep(delay).await;
+            }
+            if let Some(addresses) =
+                self.test_addresses.lock().get(resolution_host).cloned()
+            {
+                return Ok(addresses);
+            }
+        }
+        tokio::net::lookup_host((resolution_host, 0))
+            .await
+            .map(|addresses| addresses.collect())
+    }
+
+    async fn refresh(&self, host: &str) -> std::io::Result<Vec<IpAddr>> {
+        let host = normalize_host(host).map_err(std::io::Error::other)?;
+        let cached = self.resolved_addresses(&host);
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        let host_lock = self.resolving_lock(&host);
+        let _guard = host_lock.lock().await;
+        let cached = self.resolved_addresses(&host);
+        if !cached.is_empty() {
+            return Ok(cached);
+        }
+        let resolution_host = self.resolution_host(&host);
+        let mut addresses = self.lookup_addresses(&resolution_host).await?;
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        addresses = self.order_addresses(&host, addresses);
+        let resolved = addresses.iter().map(|address| address.ip()).collect();
+        self.cache_addresses(host, addresses);
+        Ok(resolved)
     }
 
     /// Resolves a host ahead of the first request so batch downloads can
@@ -48,27 +213,7 @@ impl DownloadDnsResolver {
     /// failed lookup leaves the resolver untouched and requests will resolve
     /// on demand later.
     pub async fn pre_resolve(&self, host: &str) {
-        if !self.resolved_addresses(host).is_empty() {
-            return;
-        }
-        let _guard = PRE_RESOLVE_LOCK.lock().await;
-        if !self.resolved_addresses(host).is_empty() {
-            return;
-        }
-        let Ok(addresses) = tokio::net::lookup_host((host, 0)).await else {
-            return;
-        };
-        let mut addresses = addresses.collect::<Vec<_>>();
-        if addresses.is_empty() {
-            return;
-        }
-        addresses.sort_unstable_by_key(|address| address.ip());
-        addresses.dedup_by_key(|address| address.ip());
-        let addresses = self.order_addresses(host, addresses);
-        self.last_resolved.lock().insert(
-            host.to_string(),
-            addresses.iter().map(|address| address.ip()).collect(),
-        );
+        let _ = self.refresh(host).await;
     }
 
     #[cfg(test)]
@@ -76,6 +221,20 @@ impl DownloadDnsResolver {
         self.test_addresses
             .lock()
             .insert(host.to_string(), addresses);
+    }
+
+    #[cfg(test)]
+    fn set_test_lookup_delay(&self, host: &str, delay: Duration) {
+        self.test_lookup_delays
+            .lock()
+            .insert(host.to_string(), delay);
+    }
+
+    #[cfg(test)]
+    fn expire_cache(&self, host: &str) {
+        if let Some(entry) = self.last_resolved.lock().get_mut(host) {
+            entry.resolved_at = Instant::now() - CACHE_TTL;
+        }
     }
 
     fn score(&self, address: IpAddr) -> f64 {
@@ -120,42 +279,28 @@ impl DownloadDnsResolver {
     }
 }
 
+fn normalize_host(host: &str) -> Result<String, &'static str> {
+    let host = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if host.is_empty()
+        || host.contains(['/', ':', '@', '[', ']'])
+        || host.split('.').any(str::is_empty)
+    {
+        return Err("DNS host override must be a hostname without a port");
+    }
+    Ok(host)
+}
+
 impl Resolve for DownloadDnsResolver {
     fn resolve(&self, name: Name) -> Resolving {
         let host = name.as_str().to_string();
         let resolver = self.clone();
         Box::pin(async move {
-            let cached_addresses = resolver
-                .resolved_addresses(&host)
+            let addresses = resolver
+                .refresh(&host)
+                .await?
                 .into_iter()
                 .map(|address| SocketAddr::new(address, 0))
                 .collect::<Vec<_>>();
-            #[cfg(test)]
-            let test_addresses =
-                resolver.test_addresses.lock().get(&host).cloned();
-            #[cfg(test)]
-            let addresses = if let Some(addresses) = test_addresses {
-                addresses
-            } else if !cached_addresses.is_empty() {
-                cached_addresses
-            } else {
-                tokio::net::lookup_host((host.as_str(), 0))
-                    .await?
-                    .collect::<Vec<_>>()
-            };
-            #[cfg(not(test))]
-            let addresses = if !cached_addresses.is_empty() {
-                cached_addresses
-            } else {
-                tokio::net::lookup_host((host.as_str(), 0))
-                    .await?
-                    .collect::<Vec<_>>()
-            };
-            let addresses = resolver.order_addresses(&host, addresses);
-            resolver.last_resolved.lock().insert(
-                host,
-                addresses.iter().map(|address| address.ip()).collect(),
-            );
             Ok(Box::new(addresses.into_iter()) as Addrs)
         })
     }
@@ -237,15 +382,50 @@ mod tests {
         let resolver = DownloadDnsResolver::default();
         let failed = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10));
         let succeeded = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11));
-        resolver
-            .last_resolved
-            .lock()
-            .insert("cdn.example.com".to_string(), vec![failed, succeeded]);
+        resolver.cache_addresses(
+            "cdn.example.com".to_string(),
+            vec![SocketAddr::new(failed, 0), SocketAddr::new(succeeded, 0)],
+        );
 
         resolver.record_host_success("cdn.example.com", succeeded);
 
         assert_eq!(resolver.score(failed), 0.0);
         assert!(resolver.score(succeeded) > 0.0);
+    }
+
+    #[test]
+    fn host_success_does_not_refresh_an_expired_dns_entry() {
+        let resolver = DownloadDnsResolver::default();
+        let address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 11));
+        resolver.cache_addresses(
+            "expired-success.test".to_string(),
+            vec![SocketAddr::new(address, 0)],
+        );
+        resolver.expire_cache("expired-success.test");
+
+        resolver.record_host_success("expired-success.test", address);
+
+        assert!(
+            resolver
+                .resolved_addresses("expired-success.test")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn late_success_does_not_undo_failure_expiration() {
+        let resolver = DownloadDnsResolver::default();
+        let address = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 12));
+        resolver.cache_addresses(
+            "late-success.test".to_string(),
+            vec![SocketAddr::new(address, 0)],
+        );
+        assert!(!resolver.record_connection_failure("late-success.test"));
+        assert!(resolver.record_connection_failure("late-success.test"));
+
+        resolver.record_host_success("late-success.test", address);
+
+        assert!(resolver.resolved_addresses("late-success.test").is_empty());
     }
 
     #[tokio::test]
@@ -280,5 +460,155 @@ mod tests {
 
         assert_eq!(body, "ok");
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn expired_cache_refreshes_to_the_current_addresses() {
+        let resolver = DownloadDnsResolver::default();
+        let old = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), 0));
+        let current = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        resolver.set_test_addresses("ttl-refresh.test", vec![old]);
+        resolver.pre_resolve("ttl-refresh.test").await;
+        resolver.set_test_addresses("ttl-refresh.test", vec![current]);
+
+        assert_eq!(
+            resolver.resolved_addresses("ttl-refresh.test"),
+            vec![old.ip()]
+        );
+        resolver.expire_cache("ttl-refresh.test");
+        resolver.pre_resolve("ttl-refresh.test").await;
+
+        assert_eq!(
+            resolver.resolved_addresses("ttl-refresh.test"),
+            vec![current.ip()]
+        );
+    }
+
+    #[tokio::test]
+    async fn repeated_connection_failures_refresh_the_cached_address() {
+        let resolver = DownloadDnsResolver::default();
+        let old = SocketAddr::from((Ipv4Addr::new(127, 0, 0, 2), 0));
+        let current = SocketAddr::from((Ipv4Addr::LOCALHOST, 0));
+        resolver.set_test_addresses("failure-refresh.test", vec![old]);
+        resolver.pre_resolve("failure-refresh.test").await;
+        resolver.set_test_addresses("failure-refresh.test", vec![current]);
+
+        assert!(!resolver.record_connection_failure("failure-refresh.test"));
+        assert!(resolver.record_connection_failure("failure-refresh.test"));
+        assert!(
+            resolver
+                .resolved_addresses("failure-refresh.test")
+                .is_empty()
+        );
+        resolver.pre_resolve("failure-refresh.test").await;
+
+        assert_eq!(
+            resolver.resolved_addresses("failure-refresh.test"),
+            vec![current.ip()]
+        );
+        let (port, server) = spawn_ipv4_server().await;
+        assert_eq!(
+            request_with_resolver(resolver, "failure-refresh.test", port).await,
+            "ok"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn pre_resolving_one_host_does_not_block_another_host() {
+        let resolver = DownloadDnsResolver::default();
+        resolver.set_test_addresses(
+            "slow-resolution.test",
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+        );
+        resolver.set_test_lookup_delay(
+            "slow-resolution.test",
+            Duration::from_millis(100),
+        );
+        resolver.set_test_addresses(
+            "fast-resolution.test",
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+        );
+
+        let slow_resolver = resolver.clone();
+        let slow = tokio::spawn(async move {
+            slow_resolver.pre_resolve("slow-resolution.test").await;
+        });
+        tokio::task::yield_now().await;
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            resolver.pre_resolve("fast-resolution.test"),
+        )
+        .await
+        .expect("an unrelated DNS lookup must not wait for the slow host");
+
+        assert!(
+            !resolver
+                .resolved_addresses("fast-resolution.test")
+                .is_empty()
+        );
+        slow.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn host_override_uses_the_target_hosts_addresses() {
+        let resolver = DownloadDnsResolver::default();
+        let (port, server) = spawn_ipv4_server().await;
+        resolver.set_test_addresses(
+            "resolver-target.test",
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+        );
+        resolver
+            .set_host_override("REQUEST-HOST.TEST.", "resolver-target.test")
+            .unwrap();
+
+        let body =
+            request_with_resolver(resolver.clone(), "request-host.test", port)
+                .await;
+
+        assert_eq!(body, "ok");
+        assert_eq!(
+            resolver.host_override("request-host.test").as_deref(),
+            Some("resolver-target.test"),
+        );
+        assert!(!resolver.resolved_addresses("request-host.test").is_empty());
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn clearing_override_removes_the_cached_request_host_addresses() {
+        let resolver = DownloadDnsResolver::default();
+        resolver
+            .set_host_override("request-host.test", "resolver-target.test")
+            .unwrap();
+        resolver.cache_addresses(
+            "request-host.test".to_string(),
+            vec![SocketAddr::from((Ipv4Addr::LOCALHOST, 0))],
+        );
+
+        resolver.clear_host_override("request-host.test").unwrap();
+
+        assert!(resolver.host_override("request-host.test").is_none());
+        assert!(resolver.resolved_addresses("request-host.test").is_empty());
+        assert!(normalize_host("https://resolver-target.test").is_err());
+        assert!(normalize_host("resolver-target.test:443").is_err());
+    }
+
+    #[test]
+    fn default_resolver_does_not_override_tianpao() {
+        assert!(
+            DownloadDnsResolver::default()
+                .host_override("mod.tianpao.top")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn default_resolver_does_not_override_legacy_modrinth_cdn() {
+        assert!(
+            DownloadDnsResolver::default()
+                .host_override("cdn.modrinth.com")
+                .is_none()
+        );
     }
 }

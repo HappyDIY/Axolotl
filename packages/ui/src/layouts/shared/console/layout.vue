@@ -89,9 +89,7 @@
 			</div>
 		</div>
 
-		<div
-			class="relative min-h-0 flex-1 overflow-hidden rounded-[20px]"
-		>
+		<div class="relative min-h-0 flex-1 overflow-hidden rounded-[20px]">
 			<LogViewport
 				ref="viewportRef"
 				class="h-full"
@@ -112,8 +110,15 @@
 			</Transition>
 		</div>
 
+		<slot
+			v-if="showCommandInput && customCommandInput"
+			name="command-input"
+			:disabled="commandDisabled"
+			:placeholder="commandPlaceholder"
+			:submit-command="submitProvidedCommand"
+		/>
 		<StyledInput
-			v-if="showCommandInput"
+			v-else-if="showCommandInput"
 			v-model="commandInput"
 			v-tooltip="commandDisabled ? commandDisabledTooltip : undefined"
 			:icon="TerminalSquareIcon"
@@ -200,6 +205,9 @@ import { injectConsoleManager } from './providers'
 import type { LogLevel, LogLine } from './types'
 
 const ctx = injectConsoleManager()
+defineProps<{
+	customCommandInput?: boolean
+}>()
 const client = injectModrinthClient()
 const modalBehavior = injectModalBehavior()
 const pageContext = injectPageContext(null)
@@ -742,6 +750,12 @@ function submitCommand() {
 	commandInput.value = ''
 	// The user just interacted with the console: pin the view to the bottom
 	// so the command echo and its response are visible immediately.
+	viewportRef.value?.scrollToBottom()
+}
+
+function submitProvidedCommand(command: string) {
+	if (!command.trim() || commandDisabled.value || !ctx.sendCommand) return
+	ctx.sendCommand(command.trim())
 	viewportRef.value?.scrollToBottom()
 }
 

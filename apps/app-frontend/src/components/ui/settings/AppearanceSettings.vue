@@ -29,7 +29,9 @@ import { getOS } from '@/helpers/utils'
 import { useTheming } from '@/store/state'
 import {
 	type AccentColor,
+	type CloseBehavior,
 	type ColorTheme,
+	DEFAULT_CUSTOM_ACCENT_COLOR,
 	deriveAccentVariants,
 	type FeatureFlag,
 	hexToHsl,
@@ -98,6 +100,18 @@ const messages = defineMessages({
 	accentColorCustom: {
 		id: 'app.appearance-settings.accent-color.custom',
 		defaultMessage: 'Custom',
+	},
+	accentColorSystem: {
+		id: 'app.appearance-settings.accent-color.system',
+		defaultMessage: 'Follow system',
+	},
+	accentColorSystemUnsupported: {
+		id: 'app.appearance-settings.accent-color.system-unsupported',
+		defaultMessage: 'System unsupported',
+	},
+	accentColorSystemUnsupportedLabel: {
+		id: 'app.appearance-settings.accent-color.system-unsupported-label',
+		defaultMessage: 'Follow system: System unsupported',
 	},
 	accentColorCustomHue: {
 		id: 'app.appearance-settings.accent-color.custom-hue',
@@ -228,6 +242,26 @@ const messages = defineMessages({
 		id: 'app.appearance-settings.native-decorations.description',
 		defaultMessage: 'Use system window frame (app restart required).',
 	},
+	closeBehaviorTitle: {
+		id: 'app.appearance-settings.close-behavior.title',
+		defaultMessage: 'Choose how to close Axolotl Launcher',
+	},
+	closeBehaviorDescription: {
+		id: 'app.appearance-settings.close-behavior.description',
+		defaultMessage: 'Choose whether closing the window exits the launcher or hides it to the tray.',
+	},
+	closeBehaviorAsk: {
+		id: 'app.appearance-settings.close-behavior.ask',
+		defaultMessage: 'Ask every time',
+	},
+	closeBehaviorClose: {
+		id: 'app.appearance-settings.close-behavior.close',
+		defaultMessage: 'Close directly',
+	},
+	closeBehaviorLightweight: {
+		id: 'app.appearance-settings.close-behavior.lightweight',
+		defaultMessage: 'Hide to tray',
+	},
 	defaultLandingPageTitle: {
 		id: 'app.appearance-settings.default-landing-page.title',
 		defaultMessage: 'Default landing page',
@@ -342,7 +376,10 @@ const accentColorOptions: Array<{
 ]
 
 const isCustomAccent = computed(() => settings.value.accent_color.startsWith('custom:'))
-const customAccentHex = ref(parseCustomAccentColor(settings.value.accent_color) ?? '#db2777')
+const isSystemAccent = computed(() => settings.value.accent_color === 'system')
+const customAccentHex = ref(
+	parseCustomAccentColor(settings.value.accent_color) ?? DEFAULT_CUSTOM_ACCENT_COLOR,
+)
 const customAccentHexInput = ref(customAccentHex.value)
 const customAccentHue = computed(() => Math.round(hexToHsl(customAccentHex.value).h))
 const customAccentPreview = computed(() => deriveAccentVariants(customAccentHex.value))
@@ -435,6 +472,7 @@ watch(
 			settings.value.transparent_background_opacity,
 			settings.value.transparent_background_blur,
 			settings.value.sidebar_instance_count,
+			settings.value.close_behavior,
 		] as const,
 	([
 		path,
@@ -444,6 +482,7 @@ watch(
 		transparentOpacity,
 		transparentBlur,
 		sidebarInstanceCount,
+		closeBehavior,
 	]) => {
 		themeStore.customBackgroundPath = path
 		themeStore.customBackgroundBlur = blur
@@ -453,6 +492,7 @@ watch(
 		themeStore.transparentBackgroundBlur = transparentBlur
 		themeStore.setTransparentBackgroundClass()
 		themeStore.sidebarInstanceCount = sidebarInstanceCount
+		themeStore.closeBehavior = closeBehavior as CloseBehavior
 	},
 	{ immediate: true },
 )
@@ -510,7 +550,7 @@ watch(
 			</template>
 			<div class="flex flex-col gap-4 p-4 @container">
 				<div
-					class="grid grid-cols-6 gap-1 @2xl:gap-2"
+					class="grid grid-cols-4 gap-1 @2xl:gap-2 @4xl:grid-cols-7"
 					role="radiogroup"
 					:aria-label="formatMessage(messages.accentColorTitle)"
 				>
@@ -542,6 +582,50 @@ watch(
 							v-if="settings.accent_color === accentColor.value"
 							class="ml-auto hidden size-4 shrink-0 @4xl:block"
 						/>
+					</button>
+					<button
+						type="button"
+						role="radio"
+						:disabled="themeStore.systemAccentSupported !== true"
+						:aria-checked="isSystemAccent"
+						:aria-label="
+							formatMessage(
+								themeStore.systemAccentSupported === false
+									? messages.accentColorSystemUnsupportedLabel
+									: messages.accentColorSystem,
+							)
+						"
+						class="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-solid px-1 py-2.5 @2xl:px-2 @4xl:px-3 font-semibold transition-all enabled:active:scale-[0.97]"
+						:class="
+							themeStore.systemAccentSupported !== true
+								? 'cursor-not-allowed border-surface-4 bg-surface-2 text-secondary opacity-60'
+								: isSystemAccent
+									? 'border-brand bg-brand-highlight text-brand'
+									: 'border-surface-4 bg-surface-3 text-secondary hover:border-surface-5 hover:text-contrast'
+						"
+						@click="
+							() => {
+								themeStore.setAccentColor('system')
+								settings.accent_color = 'system'
+							}
+						"
+					>
+						<span
+							class="size-4 shrink-0 rounded-full ring-2 ring-white/20"
+							:style="{
+								backgroundColor: themeStore.systemAccentColor ?? 'var(--color-pink)',
+							}"
+						/>
+						<span class="hidden min-w-0 flex-col truncate text-start leading-tight @xl:flex">
+							<span class="truncate">{{ formatMessage(messages.accentColorSystem) }}</span>
+							<span
+								v-if="themeStore.systemAccentSupported === false"
+								class="truncate text-xs font-normal"
+							>
+								{{ formatMessage(messages.accentColorSystemUnsupported) }}
+							</span>
+						</span>
+						<CheckIcon v-if="isSystemAccent" class="ml-auto hidden size-4 shrink-0 @4xl:block" />
 					</button>
 					<button
 						type="button"
@@ -966,6 +1050,27 @@ watch(
 				<template #description>{{ formatMessage(messages.nativeDecorationsDescription) }}</template>
 				<template #control>
 					<Toggle id="native-decorations" v-model="settings.native_decorations" />
+				</template>
+			</SettingsRow>
+			<SettingsRow>
+				<template #label>
+					<span id="settings-target-appearance-close-behavior" tabindex="-1">
+						{{ formatMessage(messages.closeBehaviorTitle) }}
+					</span>
+				</template>
+				<template #description>{{ formatMessage(messages.closeBehaviorDescription) }}</template>
+				<template #control>
+					<Combobox
+						id="close-behavior"
+						v-model="settings.close_behavior"
+						:name="formatMessage(messages.closeBehaviorTitle)"
+						:options="[
+							{ value: 'ask', label: formatMessage(messages.closeBehaviorAsk) },
+							{ value: 'close', label: formatMessage(messages.closeBehaviorClose) },
+							{ value: 'lightweight', label: formatMessage(messages.closeBehaviorLightweight) },
+						]"
+						@update:model-value="(value) => (themeStore.closeBehavior = value as CloseBehavior)"
+					/>
 				</template>
 			</SettingsRow>
 			<SettingsRow>

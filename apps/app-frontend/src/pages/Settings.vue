@@ -1,9 +1,16 @@
 <script setup lang="ts">
 import { ChevronDownIcon, SearchIcon, XIcon } from '@modrinth/assets'
-import { defineMessages, type MessageDescriptor, ProgressBar, useVIntl } from '@modrinth/ui'
+import {
+	defineMessages,
+	type MessageDescriptor,
+	ProgressBar,
+	useLoadingBarToken,
+	useVIntl,
+} from '@modrinth/ui'
 import { getVersion } from '@tauri-apps/api/app'
 import { platform as getOsPlatform, version as getOsVersion } from '@tauri-apps/plugin-os'
 import { computed, nextTick, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 
 import {
 	getVisibleSettingsCategories,
@@ -32,16 +39,18 @@ interface SettingsSearchResult {
 }
 
 const themeStore = useTheming()
+const route = useRoute()
 const { formatMessage } = useVIntl()
 const { progress, version: downloadingVersion } = injectAppUpdateDownloadProgress()
 
-const version = await getVersion()
+const [version, loadedSettings] = await Promise.all([getVersion(), get()])
 const osPlatform = getOsPlatform()
 const osVersion = getOsVersion()
-const settings = ref(await get())
+const settings = ref(loadedSettings)
 const devModeCounter = ref(0)
 const searchQuery = ref('')
-const selectedCategoryId = ref('interface')
+const selectedCategoryId = ref(route.hash.slice(1) || 'interface')
+const settingsContentPending = ref(false)
 const contentContainer = ref<HTMLElement | null>(null)
 const searchHighlightTarget = ref<HTMLElement | null>(null)
 const expandedGroups = ref<Record<string, boolean>>({
@@ -53,6 +62,11 @@ const expandedGroups = ref<Record<string, boolean>>({
 })
 const hasSearchQuery = computed(() => !!normalizeSettingsSearchText(searchQuery.value))
 let searchHighlightTimer: ReturnType<typeof window.setTimeout> | undefined
+
+// The settings registry keeps each category lazy. Track only the currently
+// selected async component so the shared top loading bar reflects navigation
+// without eagerly loading every settings page.
+useLoadingBarToken(settingsContentPending)
 
 const messages = defineMessages({
 	search: {
@@ -141,6 +155,14 @@ watch(visibleCategories, (categories) => {
 	}
 })
 
+watch(
+	() => route.hash,
+	(hash) => {
+		const categoryId = hash.slice(1)
+		if (categoryId) selectedCategoryId.value = categoryId
+	},
+)
+
 function selectCategory(categoryId: string) {
 	selectedCategoryId.value = categoryId
 	const category = visibleCategories.value.find((item) => item.id === categoryId)
@@ -191,7 +213,9 @@ function entryName(entry: SettingsSearchEntry): string {
 }
 
 function messageSearchTexts(message?: MessageDescriptor): string[] {
-	if (!message) return []
+	// Search metadata is assembled from several registries. Guard the runtime
+	// boundary so a malformed entry cannot abort the entire settings render.
+	if (!message || typeof message !== 'object' || typeof message.id !== 'string') return []
 
 	const texts = [formatMessage(message), message.defaultMessage].filter(
 		(text): text is string => !!text,
@@ -242,7 +266,7 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 </script>
 
 <template>
-	<div class="settings-fixed-render h-full min-h-0 p-6">
+	<div class="settings-fixed-render h-full min-h-0 pt-6 pl-6 pb-6">
 		<div class="settings-layout h-full min-h-0">
 			<aside class="settings-sidebar">
 				<div class="relative shrink-0">
@@ -340,7 +364,7 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 					<p v-if="themeStore.devMode" class="m-0 mb-3 text-brand font-semibold">
 						{{ formatMessage(messages.developerModeEnabled) }}
 					</p>
-					<div class="flex items-center gap-3">
+					<div class="settings-footer-identity flex items-start gap-3">
 						<button
 							type="button"
 							class="m-0 flex size-9 shrink-0 items-center justify-center rounded-lg border-0 bg-transparent p-0 transition-colors hover:bg-surface-3"
@@ -349,8 +373,8 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 						>
 							<img class="size-8 object-contain" src="@/assets/axolotl.png" alt="" />
 						</button>
-						<div class="min-w-0">
-							<p class="m-0 truncate">{{ AxolotlBrandConfig.productName }} {{ version }}</p>
+						<div class="settings-footer-version min-w-0">
+							<p class="m-0 break-words">{{ AxolotlBrandConfig.productName }} {{ version }}</p>
 							<p class="m-0 truncate">{{ platformName() }} {{ osVersion }}</p>
 						</div>
 					</div>
@@ -376,8 +400,14 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 						:class="activeCategory.flushContent ? 'h-full' : 'mx-auto max-w-5xl px-6 pb-6'"
 						tabindex="-1"
 					>
-						<Suspense>
-							<component :is="activeCategory.content" />
+						<Suspense
+							@pending="settingsContentPending = true"
+							@resolve="settingsContentPending = false"
+						>
+							<component :is="activeCategory.content" :key="activeCategory.id" />
+							<template #fallback>
+								<div class="settings-content-fallback" aria-hidden="true" />
+							</template>
 						</Suspense>
 					</div>
 				</div>
@@ -391,7 +421,7 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 	--settings-divider: color-mix(in srgb, var(--surface-4) 55%, transparent);
 	--settings-card-border: color-mix(in srgb, var(--surface-4) 72%, transparent);
 	display: grid;
-	grid-template-columns: minmax(14rem, 16rem) minmax(0, 1fr);
+	grid-template-columns: minmax(18rem, 20rem) minmax(0, 1fr);
 	min-height: 0;
 	overflow: hidden;
 }
@@ -508,6 +538,19 @@ const pageTitle: MessageDescriptor = settingsPageTitle
 	flex-direction: column;
 	min-height: 0;
 	overflow: hidden;
+}
+
+.settings-content-fallback {
+	min-height: 100%;
+}
+
+.settings-footer-identity {
+	min-width: 0;
+}
+
+.settings-footer-version {
+	min-width: 0;
+	line-height: 1.4;
 }
 
 .settings-content-header {

@@ -10,10 +10,10 @@ type DamageFlashMaterial = THREE.MeshStandardMaterial & {
 const DAMAGE_FLASH_COLOR = new THREE.Color(0xbd2f2f)
 const DAMAGE_FLASH_SHADER_KEY = 'skin-preview-damage-flash'
 
-export function createRadialSpotlightShader() {
+export function createRadialSpotlightShader(isDarkTheme: boolean) {
 	return {
 		uniforms: {
-			innerColor: { value: new THREE.Color(0x000000) },
+			innerColor: { value: new THREE.Color(isDarkTheme ? 0xd1d5db : 0x000000) },
 			outerColor: { value: new THREE.Color(0xffffff) },
 			innerOpacity: { value: 0.3 },
 			outerOpacity: { value: 0.0 },
@@ -52,7 +52,7 @@ export function createRadialSpotlightShader() {
   `,
 		transparent: true,
 		depthWrite: false,
-		depthTest: false,
+		depthTest: true,
 	}
 }
 

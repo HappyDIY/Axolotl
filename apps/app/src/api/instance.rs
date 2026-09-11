@@ -15,6 +15,7 @@ use theseus::data::{
 };
 use theseus::instance::InstallProjectWithDependenciesRequest;
 use theseus::instance::QuickPlayType;
+use theseus::pack::import::ImportLauncherType;
 use theseus::prelude::*;
 use theseus::server_address::ServerAddress;
 
@@ -22,6 +23,8 @@ pub fn init<R: tauri::Runtime>() -> tauri::plugin::TauriPlugin<R> {
     tauri::plugin::Builder::new("instance")
         .invoke_handler(tauri::generate_handler![
             instance_remove,
+            instance_create_direct_link,
+            instance_sync_direct_links,
             instance_get,
             instance_get_many,
             instance_list,
@@ -132,10 +135,28 @@ pub struct Instance {
     pub custom_env_vars: Option<Vec<(String, String)>>,
     pub memory: Option<MemorySettings>,
     pub force_fullscreen: Option<bool>,
+    pub maximize_window: Option<bool>,
     pub game_resolution: Option<WindowSize>,
+    pub launch_preparation_timeout: Option<u64>,
     pub hooks: Hooks,
     pub symlink_target: Option<String>,
     pub game_dir_override: Option<String>,
+    pub linked_launcher: Option<String>,
+    pub linked_launcher_root: Option<String>,
+    pub linked_dot_minecraft: Option<String>,
+    pub linked_version_id: Option<String>,
+    pub linked_version_json_path: Option<String>,
+    pub linked_game_dir_mode: Option<String>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateDirectLinkInstanceRequest {
+    pub name: Option<String>,
+    pub launcher_type: ImportLauncherType,
+    pub base_path: PathBuf,
+    pub instance_folder: String,
+    pub instance_path: Option<String>,
 }
 
 #[derive(Serialize, Debug, Clone)]
@@ -239,7 +260,19 @@ pub struct EditInstance {
         skip_serializing_if = "Option::is_none",
         with = "serde_with::rust::double_option"
     )]
+    pub maximize_window: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
     pub game_resolution: Option<Option<WindowSize>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub launch_preparation_timeout: Option<Option<u64>>,
     pub hooks: Option<Hooks>,
 
     #[serde(
@@ -282,10 +315,22 @@ impl From<InstanceMetadata> for Instance {
             custom_env_vars: metadata.launch_overrides.custom_env_vars,
             memory: metadata.launch_overrides.memory,
             force_fullscreen: metadata.launch_overrides.force_fullscreen,
+            maximize_window: metadata.launch_overrides.maximize_window,
             game_resolution: metadata.launch_overrides.game_resolution,
+            launch_preparation_timeout: metadata
+                .launch_overrides
+                .launch_preparation_timeout,
             hooks: metadata.launch_overrides.hooks,
             symlink_target: metadata.instance.symlink_target,
             game_dir_override: metadata.instance.game_dir_override,
+            linked_launcher: metadata.instance.linked_launcher,
+            linked_launcher_root: metadata.instance.linked_launcher_root,
+            linked_dot_minecraft: metadata.instance.linked_dot_minecraft,
+            linked_version_id: metadata.instance.linked_version_id,
+            linked_version_json_path: metadata
+                .instance
+                .linked_version_json_path,
+            linked_game_dir_mode: metadata.instance.linked_game_dir_mode,
         }
     }
 }
@@ -423,7 +468,10 @@ fn edit_to_core(edit_instance: EditInstance) -> Result<CoreEditInstance> {
             custom_env_vars: edit_instance.custom_env_vars,
             memory: edit_instance.memory,
             force_fullscreen: edit_instance.force_fullscreen,
+            maximize_window: edit_instance.maximize_window,
             game_resolution: edit_instance.game_resolution,
+            launch_preparation_timeout: edit_instance
+                .launch_preparation_timeout,
             hooks: edit_instance.hooks,
         }),
         content_set_patch: Some(AppliedContentSetPatch {
@@ -464,6 +512,31 @@ async fn instance_from_metadata(
 pub async fn instance_remove(instance_id: &str) -> Result<()> {
     theseus::instance::remove(instance_id).await?;
     Ok(())
+}
+
+#[tauri::command]
+pub async fn instance_create_direct_link(
+    request: CreateDirectLinkInstanceRequest,
+) -> Result<Instance> {
+    let metadata = theseus::instance::create_with_direct_link(
+        theseus::data::CreateDirectLinkInstance {
+            name: request.name,
+            launcher_type: request.launcher_type,
+            base_path: request.base_path,
+            instance_folder: request.instance_folder,
+            instance_path: request.instance_path,
+            game_dir_mode: None,
+        },
+    )
+    .await?;
+    instance_from_metadata(metadata).await
+}
+
+#[tauri::command]
+pub async fn instance_sync_direct_links(
+    roots: Vec<theseus::data::ExternalMinecraftRoot>,
+) -> Result<theseus::data::DirectLinkSyncReport> {
+    Ok(theseus::instance::sync_direct_links(roots).await?)
 }
 
 #[tauri::command]
@@ -788,16 +861,27 @@ pub async fn instance_get_linked_modpack_content(
 }
 
 #[tauri::command]
-pub async fn instance_get_full_path(instance_id: &str) -> Result<PathBuf> {
-    Ok(theseus::instance::get_full_path(instance_id).await?)
+pub async fn instance_get_full_path<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
+    instance_id: &str,
+) -> Result<PathBuf> {
+    let path = theseus::instance::get_full_path(instance_id).await?;
+    crate::api::files::ensure_browsable(&app, &path);
+    Ok(path)
 }
 
 #[tauri::command]
-pub async fn instance_get_mod_full_path(
+pub async fn instance_get_mod_full_path<R: tauri::Runtime>(
+    app: tauri::AppHandle<R>,
     instance_id: &str,
     project_path: &str,
 ) -> Result<PathBuf> {
-    Ok(theseus::instance::get_mod_full_path(instance_id, project_path).await?)
+    let path =
+        theseus::instance::get_mod_full_path(instance_id, project_path).await?;
+    if let Some(parent) = path.parent() {
+        crate::api::files::ensure_browsable(&app, parent);
+    }
+    Ok(path)
 }
 
 #[tauri::command]

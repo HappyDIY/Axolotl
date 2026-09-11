@@ -4442,12 +4442,6 @@
 	"app.lab.seed-map.edition.java-large-biomes": {
 		"message": "Java: Large Biomes"
 	},
-	"app.lab.seed-map.elevation": {
-		"message": "Surface"
-	},
-	"app.lab.seed-map.elevation-locked": {
-		"message": "Follows the estimated surface while terrain estimation is on"
-	},
 	"app.lab.seed-map.exit-fullscreen": {
 		"message": "Exit fullscreen"
 	},
@@ -5766,7 +5760,7 @@
 		"message": "Allow anonymous telemetry"
 	},
 	"app.privacy-consent.telemetry-description": {
-		"message": "Helps count opted-in installations and diagnose launcher errors using sanitized, limited reports. Full Minecraft logs and account credentials are not uploaded."
+		"message": "Helps count opted-in installations and daily active users. Full Minecraft logs and account credentials are never uploaded."
 	},
 	"app.privacy-consent.title": {
 		"message": "Privacy & security"
@@ -5962,9 +5956,6 @@
 	},
 	"app.servers.card.type": {
 		"message": "{type} · {version}"
-	},
-	"app.servers.console.command-echo": {
-		"message": "> {command}"
 	},
 	"app.servers.console.not-running": {
 		"message": "The server is not running"
@@ -6498,7 +6489,7 @@
 		"message": "Show snapshots"
 	},
 	"app.servers.wizard.type-heading": {
-		"message": "Choose a server type"
+		"message": "Choose a server core"
 	},
 	"app.servers.wizard.type-title": {
 		"message": "Server type"
@@ -6547,6 +6538,30 @@
 	},
 	"app.settings.about.development-team": {
 		"message": "Development team"
+	},
+	"app.settings.about.game.completed": {
+		"message": "Rainbow axolotl!"
+	},
+	"app.settings.about.game.exit": {
+		"message": "Exit game"
+	},
+	"app.settings.about.game.game-over": {
+		"message": "The axolotls got stranded!"
+	},
+	"app.settings.about.game.highest-level": {
+		"message": "Highest: level {level}"
+	},
+	"app.settings.about.game.restart": {
+		"message": "Restart"
+	},
+	"app.settings.about.game.score": {
+		"message": "Score: {score}"
+	},
+	"app.settings.about.game.tap-to-drop": {
+		"message": "Click to drop a pink axolotl"
+	},
+	"app.settings.about.game.title": {
+		"message": "Axolotl merge"
 	},
 	"app.settings.about.license-attribution": {
 		"message": "License & attribution"
@@ -6801,7 +6816,7 @@
 		"message": "View installed Java"
 	},
 	"app.settings.privacy.data-handling": {
-		"message": "Telemetry uses a random installation identifier. Error context is sanitized and limited before it leaves this device. Turning telemetry off clears pending reports immediately."
+		"message": "Telemetry uses a random installation identifier and sends only a daily activity signal. Turning telemetry off clears pending data immediately."
 	},
 	"app.settings.privacy.discord-rpc": {
 		"message": "Discord Rich Presence"
@@ -6813,7 +6828,7 @@
 		"message": "Allow telemetry"
 	},
 	"app.settings.privacy.telemetry-description": {
-		"message": "Send an anonymous daily activity signal and sanitized launcher error reports. Minecraft logs and account credentials are never uploaded."
+		"message": "Send one anonymous daily activity signal to improve usage statistics. Minecraft logs and account credentials are never uploaded."
 	},
 	"app.settings.resources.app-cache": {
 		"message": "App cache"
@@ -7199,38 +7214,23 @@
 	"app.settings.updates.checking": {
 		"message": "Checking for updates…"
 	},
-	"app.settings.updates.cnb": {
-		"message": "CNB"
-	},
-	"app.settings.updates.description": {
-		"message": "Choose where Axolotl checks for launcher updates."
-	},
 	"app.settings.updates.disabled": {
 		"message": "Updates are disabled in this build."
 	},
 	"app.settings.updates.failed": {
 		"message": "Could not check for updates."
 	},
-	"app.settings.updates.github": {
-		"message": "GitHub"
-	},
-	"app.settings.updates.miawa": {
-		"message": "LemwoodMirror"
-	},
 	"app.settings.updates.offline": {
 		"message": "Connect to the internet to check for updates."
 	},
 	"app.settings.updates.portable": {
-		"message": "Portable mode cannot update automatically. Please update manually from GitHub."
+		"message": "Portable mode cannot update automatically. Please download the latest version manually."
 	},
 	"app.settings.updates.preview-announcement": {
 		"message": "Preview update announcement"
 	},
 	"app.settings.updates.security": {
 		"message": "Updates are installed only when their cryptographic signature is valid."
-	},
-	"app.settings.updates.title": {
-		"message": "Update source"
 	},
 	"app.settings.updates.up-to-date": {
 		"message": "Axolotl is up to date."
@@ -7630,9 +7630,6 @@
 	},
 	"app.update-popup.body.download-complete": {
 		"message": "Axolotl Launcher v{version} has finished downloading. Reload to update now, or automatically when you close Axolotl Launcher."
-	},
-	"app.update-popup.body.linux": {
-		"message": "Axolotl Launcher v{version} is available. Use your package manager to update for the latest features and fixes!"
 	},
 	"app.update-popup.body.metered": {
 		"message": "Axolotl Launcher v{version} is available now! Since you're on a metered network, we didn't automatically download it."
@@ -8532,13 +8529,13 @@
 		"message": "Select update channel"
 	},
 	"instance.settings.tabs.hooks": {
-		"message": "Launch hooks"
+		"message": "Launch preparation"
 	},
 	"instance.settings.tabs.hooks.custom-hooks": {
 		"message": "Custom launch hooks"
 	},
 	"instance.settings.tabs.hooks.description": {
-		"message": "Hooks allow advanced users to run certain system commands before and after launching the game."
+		"message": "Configure the time allowed for launch preparation and optional commands that run before and after the game."
 	},
 	"instance.settings.tabs.hooks.post-exit": {
 		"message": "Post-exit"
@@ -8559,7 +8556,7 @@
 		"message": "Enter pre-launch command..."
 	},
 	"instance.settings.tabs.hooks.title": {
-		"message": "Game launch hooks"
+		"message": "Launch preparation"
 	},
 	"instance.settings.tabs.hooks.wrapper": {
 		"message": "Wrapper"
@@ -9881,29 +9878,338 @@
 	"unknown-pack-warning-modal.warning.title": {
 		"message": "Unknown file warning"
 	},
-	"app.settings.about.game.title": {
-		"message": "Axolotl merge"
+	"minecraft-login.trouble": {
+		"message": "Having trouble?"
 	},
-	"app.settings.about.game.tap-to-drop": {
-		"message": "Click to drop a pink axolotl"
+	"minecraft-login.title": {
+		"message": "Sign in to Minecraft"
 	},
-	"app.settings.about.game.score": {
-		"message": "Score: {score}"
+	"minecraft-login.open-verification": {
+		"message": "Open verification page"
 	},
-	"app.settings.about.game.restart": {
-		"message": "Restart"
+	"minecraft-login.device-starting": {
+		"message": "Requesting a device code..."
 	},
-	"app.settings.about.game.highest-level": {
-		"message": "Highest: level {level}"
+	"minecraft-login.device-expired": {
+		"message": "This device code expired. Start again to receive a new code."
 	},
-	"app.settings.about.game.game-over": {
-		"message": "The tide is rising!"
+	"minecraft-login.device-description": {
+		"message": "Open the page below on any device, then enter this code."
 	},
-	"app.settings.about.game.exit": {
-		"message": "Exit game"
+	"minecraft-login.device-code": {
+		"message": "Use device code"
 	},
-	"app.settings.about.game.completed": {
-		"message": "Rainbow axolotl!"
+	"minecraft-login.browser": {
+		"message": "Use browser login"
+	},
+	"instance.settings.tabs.window.maximize-window.unsupported": {
+		"message": "Not supported on this operating system."
+	},
+	"instance.settings.tabs.window.maximize-window.description": {
+		"message": "Maximize the Minecraft window when launched."
+	},
+	"instance.settings.tabs.window.maximize-window": {
+		"message": "Maximize window"
+	},
+	"instance.settings.tabs.hooks.launch-preparation-timeout.description": {
+		"message": "Maximum time to wait for launch preparation to finish, in seconds (30–600)."
+	},
+	"instance.settings.tabs.hooks.launch-preparation-timeout": {
+		"message": "Launch preparation timeout"
+	},
+	"instance.settings.tabs.hooks.custom-launch-preparation-timeout": {
+		"message": "Use a custom launch preparation timeout"
+	},
+	"instance.settings.tabs.general.game-dir.external-note": {
+		"message": "This instance uses an external .minecraft folder managed in place."
+	},
+	"create.pcl-hmcl-hint": {
+		"message": "Using PCL / HMCL?"
+	},
+	"create.add-minecraft-folder": {
+		"message": "Add .minecraft folder"
+	},
+	"app.settings.updates.preferences.title": {
+		"message": "Update behavior"
+	},
+	"app.settings.updates.paused": {
+		"message": "Updates are paused."
+	},
+	"app.settings.updates.pause-description": {
+		"message": "Stop automatic update checks, downloads, and update notifications until you resume updates."
+	},
+	"app.settings.updates.pause": {
+		"message": "Pause updates"
+	},
+	"app.settings.updates.latest-version-unavailable": {
+		"message": "Latest version unavailable"
+	},
+	"app.settings.updates.latest-version-loading": {
+		"message": "Fetching latest version…"
+	},
+	"app.settings.updates.latest-version": {
+		"message": "Latest {channel} version: {version}"
+	},
+	"app.settings.updates.immediate-fetch.beta-description": {
+		"message": "Beta updates are always available immediately."
+	},
+	"app.settings.updates.immediate-fetch-description": {
+		"message": "After the latest stable changes and fixes are released, be among the first to receive them."
+	},
+	"app.settings.updates.immediate-fetch": {
+		"message": "Get updates as soon as they are available"
+	},
+	"app.settings.updates.database-operation.success": {
+		"message": "{source} database was copied to {target} successfully."
+	},
+	"app.settings.updates.database-operation.release-to-beta": {
+		"message": "Copy Release to Beta"
+	},
+	"app.settings.updates.database-operation.label": {
+		"message": "Database operation"
+	},
+	"app.settings.updates.database-operation.failed": {
+		"message": "The database could not be copied. Please make sure Axolotl is not using the target database."
+	},
+	"app.settings.updates.database-operation.confirm-title": {
+		"message": "Overwrite database?"
+	},
+	"app.settings.updates.database-operation.confirm-description": {
+		"message": "This will completely replace the inactive {target} database with the contents of the {source} database. This cannot be undone."
+	},
+	"app.settings.updates.database-operation.confirm": {
+		"message": "Overwrite database"
+	},
+	"app.settings.updates.database-operation.cancel": {
+		"message": "Cancel"
+	},
+	"app.settings.updates.database-operation.beta-to-release": {
+		"message": "Copy Beta to Release"
+	},
+	"app.settings.updates.database-operation.active-target": {
+		"message": "Cannot overwrite the database currently in use. Restart Axolotl and switch channels first."
+	},
+	"app.settings.updates.database-isolation.title": {
+		"message": "Database isolation"
+	},
+	"app.settings.updates.database-isolation.release": {
+		"message": "Release database"
+	},
+	"app.settings.updates.database-isolation.description": {
+		"message": "Release and Beta use separate databases, so testing Beta does not change your Release data."
+	},
+	"app.settings.updates.database-isolation.current-database": {
+		"message": "Database currently in use"
+	},
+	"app.settings.updates.database-isolation.beta": {
+		"message": "Beta database"
+	},
+	"app.settings.updates.database-isolation.active": {
+		"message": "Active"
+	},
+	"app.settings.updates.current-version": {
+		"message": "Current version {version}"
+	},
+	"app.settings.updates.check.title": {
+		"message": "Check for updates"
+	},
+	"app.settings.updates.channel.title": {
+		"message": "Update channel"
+	},
+	"app.settings.updates.channel.start-empty": {
+		"message": "Start with empty database"
+	},
+	"app.settings.updates.channel.restart-title": {
+		"message": "Restart required"
+	},
+	"app.settings.updates.channel.restart-now": {
+		"message": "Restart now"
+	},
+	"app.settings.updates.channel.restart-later": {
+		"message": "Restart manually later"
+	},
+	"app.settings.updates.channel.restart-development-description": {
+		"message": "The new update channel will be used after you manually restart the development session."
+	},
+	"app.settings.updates.channel.restart-description": {
+		"message": "Restart Axolotl now to start using the new update channel, or restart manually later."
+	},
+	"app.settings.updates.channel.release-description": {
+		"message": "Stable, tested features and fixes. Updates arrive less often."
+	},
+	"app.settings.updates.channel.release": {
+		"message": "Release"
+	},
+	"app.settings.updates.channel.label": {
+		"message": "Channel"
+	},
+	"app.settings.updates.channel.description": {
+		"message": "Choose which launcher versions Axolotl receives."
+	},
+	"app.settings.updates.channel.copy-database-title": {
+		"message": "Copy Release data to Beta?"
+	},
+	"app.settings.updates.channel.copy-database-description": {
+		"message": "Would you like to copy your Release database into the Beta channel? This cannot be undone automatically."
+	},
+	"app.settings.updates.channel.copy-database": {
+		"message": "Copy database"
+	},
+	"app.settings.updates.channel.beta-description": {
+		"message": "New, less stable updates with the latest features. Updates arrive more often."
+	},
+	"app.settings.updates.channel.beta": {
+		"message": "Beta"
+	},
+	"app.settings.resources.select-minecraft-directory": {
+		"message": "Select a .minecraft directory"
+	},
+	"app.settings.resources.remove-minecraft-directory": {
+		"message": "Remove .minecraft directory"
+	},
+	"app.settings.resources.minecraft-directory-must-end-with": {
+		"message": "The selected folder must be named .minecraft."
+	},
+	"app.settings.resources.minecraft-directory-mode.shared": {
+		"message": "Shared .minecraft directory"
+	},
+	"app.settings.resources.minecraft-directory-mode.isolated": {
+		"message": "Version-isolated"
+	},
+	"app.settings.resources.minecraft-directory-mode": {
+		"message": "Game directory mode"
+	},
+	"app.settings.resources.minecraft-directories-description": {
+		"message": "Add one or more .minecraft folders for instances that use an external game directory. These folders are kept separate from Axolotl data."
+	},
+	"app.settings.resources.minecraft-directories": {
+		"message": "Minecraft directories"
+	},
+	"app.settings.resources.axolotl-data-directory": {
+		"message": "Axolotl data directory"
+	},
+	"app.settings.resources.add-minecraft-directory": {
+		"message": "Add .minecraft directory"
+	},
+	"app.settings.developer.preview-with-action": {
+		"message": "Include an optional external-link button"
+	},
+	"app.settings.developer.preview-announcement-popup": {
+		"message": "Preview Popup notification"
+	},
+	"app.settings.developer.preview-announcement-modal": {
+		"message": "Preview startup modal"
+	},
+	"app.settings.developer.announcement-preview-description": {
+		"message": "Preview the real announcement components using local sample content, without fetching or marking real announcements as read."
+	},
+	"app.settings.developer.announcement-preview": {
+		"message": "Announcement preview"
+	},
+	"app.settings.defaults.maximize-window.unsupported": {
+		"message": "Not supported on this operating system."
+	},
+	"app.settings.defaults.maximize-window-description": {
+		"message": "Maximize the Minecraft window when it starts."
+	},
+	"app.settings.defaults.maximize-window": {
+		"message": "Maximize window"
+	},
+	"app.settings.about.game.tide-hint": {
+		"message": "The tide is falling — keep your axolotls underwater!"
+	},
+	"app.settings.about.game.settle-title": {
+		"message": "Run settled!"
+	},
+	"app.settings.about.game.settle": {
+		"message": "Settle"
+	},
+	"app.settings.about.game.score-label": {
+		"message": "Score"
+	},
+	"app.settings.about.game.overtimes-label": {
+		"message": "Overtimes"
+	},
+	"app.settings.about.game.overtime-detail": {
+		"message": "The water rushes back — keep merging!"
+	},
+	"app.settings.about.game.overtime": {
+		"message": "Tide surge!"
+	},
+	"app.settings.about.game.new-record": {
+		"message": "New record!"
+	},
+	"app.settings.about.game.level-label": {
+		"message": "Highest level"
+	},
+	"app.settings.about.game.best-label": {
+		"message": "Best"
+	},
+	"app.settings.about.game.best": {
+		"message": "Best: {score}"
+	},
+	"app.settings.about.easteregg.game-title": {
+		"message": "Mini Game"
+	},
+	"app.settings.about.easteregg.contributors-title": {
+		"message": "贡献者彩蛋"
+	},
+	"app.settings.about.easteregg.click-hint": {
+		"message": "Click to open a hidden Mini Game"
+	},
+	"app.servers.console.forge-command-placeholder": {
+		"message": "Send a command - Tab completion supported"
+	},
+	"app.remote-announcements.view": {
+		"message": "View announcement"
+	},
+	"app.remote-announcements.unread": {
+		"message": "Unread"
+	},
+	"app.remote-announcements.read-all": {
+		"message": "Mark all announcements as read"
+	},
+	"app.remote-announcements.preview-title": {
+		"message": "Announcement style preview"
+	},
+	"app.remote-announcements.preview-summary": {
+		"message": "This is a local preview. Select View announcement to preview the full Markdown content."
+	},
+	"app.remote-announcements.preview-content": {
+		"message": "## Announcement preview\n\nThis is **sample content**, not a published announcement.\n\n- Supports headings, lists, and links\n- Close buttons are always available\n\n> Previewing does not change real announcement read status.\n\n| Type | Display |\n| --- | --- |\n| Modal | Full Markdown content |\n| Popup | Summary, then full content |\n\n[Visit the website](https://axlmc.org)"
+	},
+	"app.remote-announcements.preview-action": {
+		"message": "Visit website"
+	},
+	"app.modpack-install.version": {
+		"message": "Version"
+	},
+	"app.modpack-install.title": {
+		"message": "Install modpack"
+	},
+	"app.modpack-install.select-version": {
+		"message": "Select a version"
+	},
+	"app.modpack-install.instance-name-placeholder": {
+		"message": "My modpack instance"
+	},
+	"app.modpack-install.instance-name": {
+		"message": "Instance name"
+	},
+	"app.modpack-install.install": {
+		"message": "Install"
+	},
+	"app.modpack-install.folder-name-conflict": {
+		"message": "A folder with this name already exists. The instance folder will be: {name}"
+	},
+	"app.modpack-install.folder-name": {
+		"message": "Instance folder: {name}"
+	},
+	"app.modpack-install.already-installed-description": {
+		"message": "Creating another instance will not change these existing instances: {names}"
+	},
+	"app.modpack-install.already-installed": {
+		"message": "This version is already installed"
 	},
 	"app.minecraft-crash.share-fallback": {
 		"message": "LogShare is unavailable, so the diagnostic was shared via mclo.gs."
@@ -10007,6 +10313,39 @@
 	"app.log-share.ai.action": {
 		"message": "Deep AI analysis"
 	},
+	"app.lab.seed-map.elevation.surface": {
+		"message": "Surface"
+	},
+	"app.lab.seed-map.elevation.shallow-underground": {
+		"message": "Shallow underground"
+	},
+	"app.lab.seed-map.elevation.deep-underground": {
+		"message": "Deep underground"
+	},
+	"app.lab.seed-map.depth": {
+		"message": "Map depth"
+	},
+	"app.downloads.item-status.worker-started": {
+		"message": "Starting"
+	},
+	"app.downloads.item-status.waiting-for-resource": {
+		"message": "Waiting for download resources"
+	},
+	"app.downloads.item-status.waiting-for-database": {
+		"message": "Waiting for database"
+	},
+	"app.downloads.item-status.metadata": {
+		"message": "Loading metadata"
+	},
+	"app.downloads.item-status.finalizing": {
+		"message": "Finalizing"
+	},
+	"app.downloads.item-status.connecting": {
+		"message": "Connecting"
+	},
+	"app.direct-link-sync.issues-title": {
+		"message": "External Minecraft instances need attention"
+	},
 	"app.crash-analysis.ai.settings.ai-source-logshare": {
 		"message": "LogShare AI"
 	},
@@ -10018,5 +10357,59 @@
 	},
 	"app.crash-analysis.ai.settings.ai-source": {
 		"message": "AI source"
+	},
+	"app.close-launcher.tray": {
+		"message": "Hide to tray"
+	},
+	"app.close-launcher.title": {
+		"message": "Choose how to close Axolotl Launcher"
+	},
+	"app.close-launcher.remember": {
+		"message": "Remember my choice"
+	},
+	"app.close-launcher.direct": {
+		"message": "Close directly"
+	},
+	"app.build.beta": {
+		"message": "Beta"
+	},
+	"app.appearance-settings.close-behavior.title": {
+		"message": "Choose how to close Axolotl Launcher"
+	},
+	"app.appearance-settings.close-behavior.lightweight": {
+		"message": "Hide to tray"
+	},
+	"app.appearance-settings.close-behavior.description": {
+		"message": "Choose whether closing the window exits the launcher or hides it to the tray."
+	},
+	"app.appearance-settings.close-behavior.close": {
+		"message": "Close directly"
+	},
+	"app.appearance-settings.close-behavior.ask": {
+		"message": "Ask every time"
+	},
+	"app.appearance-settings.accent-color.system-unsupported-label": {
+		"message": "Follow system: System unsupported"
+	},
+	"app.appearance-settings.accent-color.system-unsupported": {
+		"message": "System unsupported"
+	},
+	"app.appearance-settings.accent-color.system": {
+		"message": "Follow system"
+	},
+	"app.action-bar.notifications.empty": {
+		"message": "No notifications"
+	},
+	"app.action-bar.notifications.dismiss": {
+		"message": "Dismiss notification"
+	},
+	"app.action-bar.notifications.clear": {
+		"message": "Clear all"
+	},
+	"app.action-bar.notifications": {
+		"message": "Notifications"
+	},
+	"app.action-bar.install.cancel": {
+		"message": "Cancel"
 	}
 }

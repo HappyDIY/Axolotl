@@ -7,6 +7,7 @@ import {
 	Toggle,
 	useVIntl,
 } from '@modrinth/ui'
+import { platform } from '@tauri-apps/plugin-os'
 import { computed, type Ref, ref, watch } from 'vue'
 
 import { edit } from '@/helpers/instance'
@@ -19,11 +20,14 @@ const { handleError } = injectNotificationManager()
 const { formatMessage } = useVIntl()
 
 const { instance } = injectInstanceSettings()
+const supportsMaximizeWindow = (await platform()) === 'windows'
 
 const globalSettings = (await get().catch(handleError)) as AppSettings
 
 const overrideWindowSettings = ref(
-	!!instance.value.game_resolution || !!instance.value.force_fullscreen,
+	!!instance.value.game_resolution ||
+		!!instance.value.force_fullscreen ||
+		!!instance.value.maximize_window,
 )
 const resolution: Ref<[number, number]> = ref(
 	instance.value.game_resolution ?? (globalSettings.game_resolution.slice() as [number, number]),
@@ -31,22 +35,25 @@ const resolution: Ref<[number, number]> = ref(
 const fullscreenSetting: Ref<boolean> = ref(
 	instance.value.force_fullscreen ?? globalSettings.force_fullscreen,
 )
+const maximizeWindowSetting = ref(instance.value.maximize_window ?? globalSettings.maximize_window)
 
 const editInstanceObject = computed(() => {
 	if (!overrideWindowSettings.value) {
 		return {
 			force_fullscreen: null,
+			maximize_window: null,
 			game_resolution: null,
 		}
 	}
 	return {
 		force_fullscreen: fullscreenSetting.value,
+		maximize_window: maximizeWindowSetting.value,
 		game_resolution: fullscreenSetting.value ? null : resolution.value,
 	}
 })
 
 watch(
-	[overrideWindowSettings, resolution, fullscreenSetting],
+	[overrideWindowSettings, resolution, fullscreenSetting, maximizeWindowSetting],
 	async () => {
 		await edit(instance.value.id, editInstanceObject.value)
 	},
@@ -65,6 +72,18 @@ const messages = defineMessages({
 	fullscreenDescription: {
 		id: 'instance.settings.tabs.window.fullscreen.description',
 		defaultMessage: 'Make the game start in full screen when launched (using options.txt).',
+	},
+	maximizeWindow: {
+		id: 'instance.settings.tabs.window.maximize-window',
+		defaultMessage: 'Maximize window',
+	},
+	maximizeWindowDescription: {
+		id: 'instance.settings.tabs.window.maximize-window.description',
+		defaultMessage: 'Maximize the Minecraft window when launched.',
+	},
+	maximizeWindowUnsupported: {
+		id: 'instance.settings.tabs.window.maximize-window.unsupported',
+		defaultMessage: 'Not supported on this operating system.',
 	},
 	width: {
 		id: 'instance.settings.tabs.window.width',
@@ -104,7 +123,7 @@ const messages = defineMessages({
 				<h2 class="m-0 text-lg font-semibold text-contrast">
 					{{ formatMessage(messages.fullscreen) }}
 				</h2>
-				<p class="m-0">
+				<p class="m-0" :class="{ 'text-secondary': !supportsMaximizeWindow }">
 					{{ formatMessage(messages.fullscreenDescription) }}
 				</p>
 			</div>
@@ -117,6 +136,30 @@ const messages = defineMessages({
 						fullscreenSetting = e
 					}
 				"
+			/>
+		</div>
+		<div class="flex items-center gap-4 justify-between">
+			<div class="flex flex-col gap-1">
+				<h2 class="m-0 text-lg font-semibold text-contrast">
+					{{ formatMessage(messages.maximizeWindow) }}
+				</h2>
+				<p class="m-0">
+					{{
+						formatMessage(
+							supportsMaximizeWindow
+								? messages.maximizeWindowDescription
+								: messages.maximizeWindowUnsupported,
+						)
+					}}
+				</p>
+			</div>
+			<Toggle
+				id="maximize-window"
+				:model-value="
+					overrideWindowSettings ? maximizeWindowSetting : globalSettings.maximize_window
+				"
+				:disabled="!overrideWindowSettings || fullscreenSetting || !supportsMaximizeWindow"
+				@update:model-value="(value) => (maximizeWindowSetting = value)"
 			/>
 		</div>
 

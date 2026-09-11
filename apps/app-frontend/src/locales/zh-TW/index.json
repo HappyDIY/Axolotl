@@ -380,6 +380,15 @@
   "app.appearance-settings.accent-color.purple": {
     "message": "紫色"
   },
+  "app.appearance-settings.accent-color.system": {
+    "message": "跟隨系統"
+  },
+  "app.appearance-settings.accent-color.system-unsupported": {
+    "message": "系統不支援"
+  },
+  "app.appearance-settings.accent-color.system-unsupported-label": {
+    "message": "跟隨系統：系統不支援"
+  },
   "app.appearance-settings.accent-color.title": {
     "message": "強調色"
   },
@@ -400,6 +409,21 @@
   },
   "app.appearance-settings.auto-install-dependencies.title": {
     "message": "自動安裝前置"
+  },
+  "app.appearance-settings.close-behavior.ask": {
+    "message": "每次詢問"
+  },
+  "app.appearance-settings.close-behavior.close": {
+    "message": "直接結束"
+  },
+  "app.appearance-settings.close-behavior.description": {
+    "message": "選擇關閉視窗時要結束啟動器，還是將其隱藏至系統匣。"
+  },
+  "app.appearance-settings.close-behavior.lightweight": {
+    "message": "隱藏至系統匣"
+  },
+  "app.appearance-settings.close-behavior.title": {
+    "message": "選擇關閉 Axolotl Launcher 的方式"
   },
   "app.appearance-settings.color-theme.description": {
     "message": "請選擇你偏好的 Axolotl Launcher 色彩主題。"
@@ -715,6 +739,18 @@
   },
   "app.browse.source.planet-minecraft": {
     "message": "Planet Minecraft 來源"
+  },
+  "app.close-launcher.direct": {
+    "message": "直接結束"
+  },
+  "app.close-launcher.remember": {
+    "message": "記住我的選擇"
+  },
+  "app.close-launcher.title": {
+    "message": "選擇關閉 Axolotl Launcher 的方式"
+  },
+  "app.close-launcher.tray": {
+    "message": "隱藏至系統匣"
   },
   "app.community-announcement.feedback-middle": {
     "message": "，或於 "
@@ -4361,11 +4397,14 @@
   "app.lab.seed-map.edition.java-large-biomes": {
     "message": "Java 版：大型生物群系"
   },
-  "app.lab.seed-map.elevation": {
-    "message": "群系高度"
+  "app.lab.seed-map.elevation.deep-underground": {
+    "message": "深層地下"
   },
-  "app.lab.seed-map.elevation-locked": {
-    "message": "開啟地形估算時自動採用估算的地表高度"
+  "app.lab.seed-map.elevation.shallow-underground": {
+    "message": "淺層地下"
+  },
+  "app.lab.seed-map.elevation.surface": {
+    "message": "地表"
   },
   "app.lab.seed-map.exit-fullscreen": {
     "message": "退出全螢幕"
@@ -6491,6 +6530,15 @@
   "app.settings.defaults.fullscreen-description": {
     "message": "啟動時覆寫 options.txt 檔案，使遊戲以全螢幕模式執行。"
   },
+  "app.settings.defaults.maximize-window": {
+    "message": "最大化視窗"
+  },
+  "app.settings.defaults.maximize-window-description": {
+    "message": "啟動時最大化 Minecraft 視窗。"
+  },
+  "app.settings.defaults.maximize-window.unsupported": {
+    "message": "目前的作業系統暫不支援。"
+  },
   "app.settings.defaults.height": {
     "message": "高度"
   },
@@ -6686,11 +6734,41 @@
   "app.settings.resources.app-directory": {
     "message": "應用程式目錄"
   },
+  "app.settings.resources.axolotl-data-directory": {
+    "message": "Axolotl 資料目錄"
+  },
   "app.settings.resources.app-directory-description": {
     "message": "啟動器用於儲存全部遊戲檔案的目錄。變更後將在重新啟動啟動器後生效。"
   },
   "app.settings.resources.app-directory-description-portable": {
     "message": "正在以便攜模式運行，所有數據已固定在程序目錄下，無法修改。"
+  },
+  "app.settings.resources.minecraft-directories": {
+    "message": "Minecraft 目錄"
+  },
+  "app.settings.resources.minecraft-directories-description": {
+    "message": "新增一或多個供實例使用的外部 .minecraft 資料夾。這些資料夾會與 Axolotl 資料分開保存。"
+  },
+  "app.settings.resources.minecraft-directory-mode": {
+    "message": "遊戲目錄模式"
+  },
+  "app.settings.resources.minecraft-directory-mode.isolated": {
+    "message": "版本隔離"
+  },
+  "app.settings.resources.minecraft-directory-mode.shared": {
+    "message": "共用 .minecraft 目錄"
+  },
+  "app.settings.resources.add-minecraft-directory": {
+    "message": "新增 .minecraft 目錄"
+  },
+  "app.settings.resources.select-minecraft-directory": {
+    "message": "選擇 .minecraft 目錄"
+  },
+  "app.settings.resources.remove-minecraft-directory": {
+    "message": "移除 .minecraft 目錄"
+  },
+  "app.settings.resources.minecraft-directory-must-end-with": {
+    "message": "所選資料夾名稱必須是 .minecraft。"
   },
   "app.settings.resources.concurrency.manual": {
     "message": "手動"
@@ -7067,7 +7145,106 @@
   "app.settings.updates.available": {
     "message": "發現可用更新。"
   },
+  "app.settings.updates.channel.beta": {
+    "message": "Beta"
+  },
+  "app.settings.updates.channel.beta-description": {
+    "message": "包含最新功能的新更新，但穩定性較低，更新頻率更快。"
+  },
+  "app.settings.updates.channel.copy-database": {
+    "message": "複製資料庫"
+  },
+  "app.settings.updates.channel.copy-database-description": {
+    "message": "為避免出現問題，Beta 版將使用獨立的資料儲存，以免影響正式版的正常運作。這看起來是你第一次使用 Beta 版，是否要將穩定版的資料複製到 Beta 版？此操作無法自動還原。"
+  },
+  "app.settings.updates.channel.copy-database-title": {
+    "message": "將 Release 資料複製到 Beta？"
+  },
+  "app.settings.updates.channel.description": {
+    "message": "選擇 Axolotl 接收的啟動器版本。"
+  },
+  "app.settings.updates.channel.label": {
+    "message": "管道"
+  },
+  "app.settings.updates.channel.release": {
+    "message": "Release"
+  },
+  "app.settings.updates.channel.release-description": {
+    "message": "穩定且經過測試的新功能與修正，更新頻率較慢。"
+  },
+  "app.settings.updates.channel.restart-description": {
+    "message": "立即重新啟動 Axolotl 以開始使用新的更新管道，或稍後手動重新啟動。"
+  },
+  "app.settings.updates.channel.restart-development-description": {
+    "message": "手動重新啟動開發工作階段後，新的更新管道才會生效。"
+  },
+  "app.settings.updates.channel.restart-later": {
+    "message": "稍後手動重新啟動"
+  },
+  "app.settings.updates.channel.restart-now": {
+    "message": "立即重新啟動"
+  },
+  "app.settings.updates.channel.restart-title": {
+    "message": "需要重新啟動"
+  },
+  "app.settings.updates.channel.start-empty": {
+    "message": "從空白資料庫開始"
+  },
+  "app.settings.updates.channel.title": {
+    "message": "更新管道"
+  },
+  "app.settings.updates.database-isolation.active": {
+    "message": "正在使用"
+  },
+  "app.settings.updates.database-isolation.beta": {
+    "message": "Beta 資料庫"
+  },
+  "app.settings.updates.database-isolation.current-database": {
+    "message": "目前正在使用的資料庫"
+  },
+  "app.settings.updates.database-isolation.description": {
+    "message": "Release 和 Beta 使用彼此獨立的資料庫，因此測試 Beta 不會變更 Release 資料。"
+  },
+  "app.settings.updates.database-isolation.release": {
+    "message": "Release 資料庫"
+  },
+  "app.settings.updates.database-isolation.title": {
+    "message": "資料庫隔離"
+  },
+  "app.settings.updates.database-operation.active-target": {
+    "message": "無法覆寫目前正在使用的資料庫。請先重新啟動 Axolotl 並切換更新管道。"
+  },
+  "app.settings.updates.database-operation.beta-to-release": {
+    "message": "從 Beta 複製到 Release"
+  },
+  "app.settings.updates.database-operation.cancel": {
+    "message": "取消"
+  },
+  "app.settings.updates.database-operation.confirm": {
+    "message": "覆寫資料庫"
+  },
+  "app.settings.updates.database-operation.confirm-description": {
+    "message": "這會用 {source} 資料庫的內容完整取代未使用的 {target} 資料庫。此操作無法復原。"
+  },
+  "app.settings.updates.database-operation.confirm-title": {
+    "message": "覆寫資料庫？"
+  },
+  "app.settings.updates.database-operation.failed": {
+    "message": "無法複製資料庫。請確認 Axolotl 未在使用目標資料庫。"
+  },
+  "app.settings.updates.database-operation.label": {
+    "message": "資料庫操作"
+  },
+  "app.settings.updates.database-operation.release-to-beta": {
+    "message": "從 Release 複製到 Beta"
+  },
+  "app.settings.updates.database-operation.success": {
+    "message": "已成功將 {source} 複製到 {target}。"
+  },
   "app.settings.updates.check": {
+    "message": "檢查更新"
+  },
+  "app.settings.updates.check.title": {
     "message": "檢查更新"
   },
   "app.settings.updates.checking": {
@@ -7075,6 +7252,18 @@
   },
   "app.settings.updates.cnb": {
     "message": "CNB 管道"
+  },
+  "app.settings.updates.current-version": {
+    "message": "目前版本 {version}"
+  },
+  "app.settings.updates.latest-version": {
+    "message": "最新 {channel} 版本：{version}"
+  },
+  "app.settings.updates.latest-version-unavailable": {
+    "message": "最新版本暫時無法取得"
+  },
+  "app.settings.updates.latest-version-loading": {
+    "message": "正在取得"
   },
   "app.settings.updates.description": {
     "message": "選擇 Axolotl 檢查啟動器更新的管道。"
@@ -7085,14 +7274,35 @@
   "app.settings.updates.failed": {
     "message": "無法檢查更新。"
   },
+  "app.settings.updates.immediate-fetch": {
+    "message": "最新更新可用後立即取得"
+  },
+  "app.settings.updates.immediate-fetch-description": {
+    "message": "推出最新的穩定變更與修正後，成為第一批取得這些更新的使用者。"
+  },
+  "app.settings.updates.immediate-fetch.beta-description": {
+    "message": "Beta 更新一律立即可用。"
+  },
   "app.settings.updates.github": {
     "message": "GitHub 管道"
   },
   "app.settings.updates.offline": {
     "message": "請連線至網際網路後再檢查更新。"
   },
+  "app.settings.updates.pause": {
+    "message": "暫停更新"
+  },
+  "app.settings.updates.pause-description": {
+    "message": "暫停自動檢查、下載和更新通知，直到恢復更新。"
+  },
+  "app.settings.updates.paused": {
+    "message": "更新已暫停。"
+  },
   "app.settings.updates.portable": {
-    "message": "便攜模式暫時無法更新，請去GitHub手動更新。"
+    "message": "便攜模式無法自動更新，請手動下載最新版本。"
+  },
+  "app.settings.updates.preferences.title": {
+    "message": "更新行為"
   },
   "app.settings.updates.preview-announcement": {
     "message": "預覽更新公告彈出視窗"
@@ -8376,7 +8586,7 @@
     "message": "選擇更新通道"
   },
   "instance.settings.tabs.hooks": {
-    "message": "啟動掛鉤"
+    "message": "啟動準備"
   },
   "instance.settings.tabs.hooks.custom-hooks": {
     "message": "自訂啟動掛鉤"
@@ -8403,7 +8613,7 @@
     "message": "輸入啟動前指令..."
   },
   "instance.settings.tabs.hooks.title": {
-    "message": "遊戲啟動掛鉤"
+    "message": "啟動準備"
   },
   "instance.settings.tabs.hooks.wrapper": {
     "message": "包裝器指令"
@@ -8476,6 +8686,15 @@
   },
   "instance.settings.tabs.window.fullscreen.description": {
     "message": "使遊戲啟動時進入全螢幕模式（透過 options.txt）。"
+  },
+  "instance.settings.tabs.window.maximize-window": {
+    "message": "最大化視窗"
+  },
+  "instance.settings.tabs.window.maximize-window.description": {
+    "message": "啟動時最大化 Minecraft 視窗。"
+  },
+  "instance.settings.tabs.window.maximize-window.unsupported": {
+    "message": "目前的作業系統暫不支援。"
   },
   "instance.settings.tabs.window.height": {
     "message": "高度"
@@ -9658,6 +9877,30 @@
   },
   "minecraft-account.third-party-profile.title": {
     "message": "選擇角色"
+  },
+  "minecraft-login.browser": {
+    "message": "使用瀏覽器登入"
+  },
+  "minecraft-login.device-code": {
+    "message": "使用裝置代碼"
+  },
+  "minecraft-login.device-description": {
+    "message": "請在任何裝置上開啟下方頁面，再輸入此代碼。"
+  },
+  "minecraft-login.device-expired": {
+    "message": "此裝置代碼已過期。請重新開始以取得新代碼。"
+  },
+  "minecraft-login.device-starting": {
+    "message": "正在要求裝置代碼……"
+  },
+  "minecraft-login.open-verification": {
+    "message": "開啟驗證頁面"
+  },
+  "minecraft-login.title": {
+    "message": "登入 Minecraft"
+  },
+  "minecraft-login.trouble": {
+    "message": "遇到問題？"
   },
   "project.description.title": {
     "message": "簡介"

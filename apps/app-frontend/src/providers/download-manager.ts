@@ -113,9 +113,19 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		}
 		const current = jobs.value.find((candidate) => candidate.job_id === job.job_id)
 		if (current && current.modified.localeCompare(job.modified) > 0) return
-		jobs.value = [job, ...jobs.value.filter((candidate) => candidate.job_id !== job.job_id)].sort(
-			(a, b) => b.created.localeCompare(a.created),
-		)
+		const currentIndex = jobs.value.findIndex((candidate) => candidate.job_id === job.job_id)
+		if (currentIndex !== -1) {
+			// Progress snapshots are frequent. Keep an existing job in its current
+			// position instead of rebuilding and sorting the whole list on every
+			// update. Jobs created within the same second have identical timestamps;
+			// sorting those snapshots repeatedly makes cards jump and can cause an
+			// expanded details view to be patched onto a neighbouring card.
+			const nextJobs = [...jobs.value]
+			nextJobs[currentIndex] = job
+			jobs.value = nextJobs
+		} else {
+			jobs.value = [job, ...jobs.value].sort((a, b) => b.created.localeCompare(a.created))
+		}
 		const pending = pendingRequestUpdatesByJob.get(job.job_id)
 		if (pending) {
 			pendingRequestUpdatesByJob.delete(job.job_id)
@@ -197,7 +207,9 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				if (!current) return jobs
 				item = {
 					...current,
-					status: 'completed',
+					// A request has reached disk, but an install item may still be
+					// hashing, registering metadata, or waiting for SQLite.
+					status: 'verifying',
 					bytes_downloaded: update.bytes,
 					bytes_total: current.bytes_total ?? update.bytes,
 				}
@@ -358,7 +370,12 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 
 	function addSyntheticJob(job: InstallJobSnapshot) {
 		syntheticIds.add(job.job_id)
-		jobs.value = [job, ...jobs.value].sort((a, b) => b.created.localeCompare(a.created))
+		// A server can be installed again after a previous synthetic record has
+		// moved to history. Replace that record instead of creating duplicate
+		// job IDs, which would make keyed download cards share a details view.
+		jobs.value = [job, ...jobs.value.filter((candidate) => candidate.job_id !== job.job_id)].sort(
+			(a, b) => b.created.localeCompare(a.created),
+		)
 	}
 
 	function setSyntheticJob(job: InstallJobSnapshot) {

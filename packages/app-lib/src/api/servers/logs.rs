@@ -1,11 +1,70 @@
 //! Console output buffering and streaming for servers.
 
-use tokio::io::{AsyncBufReadExt, BufReader};
+use base64::Engine;
+use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncSeekExt, BufReader};
 
 use crate::Result;
+use crate::api::servers::lifecycle::is_server_running;
 use crate::event::emit::emit_server;
 use crate::event::{ExitReason, ServerPayloadType};
 use crate::state::{clear_log_buffer, push_log_line};
+
+const MAX_PTY_LINE_BYTES: usize = 256 * 1024;
+const MAX_SERVER_LOG_LINE_BYTES: usize = 64 * 1024;
+const SERVER_LOG_TRUNCATION_MARKER: &str =
+    " … [log output truncated by Axolotl] … ";
+
+async fn read_bounded_server_log_line<R>(
+    reader: &mut R,
+) -> std::io::Result<Option<String>>
+where
+    R: AsyncBufRead + Unpin,
+{
+    let mut line = Vec::new();
+    let mut saw_bytes = false;
+    let mut truncated = false;
+
+    loop {
+        let (consumed, reached_line_end) = {
+            let available = reader.fill_buf().await?;
+            if available.is_empty() {
+                if !saw_bytes {
+                    return Ok(None);
+                }
+                break;
+            }
+
+            saw_bytes = true;
+            let consumed = available
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map_or(available.len(), |index| index + 1);
+            let maximum_content_bytes = MAX_SERVER_LOG_LINE_BYTES
+                .saturating_sub(SERVER_LOG_TRUNCATION_MARKER.len() + 1);
+            let remaining = maximum_content_bytes.saturating_sub(line.len());
+            let copied = remaining.min(consumed);
+            line.extend_from_slice(&available[..copied]);
+            truncated |= copied < consumed;
+            (consumed, available[consumed - 1] == b'\n')
+        };
+        reader.consume(consumed);
+        if reached_line_end {
+            break;
+        }
+    }
+
+    if truncated {
+        while matches!(line.last(), Some(b'\r' | b'\n')) {
+            line.pop();
+        }
+        line.extend_from_slice(SERVER_LOG_TRUNCATION_MARKER.as_bytes());
+        line.push(b'\n');
+    }
+
+    Ok(Some(String::from_utf8_lossy(&line).into_owned()))
+}
 
 pub async fn get_log_buffer(server_id: &str) -> Result<Vec<String>> {
     Ok(crate::state::get_log_buffer(server_id))
@@ -21,40 +80,180 @@ pub(super) async fn stream_server_output(
     reader: impl tokio::io::AsyncRead + Unpin,
 ) {
     let mut buf_reader = BufReader::new(reader);
-    let mut line = String::new();
     let mut jna_hint_emitted = false;
-    loop {
-        line.clear();
-        match buf_reader.read_line(&mut line).await {
-            Ok(0) | Err(_) => break,
-            Ok(_) => {
-                let trimmed = line.trim_end_matches(['\r', '\n']);
-                let cleaned = strip_ansi(trimmed);
-                if cleaned.is_empty() {
-                    continue;
-                }
-                push_log_line(&server_id, cleaned.clone());
-                emit_server(
-                    &server_id,
-                    ServerPayloadType::Log { line: cleaned },
-                )
-                .await
-                .ok();
-                if !jna_hint_emitted && is_jna_macos_assertion(trimmed) {
-                    jna_hint_emitted = true;
-                    for hint in JNA_CRASH_HINT_LINES {
-                        push_log_line(&server_id, hint.to_string());
-                        emit_server(
-                            &server_id,
-                            ServerPayloadType::Log {
-                                line: hint.to_string(),
-                            },
-                        )
-                        .await
-                        .ok();
+    while let Ok(Some(line)) =
+        read_bounded_server_log_line(&mut buf_reader).await
+    {
+        process_server_output_line(
+            &server_id,
+            line.trim_end_matches(['\r', '\n']),
+            &mut jna_hint_emitted,
+        )
+        .await;
+    }
+}
+
+pub(super) async fn stream_server_pty_output(
+    server_id: String,
+    mut reader: Box<dyn std::io::Read + Send>,
+) {
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    tokio::task::spawn_blocking(move || {
+        let mut buffer = vec![0_u8; 8192];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if sender.blocking_send(buffer[..read].to_vec()).is_err() {
+                        break;
                     }
                 }
             }
+        }
+    });
+
+    let mut pending_line = Vec::new();
+    let mut jna_hint_emitted = false;
+    while let Some(bytes) = receiver.recv().await {
+        emit_server(
+            &server_id,
+            ServerPayloadType::ConsoleOutput {
+                data: base64::engine::general_purpose::STANDARD.encode(&bytes),
+            },
+        )
+        .await
+        .ok();
+
+        for line in take_complete_pty_lines(&mut pending_line, &bytes) {
+            let text = String::from_utf8_lossy(&line);
+            process_server_output_line(
+                &server_id,
+                text.trim_end_matches(['\r', '\n']),
+                &mut jna_hint_emitted,
+            )
+            .await;
+        }
+    }
+    if !pending_line.is_empty() {
+        process_server_output_line(
+            &server_id,
+            &String::from_utf8_lossy(&pending_line),
+            &mut jna_hint_emitted,
+        )
+        .await;
+    }
+}
+
+fn take_complete_pty_lines(
+    pending: &mut Vec<u8>,
+    bytes: &[u8],
+) -> Vec<Vec<u8>> {
+    pending.extend_from_slice(bytes);
+    let Some(last_newline) = pending.iter().rposition(|byte| *byte == b'\n')
+    else {
+        if pending.len() > MAX_PTY_LINE_BYTES {
+            pending.clear();
+        }
+        return Vec::new();
+    };
+
+    let remainder = pending.split_off(last_newline + 1);
+    let completed = std::mem::replace(pending, remainder);
+    let mut lines = Vec::new();
+    for line in completed.split_inclusive(|byte| *byte == b'\n') {
+        if line.len() <= MAX_PTY_LINE_BYTES {
+            lines.push(line.to_vec());
+        }
+    }
+    lines
+}
+
+async fn process_server_output_line(
+    server_id: &str,
+    raw_line: &str,
+    jna_hint_emitted: &mut bool,
+) {
+    let cleaned = strip_ansi(raw_line);
+    if cleaned.is_empty()
+        || is_timestamped_log_line(&cleaned)
+        || cleaned.starts_with("> ")
+    {
+        return;
+    }
+    push_log_line(server_id, cleaned.clone());
+    emit_server(server_id, ServerPayloadType::Log { line: cleaned })
+        .await
+        .ok();
+    if !*jna_hint_emitted && is_jna_macos_assertion(raw_line) {
+        *jna_hint_emitted = true;
+        for hint in JNA_CRASH_HINT_LINES {
+            push_log_line(server_id, hint.to_string());
+            emit_server(
+                server_id,
+                ServerPayloadType::Log {
+                    line: hint.to_string(),
+                },
+            )
+            .await
+            .ok();
+        }
+    }
+}
+
+/// Streams the server's `logs/latest.log` file into the console buffer. The
+/// Minecraft/Fabric log4j console output is frequently not delivered through
+/// the process stdout pipe (it goes to the log file instead), so tailing this
+/// file is the authoritative, lossless source of the server's own logs. Lines
+/// already present in the buffer (e.g. delivered via the stdout/stderr pipes)
+/// are skipped to avoid duplicates.
+pub(super) async fn tail_server_log_file(server_id: String, dir: PathBuf) {
+    let log_path = dir.join("logs").join("latest.log");
+    let mut reader = loop {
+        if !is_server_running(&server_id) {
+            return;
+        }
+        match File::open(&log_path).await {
+            Ok(file) => break BufReader::new(file),
+            // The file only appears once the server starts logging; poll until then.
+            Err(_) => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    };
+
+    loop {
+        if !is_server_running(&server_id) {
+            return;
+        }
+        match read_bounded_server_log_line(&mut reader).await {
+            Ok(None) => {
+                // Caught up. Detect log rotation (file replaced/truncated) and
+                // otherwise wait for more output to be appended.
+                if let Ok(meta) = tokio::fs::metadata(&log_path).await
+                    && let Ok(pos) = reader.stream_position().await
+                    && meta.len() < pos
+                    && let Ok(file) = File::open(&log_path).await
+                {
+                    reader = BufReader::new(file);
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            Ok(Some(line)) => {
+                let trimmed = line.trim_end_matches(['\r', '\n']);
+                let cleaned = strip_ansi(trimmed);
+                let already_present =
+                    crate::state::get_log_buffer(&server_id).contains(&cleaned);
+                if !cleaned.is_empty() && !already_present {
+                    push_log_line(&server_id, cleaned.clone());
+                    emit_server(
+                        &server_id,
+                        ServerPayloadType::Log { line: cleaned },
+                    )
+                    .await
+                    .ok();
+                }
+            }
+            Err(_) => break,
         }
     }
 }
@@ -66,6 +265,23 @@ fn is_jna_macos_assertion(line: &str) -> bool {
     line.contains("Assertion failed:")
         && line.contains("snprintf() output has been truncated")
         && line.contains("dispatch.c")
+}
+
+/// Detects a server log4j line by its leading `[HH:MM:SS]` timestamp, covering
+/// both console (`[HH:MM:SS INFO]:`) and file (`[HH:MM:SS] [Thread/INFO]:`)
+/// formats. Used to suppress the process-pipe echo of server logs so they are
+/// not duplicated by `tail_server_log_file`.
+fn is_timestamped_log_line(line: &str) -> bool {
+    let b = line.as_bytes();
+    b.first() == Some(&b'[')
+        && b.get(1).is_some_and(|c| c.is_ascii_digit())
+        && b.get(2).is_some_and(|c| c.is_ascii_digit())
+        && b.get(3) == Some(&b':')
+        && b.get(4).is_some_and(|c| c.is_ascii_digit())
+        && b.get(5).is_some_and(|c| c.is_ascii_digit())
+        && b.get(6) == Some(&b':')
+        && b.get(7).is_some_and(|c| c.is_ascii_digit())
+        && b.get(8).is_some_and(|c| c.is_ascii_digit())
 }
 
 /// How many lines at the end of a server's output are inspected when
@@ -150,6 +366,79 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}]0;Server console\u{1b}\\done"), "done");
         assert_eq!(strip_ansi("plain text stays"), "plain text stays");
         assert_eq!(strip_ansi("h\u{e9}llo \u{1b}[31mred"), "h\u{e9}llo red");
+    }
+
+    #[test]
+    fn splits_pty_output_without_losing_partial_or_raw_bytes() {
+        let mut pending = Vec::new();
+        assert_eq!(
+            take_complete_pty_lines(&mut pending, b"first\r\nsecond"),
+            vec![b"first\r\n".to_vec()]
+        );
+        assert_eq!(pending, b"second");
+        assert_eq!(
+            take_complete_pty_lines(&mut pending, b"\nthird\n"),
+            vec![b"second\n".to_vec(), b"third\n".to_vec()]
+        );
+        assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn bounds_unterminated_pty_output() {
+        let mut pending = vec![b'x'; MAX_PTY_LINE_BYTES];
+        assert!(take_complete_pty_lines(&mut pending, b"x").is_empty());
+        assert!(pending.is_empty());
+
+        let oversized = vec![b'x'; MAX_PTY_LINE_BYTES + 1];
+        assert!(take_complete_pty_lines(&mut pending, &oversized).is_empty());
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn bounded_server_log_reader_consumes_oversized_line() {
+        let input =
+            format!("{}\nnext\n", "x".repeat(MAX_SERVER_LOG_LINE_BYTES * 2));
+        let mut reader = BufReader::new(std::io::Cursor::new(input));
+
+        let first = read_bounded_server_log_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+        let second = read_bounded_server_log_line(&mut reader)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert!(first.contains("truncated by Axolotl"));
+        assert!(first.len() <= MAX_SERVER_LOG_LINE_BYTES);
+        assert_eq!(second, "next\n");
+    }
+
+    #[test]
+    fn detects_timestamped_log_lines() {
+        // Console format (no thread) — duplicated by Paper's stdout echo.
+        assert!(is_timestamped_log_line(
+            "[11:13:49 INFO]: [bootstrap] Running Java 25"
+        ));
+        // File format (with thread) — authoritative source from latest.log.
+        assert!(is_timestamped_log_line(
+            "[11:13:49] [ServerMain/INFO]: [bootstrap] Running"
+        ));
+        assert!(is_timestamped_log_line(
+            "[11:13:49] [Server thread/INFO]: Stopped IO worker!"
+        ));
+        // Non-logged process output must NOT be suppressed.
+        assert!(!is_timestamped_log_line("Downloading mojang_26.2.jar"));
+        assert!(!is_timestamped_log_line("Applying patches"));
+        assert!(!is_timestamped_log_line(
+            "Starting org.bukkit.craftbukkit.Main"
+        ));
+        assert!(!is_timestamped_log_line(
+            "WARNING: A terminally deprecated method in sun.misc.Unsafe"
+        ));
+        assert!(!is_timestamped_log_line(
+            "2026-08-29T03:13:49.279070900Z ServerMain WARN Advanced terminal features",
+        ));
     }
 
     #[test]

@@ -1,7 +1,74 @@
 <template>
 	<div class="flex gap-2 items-center">
+		<Dropdown
+			v-model:shown="notificationCenterShown"
+			placement="bottom-end"
+			:triggers="['click']"
+			:hide-triggers="['click']"
+		>
+			<ButtonStyled type="transparent" circular>
+				<button
+					v-tooltip="formatMessage(messages.notifications)"
+					:aria-label="formatMessage(messages.notifications)"
+					class="relative"
+				>
+					<BellIcon />
+					<span
+						v-if="hasUnreadNotifications"
+						class="absolute right-0 top-0 size-2 rounded-full bg-red ring-2 ring-bg-raised"
+					/>
+				</button>
+			</ButtonStyled>
+			<template #popper>
+				<div class="w-[22rem] max-w-[calc(100vw-2rem)] p-2">
+					<div class="mb-2 flex items-center justify-between px-2">
+						<span class="font-semibold text-contrast">{{
+							formatMessage(messages.notifications)
+						}}</span>
+						<button
+							v-if="notificationHistory.length"
+							class="text-xs text-secondary hover:text-contrast"
+							@click="clearNotificationHistory"
+						>
+							{{ formatMessage(messages.clearNotifications) }}
+						</button>
+					</div>
+					<div
+						v-if="!notificationHistory.length"
+						class="px-2 py-4 text-center text-sm text-secondary"
+					>
+						{{ formatMessage(messages.noNotifications) }}
+					</div>
+					<div v-else class="flex max-h-[22rem] flex-col gap-1 overflow-auto">
+						<div
+							v-for="item in notificationHistory"
+							:key="item.key"
+							class="flex items-start gap-2 rounded-lg p-2 hover:bg-button-bg"
+						>
+							<div
+								class="mt-1 size-2 shrink-0 rounded-full"
+								:class="notificationDotClass(item.type)"
+							/>
+							<button class="min-w-0 flex-1 text-left" @click="openNotification(item)">
+								<div class="truncate text-sm font-medium text-contrast">{{ item.title }}</div>
+								<div v-if="item.text" class="line-clamp-2 text-xs text-secondary">
+									{{ item.text }}
+								</div>
+							</button>
+							<button
+								v-tooltip="formatMessage(messages.dismissNotification)"
+								class="shrink-0 text-secondary hover:text-contrast"
+								@click="dismissNotification(item)"
+							>
+								<XIcon class="size-4" />
+							</button>
+						</div>
+					</div>
+				</div>
+			</template>
+		</Dropdown>
 		<ButtonStyled
-			v-if="!isDownloadsPage && hasDownloadsPageContent && !hasVisibleActiveDownloadToasts"
+			v-if="!isDownloadsPage && hasActiveDownloads && !hasVisibleActiveDownloadToasts"
 			color="brand"
 			type="transparent"
 			circular
@@ -117,6 +184,7 @@
 
 <script setup lang="ts">
 import {
+	BellIcon,
 	DownloadIcon,
 	DropdownIcon,
 	OnlineIndicatorIcon,
@@ -124,6 +192,7 @@ import {
 	StopCircleIcon,
 	TerminalSquareIcon,
 	UnplugIcon,
+	XIcon,
 } from '@modrinth/assets'
 import {
 	ButtonStyled,
@@ -133,6 +202,7 @@ import {
 	type PopupNotification,
 	type PopupNotificationProgressItem,
 	useVIntl,
+	type WebNotification,
 } from '@modrinth/ui'
 import { convertFileSrc } from '@tauri-apps/api/core'
 import { Dropdown } from 'floating-vue'
@@ -151,10 +221,81 @@ import { progress_bars_list } from '@/helpers/state'
 import type { GameInstance } from '@/helpers/types'
 import { downloadBarTypes, injectDownloadManager } from '@/providers/download-manager'
 
-const { handleError } = injectNotificationManager()
+const notificationManager = injectNotificationManager()
+const { handleError } = notificationManager
 const popupNotificationManager = injectPopupNotificationManager()
 const downloadManager = injectDownloadManager()
 const { formatMessage } = useVIntl()
+
+type NotificationHistoryItem = {
+	key: string
+	createdAt?: number
+	title: string
+	text?: string
+	type?: 'error' | 'warning' | 'success' | 'info' | 'download'
+	collapsed?: boolean
+	expand: () => void
+	dismiss: () => void
+}
+
+const notificationHistory = computed<NotificationHistoryItem[]>(() =>
+	[
+		...notificationManager.getNotifications().map((item: WebNotification) => ({
+			key: `web-${item.id}`,
+			createdAt: item.createdAt,
+			title: item.title ?? formatMessage(messages.notifications),
+			text: item.text,
+			type: item.type,
+			collapsed: item.collapsed,
+			expand: () => notificationManager.expandNotification(item.id),
+			dismiss: () => notificationManager.removeNotification(item.id),
+		})),
+		...popupNotificationManager.getNotifications().map((item: PopupNotification) => ({
+			key: `popup-${item.id}`,
+			createdAt: item.createdAt,
+			title: item.title,
+			text:
+				item.text ??
+				(item.progressItems
+					?.filter((progressItem) => progressItem.text)
+					.map((progressItem) => `${progressItem.title}: ${progressItem.text}`)
+					.join('\n') ||
+					undefined),
+			type: item.type,
+			collapsed: item.collapsed,
+			expand: () => popupNotificationManager.expandNotification(item.id),
+			dismiss: () => popupNotificationManager.removeNotification(item.id),
+		})),
+	].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)),
+)
+
+const hasUnreadNotifications = computed(() =>
+	notificationHistory.value.some(
+		(item) => !item.collapsed && ['error', 'warning'].includes(item.type ?? ''),
+	),
+)
+
+function notificationDotClass(type?: NotificationHistoryItem['type']): string {
+	if (type === 'error') return 'bg-red'
+	if (type === 'warning') return 'bg-orange'
+	if (type === 'success') return 'bg-green'
+	if (type === 'download') return 'bg-green'
+	return 'bg-blue'
+}
+
+function dismissNotification(item: NotificationHistoryItem) {
+	item.dismiss()
+}
+
+async function openNotification(item: NotificationHistoryItem) {
+	item.expand()
+	notificationCenterShown.value = false
+}
+
+function clearNotificationHistory() {
+	notificationManager.clearAllNotifications()
+	popupNotificationManager.clearAllNotifications()
+}
 
 const router = useRouter()
 const route = useRoute()
@@ -163,6 +304,7 @@ const isDownloadsPage = computed(
 )
 
 const showInstances = ref(false)
+const notificationCenterShown = ref(false)
 
 interface RunningProcess {
 	uuid: string
@@ -213,6 +355,22 @@ const messages = defineMessages({
 	noInstancesRunning: {
 		id: 'app.action-bar.no-instances-running',
 		defaultMessage: 'No instances running',
+	},
+	notifications: {
+		id: 'app.action-bar.notifications',
+		defaultMessage: 'Notifications',
+	},
+	clearNotifications: {
+		id: 'app.action-bar.notifications.clear',
+		defaultMessage: 'Clear all',
+	},
+	noNotifications: {
+		id: 'app.action-bar.notifications.empty',
+		defaultMessage: 'No notifications',
+	},
+	dismissNotification: {
+		id: 'app.action-bar.notifications.dismiss',
+		defaultMessage: 'Dismiss notification',
 	},
 	downloadingJava: {
 		id: 'app.action-bar.downloading-java',
@@ -338,6 +496,13 @@ function getNotification(): PopupNotification | null {
 	return notification ?? null
 }
 
+function collapseNotification(): void {
+	if (!notificationId.value) {
+		return
+	}
+	popupNotificationManager.collapseNotification(notificationId.value)
+}
+
 function removeNotification(): void {
 	if (!notificationId.value) {
 		return
@@ -367,24 +532,26 @@ function buildDownloadItems(): PopupNotificationProgressItem[] {
 	]
 }
 
-const hasVisibleActiveDownloadToasts = computed(() => !!getNotification())
-const hasDownloadsPageContent = computed(
+const hasVisibleActiveDownloadToasts = computed(() => {
+	const notification = getNotification()
+	return !!notification && !notification.collapsed
+})
+const hasActiveDownloads = computed(
 	() =>
 		installJobNotifications.active.value ||
 		currentLoadingBars.value.some((bar) => downloadBarTypes.has(bar.bar_type?.type ?? '')),
 )
+const hasDownloadNotificationItems = computed(
+	() => installJobNotifications.hasItems.value || currentLoadingBars.value.length > 0,
+)
 
 function updateNotification(resummon = false): void {
-	if (isDownloadsPage.value) {
-		removeNotification()
-		return
-	}
-
-	if (resummon) {
+	const shouldResummon = resummon && !isDownloadsPage.value
+	if (shouldResummon) {
 		dismissed.value = false
 	}
 
-	if (currentLoadingBars.value.length === 0 && !installJobNotifications.active.value) {
+	if (!hasDownloadNotificationItems.value) {
 		removeNotification()
 		dismissed.value = false
 		return
@@ -395,35 +562,50 @@ function updateNotification(resummon = false): void {
 		dismissed.value = true
 	}
 
-	if (dismissed.value && !resummon) {
+	if (dismissed.value && !shouldResummon) {
 		return
 	}
 
 	let notif = getNotification()
+	if (notif?.collapsed && shouldResummon) {
+		notif.collapsed = false
+	}
 	const progressItems = buildDownloadItems()
 
 	if (notif) {
-		notif.title = installJobNotifications.active.value
+		notif.title = installJobNotifications.hasItems.value
 			? installJobNotifications.title.value
 			: formatMessage(messages.downloads)
 		notif.text = undefined
 		notif.progressItems = progressItems
 		notif.buttons = installJobNotifications.buttons.value
-		notif.onClick = hasDownloadsPageContent.value ? goToDownloads : undefined
+		notif.onClick = hasDownloadNotificationItems.value ? goToDownloads : undefined
 		notif.progress = undefined
 		notif.waiting = undefined
+		notif.autoCloseMs =
+			progressItems.length > 0 && progressItems.every((item) => item.showProgress === false)
+				? 30 * 1000
+				: null
+		if (!notif.collapsed) popupNotificationManager.setNotificationTimer(notif)
 	} else {
 		notif = popupNotificationManager.addPopupNotification({
-			title: installJobNotifications.active.value
+			title: installJobNotifications.hasItems.value
 				? installJobNotifications.title.value
 				: formatMessage(messages.downloads),
 			type: 'download',
 			autoCloseMs: null,
 			progressItems,
 			buttons: installJobNotifications.buttons.value,
-			onClick: hasDownloadsPageContent.value ? goToDownloads : undefined,
+			onClick: hasDownloadNotificationItems.value ? goToDownloads : undefined,
 		})
 		notificationId.value = notif.id
+		if (isDownloadsPage.value) {
+			popupNotificationManager.collapseNotification(notif.id)
+		}
+		if (progressItems.length > 0 && progressItems.every((item) => item.showProgress === false)) {
+			notif.autoCloseMs = 30 * 1000
+			popupNotificationManager.setNotificationTimer(notif)
+		}
 	}
 }
 
@@ -561,8 +743,12 @@ const unlistenLoading = await loading_listener((payload: LoadingEventPayload) =>
 		loadingNotificationTimer = null
 		if (newBarDuringWindow) {
 			newBarDuringWindow = false
-			removeNotification()
-			updateNotification(true)
+			if (isDownloadsPage.value) {
+				updateNotification()
+			} else {
+				removeNotification()
+				updateNotification(true)
+			}
 		} else {
 			updateNotification()
 		}
@@ -575,7 +761,12 @@ function goToDownloads() {
 
 watch(
 	() => route.path,
-	() => updateNotification(),
+	() => {
+		if (isDownloadsPage.value) {
+			collapseNotification()
+		}
+		updateNotification()
+	},
 )
 
 function selectProcess(process: RunningProcess) {

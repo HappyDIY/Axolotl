@@ -1,6 +1,13 @@
 import { createConsoleState } from '@modrinth/ui'
 
-import { clear_log_buffer, get_live_log_buffer, get_logs } from '@/helpers/logs'
+import {
+	clear_log_buffer,
+	get_live_log_buffer,
+	get_logs,
+	get_minecraft_latest_log_cursor,
+} from '@/helpers/logs'
+
+import { mergeLiveLogHistory } from './console-history'
 
 type ConsoleState = ReturnType<typeof createConsoleState>
 
@@ -18,6 +25,7 @@ interface InstanceConsoleEntry {
 	historicalConsole: ConsoleState
 	historicalCache: Map<string, string>
 	logList: LogEntry[] | null
+	liveHistoryHydration: Promise<void> | null
 }
 
 const instances = new Map<string, InstanceConsoleEntry>()
@@ -31,6 +39,7 @@ function getOrCreate(instanceId: string): InstanceConsoleEntry {
 		historicalConsole: createConsoleState(),
 		historicalCache: new Map(),
 		logList: null,
+		liveHistoryHydration: null,
 	}
 	instances.set(instanceId, entry)
 	return entry
@@ -40,9 +49,33 @@ async function hydrate(instanceId: string): Promise<void> {
 	const entry = getOrCreate(instanceId)
 	if (entry.liveConsole.output.value.length > 0) return
 
-	const buffer = await get_live_log_buffer(instanceId)
-	if (buffer) {
-		await entry.liveConsole.addLegacyLog(buffer)
+	if (entry.liveHistoryHydration) {
+		return entry.liveHistoryHydration
+	}
+
+	const hydration = (async () => {
+		const [latestLog, buffer] = await Promise.all([
+			get_minecraft_latest_log_cursor(instanceId, 0)
+				.then((result) => result.output)
+				.catch(() => ''),
+			get_live_log_buffer(instanceId),
+		])
+
+		if (entry.liveConsole.output.value.length > 0) return
+
+		const history = mergeLiveLogHistory(latestLog, buffer)
+		if (history) {
+			await entry.liveConsole.addLegacyLog(history)
+		}
+	})()
+
+	entry.liveHistoryHydration = hydration
+	try {
+		await hydration
+	} finally {
+		if (entry.liveHistoryHydration === hydration) {
+			entry.liveHistoryHydration = null
+		}
 	}
 }
 

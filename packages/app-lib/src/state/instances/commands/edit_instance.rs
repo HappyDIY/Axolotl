@@ -89,7 +89,19 @@ pub struct InstanceLaunchOverridesPatch {
         skip_serializing_if = "Option::is_none",
         with = "serde_with::rust::double_option"
     )]
+    pub maximize_window: Option<Option<bool>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
     pub game_resolution: Option<Option<WindowSize>>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "serde_with::rust::double_option"
+    )]
+    pub launch_preparation_timeout: Option<Option<u64>>,
     pub hooks: Option<Hooks>,
 }
 
@@ -351,8 +363,14 @@ fn apply_launch_overrides_patch(
     if let Some(force_fullscreen) = patch.force_fullscreen {
         overrides.force_fullscreen = force_fullscreen;
     }
+    if let Some(maximize_window) = patch.maximize_window {
+        overrides.maximize_window = maximize_window;
+    }
     if let Some(game_resolution) = patch.game_resolution {
         overrides.game_resolution = game_resolution;
+    }
+    if let Some(timeout) = patch.launch_preparation_timeout {
+        overrides.launch_preparation_timeout = timeout;
     }
     if let Some(hooks) = patch.hooks {
         overrides.hooks = hooks;

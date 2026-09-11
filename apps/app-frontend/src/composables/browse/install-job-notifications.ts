@@ -1,4 +1,4 @@
-import { CheckIcon, CopyIcon, UpdatedIcon } from '@modrinth/assets'
+import { CheckIcon, CopyIcon, UpdatedIcon, XIcon } from '@modrinth/assets'
 import {
 	defineMessages,
 	type PopupNotificationButton,
@@ -30,6 +30,10 @@ const messages = defineMessages({
 		id: 'app.action-bar.installs',
 		defaultMessage: 'Installs',
 	},
+	cancel: {
+		id: 'app.action-bar.install.cancel',
+		defaultMessage: 'Cancel',
+	},
 	retry: {
 		id: 'app.action-bar.install.retry',
 		defaultMessage: 'Retry',
@@ -45,6 +49,10 @@ const messages = defineMessages({
 	dismiss: {
 		id: 'app.action-bar.install.dismiss',
 		defaultMessage: 'Dismiss',
+	},
+	completed: {
+		id: 'app.downloads.status.succeeded',
+		defaultMessage: 'Completed',
 	},
 	openInstance: {
 		id: 'app.action-bar.install.open-instance',
@@ -258,6 +266,18 @@ const visibleJobStatuses = new Set<InstallJobStatus>([
 	'failed',
 	'interrupted',
 ])
+const retainedJobStatuses = new Set<InstallJobStatus>(['succeeded', 'canceled'])
+const activeJobStatuses = new Set<InstallJobStatus>([
+	'queued',
+	'running',
+	'canceling',
+	'waiting_for_user',
+])
+const cancelableJobStatuses = new Set<InstallJobStatus>([
+	'queued',
+	'running',
+	'waiting_for_user',
+])
 const copyDetailsStallMs = 30_000
 
 interface ProgressSnapshot {
@@ -308,6 +328,12 @@ export async function useInstallJobNotifications(opts: {
 	function getText(job: InstallJobSnapshot): string {
 		if (job.error?.code === 'cache_repair_required') {
 			return formatMessage(messages.cacheRepairDescription)
+		}
+		if (job.status === 'succeeded') {
+			return formatMessage(messages.completed)
+		}
+		if (job.status === 'canceled') {
+			return formatMessage(failureSummaryMessages.canceled)
 		}
 		if (job.status === 'failed' || job.status === 'interrupted') {
 			return getFailureSummary(job)
@@ -462,8 +488,12 @@ export async function useInstallJobNotifications(opts: {
 		return Math.max(0, Math.min(1, progress.current / progress.total))
 	}
 
-	function isTerminalJob(job: InstallJobSnapshot): boolean {
+	function isFailedJob(job: InstallJobSnapshot): boolean {
 		return job.status === 'failed' || job.status === 'interrupted'
+	}
+
+	function isFinishedJob(job: InstallJobSnapshot): boolean {
+		return isFailedJob(job) || retainedJobStatuses.has(job.status)
 	}
 
 	function canShowStalledProgressDetails(job: InstallJobSnapshot): boolean {
@@ -476,7 +506,7 @@ export async function useInstallJobNotifications(opts: {
 	}
 
 	function getJobSortRank(job: InstallJobSnapshot): number {
-		if (isTerminalJob(job)) return 0
+		if (isFinishedJob(job)) return 0
 		if (job.status === 'queued' || job.phase === 'preparing_instance') return 2
 		return 1
 	}
@@ -575,7 +605,7 @@ export async function useInstallJobNotifications(opts: {
 	}
 
 	function shouldShowCopyDetails(job: InstallJobSnapshot): boolean {
-		return isTerminalJob(job) || (canShowStalledProgressDetails(job) && hasStalledProgress(job))
+		return isFailedJob(job) || (canShowStalledProgressDetails(job) && hasStalledProgress(job))
 	}
 
 	function isCopied(job: InstallJobSnapshot): boolean {
@@ -623,7 +653,19 @@ export async function useInstallJobNotifications(opts: {
 	function getButtons(job: InstallJobSnapshot): PopupNotificationButton[] {
 		const buttons: PopupNotificationButton[] = []
 
-		if (isTerminalJob(job)) {
+		if (cancelableJobStatuses.has(job.status)) {
+			buttons.push({
+				label: formatMessage(messages.cancel),
+				icon: XIcon,
+				color: 'red',
+				keepOpen: true,
+				action: async () => {
+					await opts.manager.cancel(job.job_id).catch(opts.handleError)
+				},
+			})
+		}
+
+		if (isFailedJob(job)) {
 			const requiresCacheRepair = job.error?.code === 'cache_repair_required'
 			const repairing = repairingJobIds.value.has(job.job_id)
 			buttons.push({
@@ -689,7 +731,12 @@ export async function useInstallJobNotifications(opts: {
 			}
 		}
 
-		const visibleJobs = nextJobs.filter((job) => visibleJobStatuses.has(job.status))
+		const currentJobIds = new Set(jobs.value.map((job) => job.job_id))
+		const visibleJobs = nextJobs.filter(
+			(job) =>
+				visibleJobStatuses.has(job.status) ||
+				(retainedJobStatuses.has(job.status) && currentJobIds.has(job.job_id)),
+		)
 		syncProgressSnapshots(visibleJobs)
 
 		jobs.value = visibleJobs.sort(
@@ -703,6 +750,7 @@ export async function useInstallJobNotifications(opts: {
 	const progressItems = computed<PopupNotificationProgressItem[]>(() =>
 		jobs.value.map((job) => {
 			const progress = getEffectiveProgress(job)
+			const finished = isFinishedJob(job)
 
 			return {
 				id: job.job_id,
@@ -712,19 +760,19 @@ export async function useInstallJobNotifications(opts: {
 				progress: getProgress(job),
 				waiting:
 					['queued', 'running'].includes(job.status) && !hasDeterminateInstallProgress(progress),
-				showProgress: !isTerminalJob(job),
-				wrapText: isTerminalJob(job),
-				progressType: isTerminalJob(job) ? undefined : getProgressType(job),
+				showProgress: !finished,
+				wrapText: isFailedJob(job),
+				progressType: finished ? undefined : getProgressType(job),
 				progressCurrent:
-					!isTerminalJob(job) && hasDeterminateInstallProgress(progress)
+					!finished && hasDeterminateInstallProgress(progress)
 						? progress.current
 						: undefined,
 				progressTotal:
-					!isTerminalJob(job) && hasDeterminateInstallProgress(progress)
+					!finished && hasDeterminateInstallProgress(progress)
 						? progress.total
 						: undefined,
 				buttons: getButtons(job),
-				onDismiss: isTerminalJob(job)
+				onDismiss: finished
 					? async () => {
 							await install_job_dismiss(job.job_id).catch(opts.handleError)
 							await refresh()
@@ -836,7 +884,8 @@ export async function useInstallJobNotifications(opts: {
 	)
 
 	return {
-		active: computed(() => jobs.value.length > 0),
+		active: computed(() => jobs.value.some((job) => activeJobStatuses.has(job.status))),
+		hasItems: computed(() => jobs.value.length > 0),
 		title: computed(() => formatMessage(messages.installs)),
 		progressItems,
 		buttons,

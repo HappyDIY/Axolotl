@@ -1,3 +1,5 @@
+export { default as JLineCommandInput } from './components/JLineCommandInput.vue'
+export * from './jline'
 export { default as ConsolePageLayout } from './layout.vue'
 export * from './providers'
 export * from './types'

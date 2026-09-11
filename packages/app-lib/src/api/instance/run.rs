@@ -15,7 +15,9 @@ use tracing::{info, warn};
 
 pub use crate::launcher::jvm_args::{GcLaunchIntent, GcLaunchReport};
 
-const LAUNCH_PREPARATION_TIMEOUT: Duration = Duration::from_secs(60);
+const DEFAULT_LAUNCH_PREPARATION_TIMEOUT: u64 = 60;
+const MIN_LAUNCH_PREPARATION_TIMEOUT: u64 = 30;
+const MAX_LAUNCH_PREPARATION_TIMEOUT: u64 = 600;
 
 #[derive(Debug, Clone)]
 pub enum QuickPlayType {
@@ -81,6 +83,18 @@ async fn run_with_extra_launch_args_inner(
     gc_intent: Option<GcLaunchIntent>,
 ) -> crate::Result<(ProcessMetadata, Option<GcLaunchReport>)> {
     let state = State::get().await?;
+    let launch_preparation_timeout =
+        crate::state::instances::commands::get_instance_launch_context(
+            instance_id,
+            &state.pool,
+        )
+        .await?
+        .and_then(|context| context.launch_overrides.launch_preparation_timeout)
+        .unwrap_or(DEFAULT_LAUNCH_PREPARATION_TIMEOUT)
+        .clamp(
+            MIN_LAUNCH_PREPARATION_TIMEOUT,
+            MAX_LAUNCH_PREPARATION_TIMEOUT,
+        );
     let default_account = if offline_mode {
         Credentials::get_offline_credential(&state.pool)
             .await?
@@ -98,7 +112,7 @@ async fn run_with_extra_launch_args_inner(
     };
 
     tokio::time::timeout(
-        LAUNCH_PREPARATION_TIMEOUT,
+        Duration::from_secs(launch_preparation_timeout),
         run_credentials(
             instance_id,
             &default_account,
@@ -106,13 +120,15 @@ async fn run_with_extra_launch_args_inner(
             offline_mode,
             extra_launch_args,
             gc_intent,
+            launch_preparation_timeout,
         ),
     )
     .await
     .map_err(|_| {
         crate::ErrorKind::LauncherError(
-            "Minecraft launch preparation timed out after 60 seconds"
-                .to_string(),
+            format!(
+                "Minecraft launch preparation timed out after {launch_preparation_timeout} seconds"
+            ),
         )
         .as_error()
     })?
@@ -126,6 +142,7 @@ async fn run_credentials(
     offline_mode: bool,
     extra_launch_args: Option<Vec<String>>,
     gc_intent: Option<GcLaunchIntent>,
+    launch_preparation_timeout: u64,
 ) -> crate::Result<(ProcessMetadata, Option<GcLaunchReport>)> {
     let state = State::get().await?;
     let settings = Settings::get(&state.pool).await?;
@@ -214,6 +231,10 @@ async fn run_credentials(
         .launch_overrides
         .game_resolution
         .unwrap_or(settings.game_resolution);
+    let maximize_window = context
+        .launch_overrides
+        .maximize_window
+        .unwrap_or(settings.maximize_window);
     let env_args = context
         .launch_overrides
         .custom_env_vars
@@ -336,6 +357,8 @@ async fn run_credentials(
         &wrapper,
         &memory,
         &resolution,
+        maximize_window,
+        launch_preparation_timeout,
         credentials,
         post_exit_hook,
         &context,

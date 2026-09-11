@@ -12,6 +12,7 @@ use crate::state::{
     Credentials, MinecraftAccountType, MinecraftLoginFlow, MinecraftProfile,
     YggdrasilAccount,
 };
+pub use crate::state::{MinecraftDeviceLoginFlow, MinecraftDeviceLoginPoll};
 use crate::util::fetch::INSECURE_REQWEST_CLIENT;
 use crate::util::mojang::{mojang_service_url, should_use_mojang_mirror};
 
@@ -96,13 +97,33 @@ pub async fn begin_login() -> crate::Result<MinecraftLoginFlow> {
 }
 
 #[tracing::instrument]
+pub async fn begin_browser_login() -> crate::Result<MinecraftLoginFlow> {
+    let state = State::get().await?;
+    crate::state::browser_login_begin(&state.pool).await
+}
+
+#[tracing::instrument]
+pub async fn begin_device_login() -> crate::Result<MinecraftDeviceLoginFlow> {
+    crate::state::device_login_begin().await
+}
+
+#[tracing::instrument]
+pub async fn poll_device_login(
+    device_code: &str,
+) -> crate::Result<MinecraftDeviceLoginPoll> {
+    let state = State::get().await?;
+    crate::state::device_login_poll(device_code, &state.pool).await
+}
+
+#[tracing::instrument]
 pub async fn finish_login(
     code: &str,
+    state: &str,
     flow: MinecraftLoginFlow,
 ) -> crate::Result<Credentials> {
-    let state = State::get().await?;
+    let app_state = State::get().await?;
 
-    crate::state::login_finish(code, flow, &state.pool).await
+    crate::state::login_finish(code, state, flow, &app_state.pool).await
 }
 
 #[tracing::instrument]

@@ -106,7 +106,10 @@ impl InstallJobState {
         let target = request.target();
         let cleanup = request.cleanup();
         let kind = request.kind();
-        let phase = InstallPhaseId::PreparingInstance;
+        // Content installs do not create or prepare an instance. Start them in
+        // the content phase so the download center never presents them as an
+        // instance setup task while the worker is being scheduled.
+        let phase = initial_phase_for_request(&request);
 
         Self {
             schema_version: 1,
@@ -211,6 +214,19 @@ impl InstallJobState {
         self.progress.phase = phase;
         self.progress.progress = progress;
         self.progress.details = details;
+    }
+}
+
+pub(crate) fn initial_phase_for_request(
+    request: &InstallRequest,
+) -> InstallPhaseId {
+    match request {
+        InstallRequest::InstallContent { .. }
+        | InstallRequest::InstallCurseForgeContent { .. }
+        | InstallRequest::InstallCurseForgeWorld { .. } => {
+            InstallPhaseId::DownloadingContent
+        }
+        _ => InstallPhaseId::PreparingInstance,
     }
 }
 
@@ -343,6 +359,12 @@ mod tests {
                     name: "Test".to_string(),
                     icon_path: None,
                     symlink_target: None,
+                    linked_launcher: None,
+                    linked_launcher_root: None,
+                    linked_dot_minecraft: None,
+                    linked_version_id: None,
+                    linked_version_json_path: None,
+                    linked_game_dir_mode: None,
                     game_dir_override: None,
                     created: now,
                     modified: now,
@@ -461,7 +483,7 @@ mod tests {
         assert_eq!(summary.bytes_total, Some(300));
         let items = job.download_items();
         assert_eq!(items.len(), 3);
-        assert_eq!(items[0].status, DownloadItemStatus::Completed);
+        assert_eq!(items[0].status, DownloadItemStatus::Verifying);
         assert_eq!(items[0].attempt, Some(1));
         assert_eq!(items[0].max_attempts, Some(4));
         assert_eq!(
@@ -1631,9 +1653,15 @@ impl InstallJobProvider {
 #[serde(rename_all = "snake_case")]
 pub enum DownloadItemStatus {
     Queued,
+    WorkerStarted,
+    WaitingForResource,
+    Connecting,
     Downloading,
     Verifying,
     Writing,
+    Metadata,
+    WaitingForDatabase,
+    Finalizing,
     WaitingForUser,
     Completed,
     Skipped,
@@ -2534,7 +2562,10 @@ impl InstallJobState {
                         .get(path)
                         .and_then(|&index| items.get_mut(index))
                     {
-                        item.status = DownloadItemStatus::Completed;
+                        // Network transfer completion is not content
+                        // finalization. `ContentFileCompleted` is the event
+                        // that confirms verification and DB registration.
+                        item.status = DownloadItemStatus::Verifying;
                         item.bytes_downloaded = *bytes;
                         item.bytes_total = item.bytes_total.or(Some(*bytes));
                     }
@@ -2653,9 +2684,15 @@ impl InstallJobState {
                         if matches!(
                             item.status,
                             DownloadItemStatus::Queued
+                                | DownloadItemStatus::WorkerStarted
+                                | DownloadItemStatus::WaitingForResource
+                                | DownloadItemStatus::Connecting
                                 | DownloadItemStatus::Downloading
                                 | DownloadItemStatus::Verifying
                                 | DownloadItemStatus::Writing
+                                | DownloadItemStatus::Metadata
+                                | DownloadItemStatus::WaitingForDatabase
+                                | DownloadItemStatus::Finalizing
                         ) {
                             item.status = DownloadItemStatus::Canceled;
                         }

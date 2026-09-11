@@ -290,6 +290,12 @@
   "console.command.server-not-running-placeholder": {
     "defaultMessage": "服务器未运行"
   },
+  "console.command-completions.no-results": {
+    "defaultMessage": "没有匹配的补全项"
+  },
+  "console.command-completions.search": {
+    "defaultMessage": "搜索命令补全项"
+  },
   "console.crash.export-context": {
     "defaultMessage": "导出崩溃上下文"
   },
@@ -678,7 +684,7 @@
     "defaultMessage": "点击右上角「开始游戏」即可接收实时日志"
   },
   "console.empty.server-title": {
-    "defaultMessage": "欢迎使用 Modrinth 服务器！"
+    "defaultMessage": "欢迎使用 Axolotl 服务器！"
   },
   "console.empty.server-description": {
     "defaultMessage": "点击启动按钮即可启动服务器！"
@@ -1139,20 +1145,11 @@
   "creation-flow.modal.custom-setup.content-loader.label": {
     "defaultMessage": "内容加载器"
   },
-  "creation-flow.modal.custom-setup.game-dir.choose-folder": {
-    "defaultMessage": "选择文件夹"
-  },
-  "creation-flow.modal.custom-setup.game-dir.isolated": {
-    "defaultMessage": "自定义 · 版本隔离 (.minecraft/versions/实例名/)"
-  },
   "creation-flow.modal.custom-setup.game-dir.label": {
     "defaultMessage": "游戏目录"
   },
   "creation-flow.modal.custom-setup.game-dir.managed": {
     "defaultMessage": "Axolotl 目录"
-  },
-  "creation-flow.modal.custom-setup.game-dir.not-isolated": {
-    "defaultMessage": "自定义 · 版本共享 (.minecraft/)"
   },
   "creation-flow.modal.custom-setup.game-version.load-failed": {
     "defaultMessage": "游戏版本加载失败"
@@ -2230,6 +2227,18 @@
   },
   "label.no-items": {
     "defaultMessage": "空"
+  },
+  "notification.panel.copy": {
+    "defaultMessage": "复制到剪贴板"
+  },
+  "notification.panel.copy-support": {
+    "defaultMessage": "复制错误详情以便支持"
+  },
+  "notification.panel.dismiss": {
+    "defaultMessage": "忽略"
+  },
+  "notification.panel.export-error-logs": {
+    "defaultMessage": "导出错误日志"
   },
   "label.notifications": {
     "defaultMessage": "消息提醒"

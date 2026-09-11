@@ -4496,12 +4496,6 @@
 	"app.lab.seed-map.edition.java-large-biomes": {
 		"message": "Java 版：大型生物群系"
 	},
-	"app.lab.seed-map.elevation": {
-		"message": "群系高度"
-	},
-	"app.lab.seed-map.elevation-locked": {
-		"message": "开启地形估算时自动采用估算的地表高度"
-	},
 	"app.lab.seed-map.exit-fullscreen": {
 		"message": "退出全屏"
 	},
@@ -5112,7 +5106,7 @@
 		"message": "没有找到可分享或分析的日志内容，请确认实例中有最近几分钟内生成的日志。"
 	},
 	"app.minecraft-crash.preparation-timed-out": {
-		"message": "启动准备在 60 秒内未能完成，现已取消。请检查 Java 路径、启动前命令、包装器命令和网络连接，然后重试。"
+		"message": "启动准备未能在设定的超时时间内完成，现已取消。请检查 Java 路径、启动前命令、包装器命令和网络连接，然后重试。"
 	},
 	"app.minecraft-crash.preview-instance": {
 		"message": "Minecraft 测试实例"
@@ -5820,7 +5814,7 @@
 		"message": "允许匿名遥测"
 	},
 	"app.privacy-consent.telemetry-description": {
-		"message": "通过脱敏且限长的报告统计选择加入的安装量并排查启动器错误。不会上传完整 Minecraft 日志或账户凭据。"
+		"message": "用于统计选择加入的安装量和每日活跃用户。绝不上传完整 Minecraft 日志或账户凭据。"
 	},
 	"app.privacy-consent.title": {
 		"message": "隐私与安全"
@@ -6513,10 +6507,10 @@
 		"message": "显示快照版本"
 	},
 	"app.servers.wizard.type-heading": {
-		"message": "选择服务端类型"
+		"message": "选择服务器核心"
 	},
 	"app.servers.wizard.type-title": {
-		"message": "服务端类型"
+		"message": "服务器类型"
 	},
 	"app.servers.type.vanilla": {
 		"message": "原版"
@@ -6843,7 +6837,7 @@
 		"message": "查看已安装 Java"
 	},
 	"app.settings.privacy.data-handling": {
-		"message": "遥测使用随机安装标识。错误上下文离开设备前会经过脱敏和长度限制。关闭遥测会立即清空待发送报告。"
+		"message": "遥测使用随机安装标识，仅发送每日活跃信号。关闭遥测会立即清空待发送数据。"
 	},
 	"app.settings.privacy.discord-rpc": {
 		"message": "Discord 活动状态"
@@ -6855,7 +6849,7 @@
 		"message": "允许遥测"
 	},
 	"app.settings.privacy.telemetry-description": {
-		"message": "发送匿名每日活跃信号和脱敏的启动器错误报告。绝不上传 Minecraft 日志或账户凭据。"
+		"message": "发送匿名每日活跃信号以优化使用统计。绝不上传 Minecraft 日志或账户凭据。"
 	},
 	"app.settings.resources.app-cache": {
 		"message": "应用缓存"
@@ -7275,7 +7269,7 @@
 		"message": "请连接到互联网后检查更新。"
 	},
 	"app.settings.updates.portable": {
-		"message": "便携模式暂时无法更新，请去GitHub手动更新。"
+		"message": "便携模式无法自动更新，请手动下载最新版本。"
 	},
 	"app.settings.updates.preview-announcement": {
 		"message": "预览更新公告弹窗"
@@ -8586,13 +8580,13 @@
 		"message": "选择更新渠道"
 	},
 	"instance.settings.tabs.hooks": {
-		"message": "启动 Hooks"
+		"message": "启动准备"
 	},
 	"instance.settings.tabs.hooks.custom-hooks": {
 		"message": "自定义启动 Hooks"
 	},
 	"instance.settings.tabs.hooks.description": {
-		"message": "Hooks允许高级用户在启动游戏前后运行特定的系统命令。"
+		"message": "配置启动准备阶段的等待时间，以及在游戏启动前后运行的可选命令。"
 	},
 	"instance.settings.tabs.hooks.post-exit": {
 		"message": "退出后执行"
@@ -8613,7 +8607,7 @@
 		"message": "输入启动前命令……"
 	},
 	"instance.settings.tabs.hooks.title": {
-		"message": "游戏启动钩子"
+		"message": "启动准备"
 	},
 	"instance.settings.tabs.hooks.wrapper": {
 		"message": "包装器命令"
@@ -9935,32 +9929,377 @@
 	"unknown-pack-warning-modal.warning.title": {
 		"message": "未知文件警告"
 	},
-	"app.settings.about.game.title": {
-		"message": "合成美西螈"
-	},
-	"app.settings.about.game.tap-to-drop": {
-		"message": "点击场地，投放粉色美西螈"
-	},
-	"app.settings.about.game.score": {
-		"message": "分数：{score}"
-	},
-	"app.settings.about.game.restart": {
-		"message": "重新开始"
-	},
-	"app.settings.about.game.highest-level": {
-		"message": "最高等级：{level}"
-	},
-	"app.settings.about.game.game-over": {
-		"message": "潮水上涨了！"
+	"app.settings.about.game.completed": {
+		"message": "彩虹美西螈！"
 	},
 	"app.settings.about.game.exit": {
 		"message": "退出游戏"
 	},
-	"app.settings.about.game.completed": {
-		"message": "彩虹美西螈！"
+	"app.settings.about.game.game-over": {
+		"message": "美西螈搁浅了！"
 	},
-	"app.servers.eula.accept": {
-		"message": "同意并继续"
+	"app.settings.about.game.highest-level": {
+		"message": "最高等级：{level}"
+	},
+	"app.settings.about.game.restart": {
+		"message": "重新开始"
+	},
+	"app.settings.about.game.score": {
+		"message": "分数：{score}"
+	},
+	"app.settings.about.game.tap-to-drop": {
+		"message": "点击场地，投放粉色美西螈"
+	},
+	"app.settings.about.game.title": {
+		"message": "合成美西螈"
+	},
+	"minecraft-login.trouble": {
+		"message": "遇到问题？"
+	},
+	"minecraft-login.title": {
+		"message": "登录 Minecraft"
+	},
+	"minecraft-login.open-verification": {
+		"message": "打开验证页面"
+	},
+	"minecraft-login.device-starting": {
+		"message": "正在请求设备代码……"
+	},
+	"minecraft-login.device-expired": {
+		"message": "此设备代码已过期。请重新开始以获取新代码。"
+	},
+	"minecraft-login.device-description": {
+		"message": "请在任意设备上打开下方页面，然后输入此代码。"
+	},
+	"minecraft-login.device-code": {
+		"message": "使用设备代码"
+	},
+	"minecraft-login.browser": {
+		"message": "使用浏览器登录"
+	},
+	"instance.settings.tabs.window.maximize-window.unsupported": {
+		"message": "当前操作系统暂不支持。"
+	},
+	"instance.settings.tabs.window.maximize-window.description": {
+		"message": "启动时最大化 Minecraft 窗口。"
+	},
+	"instance.settings.tabs.window.maximize-window": {
+		"message": "最大化窗口"
+	},
+	"instance.settings.tabs.hooks.launch-preparation-timeout.description": {
+		"message": "启动准备阶段允许的最长等待时间，单位为秒（30–600）。"
+	},
+	"instance.settings.tabs.hooks.launch-preparation-timeout": {
+		"message": "启动准备超时时间"
+	},
+	"instance.settings.tabs.hooks.custom-launch-preparation-timeout": {
+		"message": "使用自定义启动准备超时时间"
+	},
+	"instance.settings.tabs.general.game-dir.external-note": {
+		"message": "此实例使用外部 .minecraft 目录，文件会直接在原位置管理。"
+	},
+	"create.pcl-hmcl-hint": {
+		"message": "正在使用 PCL / HMCL？"
+	},
+	"create.add-minecraft-folder": {
+		"message": "添加 .minecraft 文件夹"
+	},
+	"app.update-popup.apt-update": {
+		"message": "更新"
+	},
+	"app.settings.updates.preferences.title": {
+		"message": "更新行为"
+	},
+	"app.settings.updates.paused": {
+		"message": "更新已暂停。"
+	},
+	"app.settings.updates.pause-description": {
+		"message": "暂停自动检查、下载和更新通知，直到恢复更新。"
+	},
+	"app.settings.updates.pause": {
+		"message": "暂停更新"
+	},
+	"app.settings.updates.latest-version-unavailable": {
+		"message": "最新版本暂不可用"
+	},
+	"app.settings.updates.latest-version-loading": {
+		"message": "正在获取"
+	},
+	"app.settings.updates.latest-version": {
+		"message": "最新 {channel} 版本：{version}"
+	},
+	"app.settings.updates.immediate-fetch.beta-description": {
+		"message": "Beta 更新始终立即可用。"
+	},
+	"app.settings.updates.immediate-fetch-description": {
+		"message": "在推出最新的稳定更改、修复后，成为第一批获得这些更新的用户。"
+	},
+	"app.settings.updates.immediate-fetch": {
+		"message": "最新更新可用后立即获取"
+	},
+	"app.settings.updates.database-operation.success": {
+		"message": "已成功将 {source} 复制到 {target}。"
+	},
+	"app.settings.updates.database-operation.release-to-beta": {
+		"message": "从 Release 复制到 Beta"
+	},
+	"app.settings.updates.database-operation.label": {
+		"message": "数据库操作"
+	},
+	"app.settings.updates.database-operation.failed": {
+		"message": "无法复制数据库。请确认 Axolotl 未在使用目标数据库。"
+	},
+	"app.settings.updates.database-operation.confirm-title": {
+		"message": "覆盖数据库？"
+	},
+	"app.settings.updates.database-operation.confirm-description": {
+		"message": "这会用 {source} 数据库的内容完全替换未使用的 {target} 数据库。此操作无法撤销。"
+	},
+	"app.settings.updates.database-operation.confirm": {
+		"message": "覆盖数据库"
+	},
+	"app.settings.updates.database-operation.cancel": {
+		"message": "取消"
+	},
+	"app.settings.updates.database-operation.beta-to-release": {
+		"message": "从 Beta 复制到 Release"
+	},
+	"app.settings.updates.database-operation.active-target": {
+		"message": "无法覆盖当前正在使用的数据库。请先重启 Axolotl 并切换更新通道。"
+	},
+	"app.settings.updates.database-isolation.title": {
+		"message": "数据库隔离"
+	},
+	"app.settings.updates.database-isolation.release": {
+		"message": "Release 数据库"
+	},
+	"app.settings.updates.database-isolation.description": {
+		"message": "Release 和 Beta 使用相互独立的数据库，因此测试 Beta 不会改变 Release 数据。"
+	},
+	"app.settings.updates.database-isolation.current-database": {
+		"message": "当前正在使用的数据库"
+	},
+	"app.settings.updates.database-isolation.beta": {
+		"message": "Beta 数据库"
+	},
+	"app.settings.updates.database-isolation.active": {
+		"message": "正在使用"
+	},
+	"app.settings.updates.current-version": {
+		"message": "当前版本 {version}"
+	},
+	"app.settings.updates.check.title": {
+		"message": "检查更新"
+	},
+	"app.settings.updates.channel.title": {
+		"message": "更新通道"
+	},
+	"app.settings.updates.channel.start-empty": {
+		"message": "从空白数据库开始"
+	},
+	"app.settings.updates.channel.restart-title": {
+		"message": "需要重启"
+	},
+	"app.settings.updates.channel.restart-now": {
+		"message": "立即重启"
+	},
+	"app.settings.updates.channel.restart-later": {
+		"message": "稍后手动重启"
+	},
+	"app.settings.updates.channel.restart-development-description": {
+		"message": "手动重启开发会话后，新的更新通道才会生效。"
+	},
+	"app.settings.updates.channel.restart-description": {
+		"message": "立即重启 Axolotl 以开始使用新的更新通道，或稍后手动重启。"
+	},
+	"app.settings.updates.channel.release-description": {
+		"message": "稳定且经过测试的新功能与修复，更新频率较慢。"
+	},
+	"app.settings.updates.channel.release": {
+		"message": "Release"
+	},
+	"app.settings.updates.channel.label": {
+		"message": "通道"
+	},
+	"app.settings.updates.channel.description": {
+		"message": "选择 Axolotl 接收的启动器版本。"
+	},
+	"app.settings.updates.channel.copy-database-title": {
+		"message": "将 Release 数据复制到 Beta？"
+	},
+	"app.settings.updates.channel.copy-database-description": {
+		"message": "为防止出现问题，Beta 版将使用独立的数据存储，以免影响正式版的正确运行。这貌似是你第一次使用 Beta 版，是否要将稳定版的数据复制到 Beta 版？此操作无法自动还原。"
+	},
+	"app.settings.updates.channel.copy-database": {
+		"message": "复制数据库"
+	},
+	"app.settings.updates.channel.beta-description": {
+		"message": "包含最新功能的新更新，但稳定性较低，更新频率更快。"
+	},
+	"app.settings.updates.channel.beta": {
+		"message": "Beta"
+	},
+	"app.settings.resources.select-minecraft-directory": {
+		"message": "选择 .minecraft 目录"
+	},
+	"app.settings.resources.remove-minecraft-directory": {
+		"message": "删除 .minecraft 目录"
+	},
+	"app.settings.resources.minecraft-directory-must-end-with": {
+		"message": "所选文件夹名称必须是 .minecraft。"
+	},
+	"app.settings.resources.minecraft-directory-mode.shared": {
+		"message": "共享 .minecraft 目录"
+	},
+	"app.settings.resources.minecraft-directory-mode.isolated": {
+		"message": "版本隔离"
+	},
+	"app.settings.resources.minecraft-directory-mode": {
+		"message": "游戏目录模式"
+	},
+	"app.settings.resources.minecraft-directories-description": {
+		"message": "添加一个或多个供实例使用的外部 .minecraft 文件夹。这些文件夹与 Axolotl 数据分开保存。"
+	},
+	"app.settings.resources.minecraft-directories": {
+		"message": "Minecraft 目录"
+	},
+	"app.settings.resources.axolotl-data-directory": {
+		"message": "Axolotl 数据目录"
+	},
+	"app.settings.resources.add-minecraft-directory": {
+		"message": "添加 .minecraft 目录"
+	},
+	"app.settings.developer.preview-with-action": {
+		"message": "显示可选的外部链接按钮"
+	},
+	"app.settings.developer.preview-announcement-popup": {
+		"message": "预览 Popup 通知"
+	},
+	"app.settings.developer.preview-announcement-modal": {
+		"message": "预览启动弹窗"
+	},
+	"app.settings.developer.announcement-preview-description": {
+		"message": "使用本地示例预览真实公告组件，不请求远端公告，也不改变真实公告的已读状态。"
+	},
+	"app.settings.developer.announcement-preview": {
+		"message": "公告样式预览"
+	},
+	"app.settings.defaults.maximize-window.unsupported": {
+		"message": "当前操作系统暂不支持。"
+	},
+	"app.settings.defaults.maximize-window-description": {
+		"message": "启动时最大化 Minecraft 窗口。"
+	},
+	"app.settings.defaults.maximize-window": {
+		"message": "最大化窗口"
+	},
+	"app.settings.about.game.tide-hint": {
+		"message": "潮水正在退去，别让美西螈搁浅！"
+	},
+	"app.settings.about.game.settle-title": {
+		"message": "结算完成！"
+	},
+	"app.settings.about.game.settle": {
+		"message": "结算"
+	},
+	"app.settings.about.game.score-label": {
+		"message": "分数"
+	},
+	"app.settings.about.game.overtimes-label": {
+		"message": "加时次数"
+	},
+	"app.settings.about.game.overtime-detail": {
+		"message": "水位回升，继续合成！"
+	},
+	"app.settings.about.game.overtime": {
+		"message": "潮水大涨！"
+	},
+	"app.settings.about.game.new-record": {
+		"message": "新纪录！"
+	},
+	"app.settings.about.game.level-label": {
+		"message": "最高等级"
+	},
+	"app.settings.about.game.best-label": {
+		"message": "最高分"
+	},
+	"app.settings.about.game.best": {
+		"message": "最高分：{score}"
+	},
+	"app.settings.about.easteregg.game-title": {
+		"message": "彩蛋小游戏"
+	},
+	"app.settings.about.easteregg.contributors-title": {
+		"message": "贡献者彩蛋"
+	},
+	"app.settings.about.easteregg.click-hint": {
+		"message": "点击以打开彩蛋小游戏"
+	},
+	"app.servers.status.download-interrupted": {
+		"message": "下载中断"
+	},
+	"app.servers.status.download-failed": {
+		"message": "下载失败"
+	},
+	"app.servers.console.forge-command-placeholder": {
+		"message": "发送命令，支持 Tab 补全"
+	},
+	"app.servers.action.retry-download": {
+		"message": "重试下载"
+	},
+	"app.servers.action.continue-download": {
+		"message": "继续下载"
+	},
+	"app.remote-announcements.view": {
+		"message": "查看公告"
+	},
+	"app.remote-announcements.unread": {
+		"message": "未读"
+	},
+	"app.remote-announcements.read-all": {
+		"message": "将所有公告标为已读"
+	},
+	"app.remote-announcements.preview-title": {
+		"message": "公告样式预览"
+	},
+	"app.remote-announcements.preview-summary": {
+		"message": "这是一条本地预览通知，点击“查看公告”可查看完整 Markdown 正文。"
+	},
+	"app.remote-announcements.preview-content": {
+		"message": "## 公告预览\n\n这是**示例正文**，不是已发布公告。\n\n- 支持标题、列表和链接\n- 默认自带关闭按钮\n\n> 预览不会影响真实公告的已读状态。\n\n| 类型 | 展示方式 |\n| --- | --- |\n| 启动弹窗 | 完整 Markdown 正文 |\n| Popup 通知 | 先显示摘要，再查看全文 |\n\n[访问官网](https://axlmc.org)"
+	},
+	"app.remote-announcements.preview-action": {
+		"message": "访问官网"
+	},
+	"app.modpack-install.version": {
+		"message": "版本"
+	},
+	"app.modpack-install.title": {
+		"message": "安装整合包"
+	},
+	"app.modpack-install.select-version": {
+		"message": "选择版本"
+	},
+	"app.modpack-install.instance-name-placeholder": {
+		"message": "我的整合包实例"
+	},
+	"app.modpack-install.instance-name": {
+		"message": "实例名称"
+	},
+	"app.modpack-install.install": {
+		"message": "安装"
+	},
+	"app.modpack-install.folder-name-conflict": {
+		"message": "已存在同名文件夹。实例文件夹将命名为：{name}"
+	},
+	"app.modpack-install.folder-name": {
+		"message": "实例文件夹：{name}"
+	},
+	"app.modpack-install.already-installed-description": {
+		"message": "创建新实例不会影响以下已有实例：{names}"
+	},
+	"app.modpack-install.already-installed": {
+		"message": "此版本已安装"
 	},
 	"app.minecraft-crash.share-fallback": {
 		"message": "LogShare 不可用，已改用 mclo.gs 分享诊断信息。"
@@ -10064,6 +10403,39 @@
 	"app.log-share.ai.action": {
 		"message": "AI 深度分析"
 	},
+	"app.lab.seed-map.elevation.surface": {
+		"message": "地表"
+	},
+	"app.lab.seed-map.elevation.shallow-underground": {
+		"message": "浅层地下"
+	},
+	"app.lab.seed-map.elevation.deep-underground": {
+		"message": "深层地下"
+	},
+	"app.lab.seed-map.depth": {
+		"message": "深度"
+	},
+	"app.downloads.item-status.worker-started": {
+		"message": "正在启动"
+	},
+	"app.downloads.item-status.waiting-for-resource": {
+		"message": "正在等待下载资源"
+	},
+	"app.downloads.item-status.waiting-for-database": {
+		"message": "正在等待数据库"
+	},
+	"app.downloads.item-status.metadata": {
+		"message": "正在加载元数据"
+	},
+	"app.downloads.item-status.finalizing": {
+		"message": "正在完成"
+	},
+	"app.downloads.item-status.connecting": {
+		"message": "连接中"
+	},
+	"app.direct-link-sync.issues-title": {
+		"message": "外部 Minecraft 实例需要处理"
+	},
 	"app.crash-analysis.ai.settings.ai-source-logshare": {
 		"message": "LogShare AI"
 	},
@@ -10075,5 +10447,59 @@
 	},
 	"app.crash-analysis.ai.settings.ai-source": {
 		"message": "AI 来源"
+	},
+	"app.close-launcher.tray": {
+		"message": "隐藏至托盘"
+	},
+	"app.close-launcher.title": {
+		"message": "选择关闭 Axolotl Launcher 的方式"
+	},
+	"app.close-launcher.remember": {
+		"message": "记住我的选择"
+	},
+	"app.close-launcher.direct": {
+		"message": "直接关闭"
+	},
+	"app.build.beta": {
+		"message": "Beta"
+	},
+	"app.appearance-settings.close-behavior.title": {
+		"message": "关闭 Axolotl Launcher 的方式"
+	},
+	"app.appearance-settings.close-behavior.lightweight": {
+		"message": "隐藏至托盘"
+	},
+	"app.appearance-settings.close-behavior.description": {
+		"message": "选择关闭窗口时是退出启动器，还是将其隐藏至系统托盘。"
+	},
+	"app.appearance-settings.close-behavior.close": {
+		"message": "直接关闭"
+	},
+	"app.appearance-settings.close-behavior.ask": {
+		"message": "每次询问"
+	},
+	"app.appearance-settings.accent-color.system-unsupported-label": {
+		"message": "跟随系统：系统不支持"
+	},
+	"app.appearance-settings.accent-color.system-unsupported": {
+		"message": "系统不支持"
+	},
+	"app.appearance-settings.accent-color.system": {
+		"message": "跟随系统"
+	},
+	"app.action-bar.notifications.empty": {
+		"message": "暂无通知"
+	},
+	"app.action-bar.notifications.dismiss": {
+		"message": "忽略通知"
+	},
+	"app.action-bar.notifications.clear": {
+		"message": "清除全部"
+	},
+	"app.action-bar.notifications": {
+		"message": "通知"
+	},
+	"app.action-bar.install.cancel": {
+		"message": "取消"
 	}
 }

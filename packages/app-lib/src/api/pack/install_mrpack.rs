@@ -8,9 +8,9 @@ use crate::install::model::{
     InstallPauseReason, MissingModpackContentState, MissingModpackFileState,
 };
 use crate::install::{
-    InstallErrorContext, InstallJobEventKind, InstallPhaseDetails,
-    InstallPhaseId, InstallProgress, InstallProgressReporter,
-    InstallProgressSecondary,
+    DownloadItemStatus, InstallErrorContext, InstallJobEventKind,
+    InstallPhaseDetails, InstallPhaseId, InstallProgress,
+    InstallProgressReporter, InstallProgressSecondary,
 };
 use crate::pack::install_from::{
     EnvType, PackFile, PackFileHash, set_instance_information,
@@ -24,8 +24,7 @@ use crate::state::{
 };
 use crate::util::fetch::{
     ContentValidation, DownloadMeta, DownloadReason, DownloadRequest,
-    FetchProgressFn, Integrity, ResourceClass, download_to_path,
-    sha1_file_async,
+    Integrity, ResourceClass, download_to_path, sha1_file_async,
 };
 use crate::util::io;
 use async_zip::base::read::seek::ZipFileReader as SeekZipFileReader;
@@ -33,7 +32,7 @@ use async_zip::base::read::{WithEntry, ZipEntryReader};
 use async_zip::tokio::read::fs::ZipFileReader as FsZipFileReader;
 use futures::StreamExt;
 use path_util::SafeRelativeUtf8UnixPathBuf;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
 use std::fmt;
 use std::future::Future;
@@ -42,14 +41,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
+use std::time::Duration;
 
 use super::install_from::{CreatePack, CreatePackFile, PackFormat};
+use super::parallel_minecraft_install::ParallelMinecraftInstall;
 use crate::data::ProjectType;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
+use tokio::sync::{Mutex, Semaphore};
 
 type ExtractProgressFn<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>>
     + Send
@@ -64,6 +64,9 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 /// is exhausted does the install ask the user about missing content.
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
+const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
+const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
+const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
 pub(crate) enum MrpackInstallOutcome {
     #[allow(dead_code)]
@@ -71,39 +74,36 @@ pub(crate) enum MrpackInstallOutcome {
     WaitingForUser(InstallPauseReason),
 }
 
-/// Owns the concurrent Minecraft core install that runs while modpack content
-/// downloads. Cancels the background task on drop, so error exits never leak
-/// it; the happy path joins it explicitly and the user-pause path aborts and
-/// waits for a clean stop before returning.
-struct ParallelMinecraftInstall {
-    cancel: CancellationToken,
-    task: Option<tokio::task::JoinHandle<crate::Result<()>>>,
+#[derive(Clone)]
+struct OverrideExtractionSpec {
+    index: usize,
+    entry_name: String,
+    crc32: u32,
+    uncompressed_size: u64,
+    relative_path: String,
+    target_path: PathBuf,
 }
 
-impl ParallelMinecraftInstall {
-    async fn abort(mut self) {
-        self.cancel.cancel();
-        if let Some(task) = self.task.take() {
-            let _ = task.await;
-        }
-    }
-
-    /// Waits for the parallel Minecraft install to finish naturally. Unlike
-    /// [`Self::abort`] this never cancels: when the modpack content has
-    /// already finished, the Minecraft core download must still run to
-    /// completion before the job is reported done.
-    async fn join(mut self) -> crate::Result<()> {
-        if let Some(task) = self.task.take() {
-            task.await??;
-        }
-        Ok(())
-    }
+struct ExtractedOverride {
+    spec: OverrideExtractionSpec,
+    size: u64,
+    hash: String,
 }
 
-impl Drop for ParallelMinecraftInstall {
-    fn drop(&mut self) {
-        self.cancel.cancel();
+fn override_extraction_groups(
+    specs: Vec<OverrideExtractionSpec>,
+) -> Vec<Vec<OverrideExtractionSpec>> {
+    let mut groups: Vec<Vec<OverrideExtractionSpec>> = Vec::new();
+    let mut positions = HashMap::<PathBuf, usize>::new();
+    for spec in specs {
+        if let Some(&index) = positions.get(&spec.target_path) {
+            groups[index].push(spec);
+        } else {
+            positions.insert(spec.target_path.clone(), groups.len());
+            groups.push(vec![spec]);
+        }
     }
+    groups
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -226,8 +226,6 @@ struct ModpackContentInstallContext {
     modpack_details: InstallPhaseDetails,
     content_progress: Arc<AtomicU64>,
     content_bytes_progress: Arc<AtomicU64>,
-    active_download_bytes: Arc<Mutex<HashMap<String, u64>>>,
-    active_download_total: Arc<AtomicU64>,
     download_source: Arc<Mutex<Option<String>>>,
     fallback_count: Arc<AtomicU64>,
     file_infos_by_hash: Arc<Mutex<Option<HashMap<String, ModrinthHashMatch>>>>,
@@ -368,11 +366,9 @@ impl ModpackContentInstallContext {
         attempt: usize,
         max_attempts: usize,
     ) -> crate::Result<()> {
-        let active_bytes = self.update_active_download(path.clone(), 0).await;
         let current_bytes = self
             .content_bytes_progress
             .load(Ordering::Relaxed)
-            .saturating_add(active_bytes)
             .min(self.content_total_bytes);
         self.reporter
             .update_with_events(
@@ -427,27 +423,6 @@ impl ModpackContentInstallContext {
                 vec![event],
             )
             .await
-    }
-
-    async fn remove_active_download(&self, path: &str) {
-        let mut active_download_bytes = self.active_download_bytes.lock().await;
-        if let Some(previous) = active_download_bytes.remove(path) {
-            self.active_download_total
-                .fetch_sub(previous, Ordering::Relaxed);
-        }
-    }
-
-    async fn update_active_download(
-        &self,
-        path: String,
-        downloaded: u64,
-    ) -> u64 {
-        let mut active_download_bytes = self.active_download_bytes.lock().await;
-        let previous =
-            active_download_bytes.insert(path, downloaded).unwrap_or(0);
-        self.active_download_total
-            .fetch_add(downloaded.saturating_sub(previous), Ordering::Relaxed);
-        self.active_download_total.load(Ordering::Relaxed)
     }
 
     async fn record_download_result(
@@ -572,6 +547,38 @@ impl MrpackZipReader {
             }
         }
     }
+
+    async fn extract_override_entry(
+        &mut self,
+        spec: &OverrideExtractionSpec,
+        semaphore: &crate::util::fetch::IoSemaphore,
+        progress: Option<&mut ExtractProgressFn<'_>>,
+    ) -> crate::Result<(u64, String)> {
+        let entry = self.file().entries().get(spec.index).ok_or_else(|| {
+            crate::ErrorKind::InputError(format!(
+                "Override entry {} is missing from reopened modpack archive",
+                spec.entry_name
+            ))
+        })?;
+        let entry_name = entry.filename().as_str().map_err(|_| {
+            crate::ErrorKind::InputError(format!(
+                "Override entry {} has an invalid filename in reopened modpack archive",
+                spec.entry_name
+            ))
+        })?;
+        if entry_name != spec.entry_name
+            || entry.crc32() != spec.crc32
+            || entry.uncompressed_size() != spec.uncompressed_size
+        {
+            return Err(crate::ErrorKind::InputError(format!(
+                "Override entry {} does not match the original modpack archive layout",
+                spec.entry_name
+            ))
+            .into());
+        }
+        self.extract_entry(spec.index, &spec.target_path, semaphore, progress)
+            .await
+    }
 }
 
 async fn hash_zip_entry<R>(
@@ -636,6 +643,8 @@ where
     let mut hasher = sha1_smol::Sha1::new();
     let mut size = 0;
     let mut buffer = vec![0; 262144];
+    let mut pending_progress = 0_u64;
+    const PROGRESS_GRANULARITY: u64 = 1024 * 1024;
 
     loop {
         let bytes_read =
@@ -650,14 +659,19 @@ where
             .map_err(|e| io::IOError::with_path(e, &temp_path))?;
         hasher.update(&buffer[..bytes_read]);
         size += bytes_read as u64;
+        pending_progress += bytes_read as u64;
         if let Some(progress) = progress.as_mut() {
-            progress(bytes_read as u64).await?;
+            if pending_progress >= PROGRESS_GRANULARITY {
+                progress(pending_progress).await?;
+                pending_progress = 0;
+            }
         }
     }
-
-    file.flush()
-        .await
-        .map_err(|e| io::IOError::with_path(e, &temp_path))?;
+    if let Some(progress) = progress.as_mut() {
+        if pending_progress > 0 {
+            progress(pending_progress).await?;
+        }
+    }
     drop(file);
 
     if reader.compute_hash() != expected_crc32 {
@@ -782,69 +796,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         }
     }
 
-    // Cache the modpack file hashes for later filtering of user-added content
-    // Includes both manifest file hashes and computed hashes for override files
-    if let Some(ref version_id) = version_id {
-        let mut file_hashes: Vec<String> = pack
-            .files
-            .iter()
-            .filter_map(|f| f.hashes.get(&PackFileHash::Sha1).cloned())
-            .collect();
-
-        // Also hash files from overrides folders (these aren't in modrinth.index.json)
-        let override_entries: Vec<usize> = zip_reader
-            .file()
-            .entries()
-            .iter()
-            .enumerate()
-            .filter_map(|(index, entry)| {
-                let filename = entry.filename().as_str().ok()?;
-                let is_override = (filename.starts_with(&overrides_prefix)
-                    || filename.starts_with(&client_overrides_prefix)
-                    || filename.starts_with(&server_overrides_prefix))
-                    && !filename.ends_with('/');
-                is_override.then_some(index)
-            })
-            .collect();
-
-        for index in override_entries {
-            let (_, hash) = zip_reader.hash_entry(index).await?;
-            file_hashes.push(hash);
-        }
-
-        let project_ids: Vec<String> = pack
-            .files
-            .iter()
-            .filter_map(|f| {
-                f.downloads.iter().find_map(|url| {
-                    let parts: Vec<&str> = url.split('/').collect();
-                    let data_idx = parts.iter().position(|&p| p == "data")?;
-                    parts.get(data_idx + 1).map(|s| s.to_string())
-                })
-            })
-            .collect::<std::collections::HashSet<_>>()
-            .into_iter()
-            .collect();
-
-        tracing::info!(
-            "Caching {} modpack file hashes and {} project IDs for version {}",
-            file_hashes.len(),
-            project_ids.len(),
-            version_id
-        );
-        CachedEntry::cache_modpack_files(
-            version_id,
-            file_hashes,
-            project_ids,
-            &state.pool,
-        )
-        .await?;
-    } else {
-        tracing::warn!(
-            "No version_id available, skipping modpack file hash caching"
-        );
-    }
-
     set_instance_information(
         instance_id.clone(),
         &description,
@@ -876,11 +827,27 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         .iter()
         .map(|file| file.file_size as u64)
         .sum::<u64>();
+    let mut cached_pack_hashes = pack
+        .files
+        .iter()
+        .filter_map(|file| file.hashes.get(&PackFileHash::Sha1).cloned())
+        .collect::<Vec<_>>();
+    let cached_pack_project_ids = pack
+        .files
+        .iter()
+        .filter_map(|file| {
+            file.downloads.iter().find_map(|url| {
+                let parts = url.split('/').collect::<Vec<_>>();
+                let data_index =
+                    parts.iter().position(|part| *part == "data")?;
+                parts.get(data_index + 1).map(|id| (*id).to_string())
+            })
+        })
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     let content_progress = Arc::new(AtomicU64::new(0));
     let content_bytes_progress = Arc::new(AtomicU64::new(0));
-    let active_download_bytes =
-        Arc::new(Mutex::new(HashMap::<String, u64>::new()));
-    let active_download_total = Arc::new(AtomicU64::new(0));
     let file_info_hashes = Arc::new(
         pack.files
             .iter()
@@ -932,8 +899,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         modpack_details: modpack_details.clone(),
         content_progress,
         content_bytes_progress,
-        active_download_bytes,
-        active_download_total,
         download_source: Arc::new(Mutex::new(None)),
         fallback_count: Arc::new(AtomicU64::new(0)),
         file_infos_by_hash,
@@ -1032,43 +997,23 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 .collect(),
         )
         .await?;
-    // Warm the shared DNS cache for the official Modrinth hosts so the batch
-    // download starts with an ordered address list instead of racing queries.
-    crate::util::fetch::prewarm_download_dns(&[
-        crate::util::fetch::MODRINTH_CDN_OFFICIAL_HOST,
-        crate::util::fetch::TIANPAO_HOST,
-        "api.modrinth.com",
-    ])
-    .await;
+    // Prewarm exactly the hosts this pack can use. Do not introduce a mirror
+    // route or rewrite an official CDN host merely for DNS cache warming.
+    let dns_hosts = pack
+        .files
+        .iter()
+        .flat_map(|file| file.downloads.iter())
+        .filter_map(|url| url::Url::parse(url).ok())
+        .filter_map(|url| url.host_str().map(str::to_string))
+        .collect::<HashSet<_>>();
+    let dns_hosts = dns_hosts.iter().map(String::as_str).collect::<Vec<_>>();
+    crate::util::fetch::prewarm_download_dns(&dns_hosts).await;
     // Start the Minecraft core install concurrently with the content
     // download so both progress bars advance at once. The Minecraft install
     // reports on the parallel track (phase + bytes); content stays the main
     // phase. It is aborted if the content flow pauses for the user or fails.
-    let minecraft_cancel = CancellationToken::new();
-    let task_cancel = minecraft_cancel.clone();
-    let minecraft_parallel_reporter = reporter.clone().with_parallel_output();
-    let minecraft_instance_id = instance_id.clone();
-    let minecraft_task = tokio::spawn(async move {
-        tokio::select! {
-            _ = task_cancel.cancelled() => {
-                tracing::debug!(
-                    instance_id = %minecraft_instance_id,
-                    "Parallel Minecraft install aborted before completion"
-                );
-                Ok(())
-            }
-            result = crate::launcher::install_minecraft_for_instance_id_with_reporter(
-                &minecraft_instance_id,
-                false,
-                Some(minecraft_parallel_reporter),
-                crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
-            ) => result,
-        }
-    });
-    let minecraft_install = ParallelMinecraftInstall {
-        cancel: minecraft_cancel,
-        task: Some(minecraft_task),
-    };
+    let minecraft_install =
+        ParallelMinecraftInstall::start(instance_id.clone(), reporter.clone());
     let pack_files = pack.files;
     let mut retry_indices = (0..pack_files.len()).collect::<Vec<_>>();
     let mut required_file_failures = Vec::new();
@@ -1080,22 +1025,34 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             .iter()
             .map(|&index| (index, pack_files[index].clone()))
             .collect::<Vec<_>>();
+        let native_pipeline = (crate::util::download::active_engine()
+            == crate::util::download::DownloadEngine::Legacy)
+            .then(|| {
+                (
+                    Arc::new(Semaphore::new(
+                        state
+                            .download_concurrency()
+                            .min(NATIVE_CONTENT_TASK_CONCURRENCY),
+                    )),
+                    Arc::new(Semaphore::new(
+                        NATIVE_CONTENT_FINALIZE_CONCURRENCY,
+                    )),
+                )
+            });
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
-        Some(if crate::util::download::active_engine()
-            == crate::util::download::DownloadEngine::XmclCompat
-        {
-            state.download_concurrency()
-        } else {
-            state
-                .download_concurrency()
-                .min(NATIVE_CONTENT_TASK_CONCURRENCY)
+        Some(match &native_pipeline {
+            Some((download, _)) => {
+                download.available_permits() + NATIVE_CONTENT_FINALIZE_CONCURRENCY
+            }
+            None => state.download_concurrency(),
         }),
         |(manifest_index, project)| {
             let content_context = content_context.clone();
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
+            let native_pipeline = native_pipeline.clone();
             async move {
                 let project_size = project.file_size as u64;
                 let project_path =
@@ -1119,6 +1076,14 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         .expected_size(project_size)
                         .build();
                 let result: crate::Result<()> = async {
+
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::WorkerStarted,
+                    )
+                    .await?;
 
                 if skipped_missing_content_paths.contains(&project_path) {
                     content_context
@@ -1162,59 +1127,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .set_transient_context(context.clone())
                     .await?;
 
-                let progress_key = project_path.clone();
-                let progress_context = content_context.clone();
-                let min_download_progress_delta =
-                    (project_size / 200).max(256 * 1024);
-                let mut last_reported_downloaded = 0_u64;
-                let mut report_download_progress = move |downloaded: u64,
-                                                         _total_size: u64|
-                      -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send>> {
-                    if downloaded < project_size
-                        && downloaded.saturating_sub(last_reported_downloaded)
-                            < min_download_progress_delta
-                    {
-                        return Box::pin(async { Ok(()) });
-                    }
-
-                    last_reported_downloaded = downloaded;
-                    let progress_context = progress_context.clone();
-                    let progress_key = progress_key.clone();
-                    Box::pin(async move {
-                        let active_bytes = progress_context
-                            .update_active_download(progress_key, downloaded)
-                            .await;
-                        let current_bytes = progress_context
-                            .content_bytes_progress
-                            .load(Ordering::Relaxed)
-                            .saturating_add(active_bytes)
-                            .min(progress_context.content_total_bytes);
-                        progress_context
-                            .reporter
-                            .update(
-                                InstallPhaseId::DownloadingContent,
-                                Some(InstallProgress {
-                                    current: progress_context
-                                        .content_progress
-                                        .load(Ordering::Relaxed),
-                                    total: progress_context.num_files as u64,
-                                    secondary: (progress_context
-                                        .content_total_bytes
-                                        > 0)
-                                        .then_some(InstallProgressSecondary {
-                                            current: current_bytes,
-                                            total: progress_context
-                                                .content_total_bytes,
-                                        }),
-                                }),
-                                progress_context.modpack_details.clone(),
-                            )
-                            .await?;
-                        Ok(())
-                    })
-                };
-                let progress =
-                    &mut report_download_progress as &mut FetchProgressFn<'_>;
                 content_context
                     .report_download_attempt(
                         project_path.clone(),
@@ -1259,6 +1171,20 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     },
                     ..Integrity::default()
                 };
+                // Only the transfer owns a network worker. Metadata and DB
+                // finalization run in a separate bounded stage so a slow
+                // SQLite write cannot stop subsequent file transfers.
+                let download_permit = match native_pipeline.as_ref() {
+                    Some((download, _)) => Some(download.acquire().await?),
+                    None => None,
+                };
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Connecting,
+                    )
+                    .await?;
                 let download = match download_to_path(
                     DownloadRequest::new(primary_url, ResourceClass::Modpack)
                         .with_candidate_urls(
@@ -1269,6 +1195,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                             content_context.download_meta.clone(),
                         )
                         .with_segmented_download(true)
+                        .with_http1_segmented_download(false)
                         .with_install_tracking(
                             content_context.reporter.clone(),
                             project_path.clone(),
@@ -1277,25 +1204,53 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     &target_path,
                     &state.download_semaphore,
                     &state.pool,
-                    Some(progress),
+                    None,
                 )
                 .await
                 {
-                    Ok(download) => {
-                        content_context
-                            .remove_active_download(&project_path)
-                            .await;
-                        download
-                    }
-                    Err(error) => {
-                        content_context
-                            .remove_active_download(&project_path)
-                            .await;
-                        return Err(error);
-                    }
+                    Ok(download) => download,
+                    Err(error) => return Err(error),
                 };
+                drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Finalizing,
+                    )
+                    .await?;
+                let finalize_permit = match native_pipeline.as_ref() {
+                    Some((_, finalize)) => {
+                        let cancellation =
+                            content_context.reporter.cancellation_token();
+                        let wait = tokio::time::timeout(
+                            FINALIZE_WAIT_TIMEOUT,
+                            finalize.acquire(),
+                        );
+                        Some(tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                return Err(crate::ErrorKind::OtherError(
+                                    "modpack finalization canceled while waiting for worker".to_string(),
+                                ).into());
+                            }
+                            result = wait => result.map_err(|_| {
+                                crate::ErrorKind::NetworkError(
+                                    "timed out waiting for modpack finalization worker".to_string(),
+                                )
+                            })??,
+                        })
+                    }
+                    None => None,
+                };
+                content_context
+                    .reporter
+                    .record_download_stage(
+                        project_path.clone(),
+                        DownloadItemStatus::Metadata,
+                    )
+                    .await?;
                 let path = target_path;
                 let sha1 = if let Some(hash) =
                     project.hashes.get(&PackFileHash::Sha1)
@@ -1321,7 +1276,30 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .and_then(|infos| infos.get(&sha1))
                     .cloned();
                 {
-                    let _permit = state.install_db_semaphore.acquire().await?;
+                    content_context
+                        .reporter
+                        .record_download_stage(
+                            project_path.clone(),
+                            DownloadItemStatus::WaitingForDatabase,
+                        )
+                        .await?;
+                    let cancellation =
+                        content_context.reporter.cancellation_token();
+                    let _permit = tokio::select! {
+                        _ = cancellation.cancelled() => {
+                            return Err(crate::ErrorKind::OtherError(
+                                "modpack finalization canceled while waiting for database".to_string(),
+                            ).into());
+                        }
+                        result = tokio::time::timeout(
+                            FINALIZE_WAIT_TIMEOUT,
+                            state.install_db_semaphore.acquire(),
+                        ) => result.map_err(|_| {
+                            crate::ErrorKind::NetworkError(
+                                "timed out waiting for modpack database".to_string(),
+                            )
+                        })??,
+                    };
                     if let Some(project_type) =
                     ProjectType::get_from_parent_folder(project.path.as_str())
                     {
@@ -1363,6 +1341,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         .await?;
                     }
                 }
+                drop(finalize_permit);
 
 								let recovered = download.attempts == 0; //When recovered, the download attempts were set to 0 by download_to_path_inner()
 								if recovered {
@@ -1392,9 +1371,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 match result {
                     Ok(()) => Ok(()),
                     Err(error) => {
-                        content_context
-                            .remove_active_download(&project_path)
-                            .await;
                         if pass == AUTO_RETRY_PASSES {
                             content_context
                                 .reporter
@@ -1478,7 +1454,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         return Ok(MrpackInstallOutcome::WaitingForUser(reason));
     }
 
-    let override_file_entries = zip_reader
+    let override_specs = zip_reader
         .file()
         .entries()
         .iter()
@@ -1488,24 +1464,30 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             ((filename.starts_with(&overrides_prefix)
                 || filename.starts_with(&client_overrides_prefix))
                 && !filename.ends_with('/'))
-            .then(|| (index, file.clone()))
+            .then(|| {
+                let relative_path =
+                    override_relative_path(filename, &archive_base)?;
+                Ok(OverrideExtractionSpec {
+                    index,
+                    entry_name: filename.to_string(),
+                    crc32: file.crc32(),
+                    uncompressed_size: file.uncompressed_size(),
+                    target_path: instance_full_path.join(&relative_path),
+                    relative_path,
+                })
+            })
         })
-        .collect::<Vec<_>>();
-    let override_total_bytes = override_file_entries
+        .collect::<crate::Result<Vec<_>>>()?;
+    let override_total_bytes = override_specs
         .iter()
-        .map(|(_, file)| file.uncompressed_size())
+        .map(|spec| zip_reader.file().entries()[spec.index].uncompressed_size())
         .sum::<u64>();
     reporter
         .track_rollback_paths(
-            override_file_entries
+            override_specs
                 .iter()
-                .map(|(_, file)| {
-                    override_relative_path(
-                        file.filename().as_str().unwrap_or_default(),
-                        &archive_base,
-                    )
-                })
-                .collect::<crate::Result<Vec<_>>>()?,
+                .map(|spec| spec.relative_path.clone())
+                .collect(),
         )
         .await?;
     let progress = (override_total_bytes > 0).then_some(InstallProgress {
@@ -1522,88 +1504,132 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         .await?;
 
     let extracted_override_bytes = Arc::new(AtomicU64::new(0));
-    let mut last_reported_override_bytes = 0_u64;
-    let reporter_for_overrides = reporter.clone();
-    let details_for_overrides = modpack_details.clone();
-    let mut report_override_progress = |bytes_read: u64| -> Pin<
-        Box<dyn Future<Output = crate::Result<()>> + Send>,
-    > {
-        let current = extracted_override_bytes
-            .fetch_add(bytes_read, Ordering::Relaxed)
-            + bytes_read;
-        let min_delta = (override_total_bytes / 200).max(256 * 1024);
-        if current < override_total_bytes
-            && current.saturating_sub(last_reported_override_bytes) < min_delta
-        {
-            return Box::pin(async { Ok(()) });
-        }
+    let reported_override_bucket = Arc::new(AtomicU64::new(0));
+    let override_progress_delta = (override_total_bytes / 200).max(256 * 1024);
+    let mut override_parents = override_specs
+        .iter()
+        .filter_map(|spec| spec.target_path.parent().map(Path::to_path_buf))
+        .collect::<HashSet<_>>();
+    for parent in override_parents.drain() {
+        io::create_dir_all(&parent).await?;
+    }
+    let override_groups = Arc::new(Mutex::new(VecDeque::from(
+        override_extraction_groups(override_specs),
+    )));
+    let mut extracted_overrides =
+        futures::stream::iter(0..OVERRIDE_EXTRACTION_CONCURRENCY)
+            .map(|_| {
+                let file = file.clone();
+                let reporter = reporter.clone();
+                let project_id = project_id.clone();
+                let version_id = version_id.clone();
+                let source_path = source_path.clone();
+                let modpack_details = modpack_details.clone();
+                let extracted_override_bytes =
+                    Arc::clone(&extracted_override_bytes);
+                let reported_override_bucket =
+                    Arc::clone(&reported_override_bucket);
+                let override_groups = Arc::clone(&override_groups);
+                async move {
+                    let mut extracted = Vec::new();
+                    let mut reader = MrpackZipReader::new(&file).await?;
+                    loop {
+                        let Some(group) =
+                            override_groups.lock().await.pop_front()
+                        else {
+                            break;
+                        };
+                        for spec in group {
+                            let override_context = InstallErrorContext::new(
+                                "extract modpack override",
+                            )
+                            .maybe_project_id(project_id.clone())
+                            .maybe_version_id(version_id.clone())
+                            .source_path(source_path.clone())
+                            .entry_path(spec.entry_name.clone())
+                            .target_path(spec.target_path.display().to_string())
+                            .build();
+                            reporter
+                                .set_transient_context(override_context.clone())
+                                .await?;
+                            let mut report_progress =
+                                |bytes_read: u64| -> Pin<
+                                    Box<
+                                        dyn Future<Output = crate::Result<()>>
+                                            + Send,
+                                    >,
+                                > {
+                                    let current =
+                                        extracted_override_bytes.fetch_add(
+                                            bytes_read,
+                                            Ordering::Relaxed,
+                                        ) + bytes_read;
+                                    let bucket =
+                                        current / override_progress_delta;
+                                    let previous = reported_override_bucket
+                                        .fetch_max(bucket, Ordering::Relaxed);
+                                    if current < override_total_bytes
+                                        && bucket <= previous
+                                    {
+                                        return Box::pin(async { Ok(()) });
+                                    }
+                                    let reporter = reporter.clone();
+                                    let details = modpack_details.clone();
+                                    Box::pin(async move {
+                                        reporter
+                                    .update(
+                                        InstallPhaseId::ExtractingOverrides,
+                                        Some(InstallProgress {
+                                            current: current
+                                                .min(override_total_bytes),
+                                            total: override_total_bytes,
+                                            secondary: None,
+                                        }),
+                                        details,
+                                    )
+                                    .await
+                                    })
+                                };
+                            let progress = (override_total_bytes > 0)
+                                .then_some(
+                                    &mut report_progress
+                                        as &mut ExtractProgressFn<'_>,
+                                );
+                            let extract_result = reader
+                                .extract_override_entry(
+                                    &spec,
+                                    &state.io_semaphore,
+                                    progress,
+                                )
+                                .await;
+                            let (size, hash) = reporter
+                                .preserve_failure_context(
+                                    override_context,
+                                    extract_result,
+                                )
+                                .await?;
+                            extracted.push(ExtractedOverride {
+                                spec,
+                                size,
+                                hash,
+                            });
+                        }
+                    }
+                    Ok::<_, crate::Error>(extracted)
+                }
+            })
+            .buffer_unordered(OVERRIDE_EXTRACTION_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<crate::Result<Vec<_>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+    extracted_overrides.sort_unstable_by_key(|extracted| extracted.spec.index);
 
-        last_reported_override_bytes = current;
-        let reporter = reporter_for_overrides.clone();
-        let details = details_for_overrides.clone();
-        Box::pin(async move {
-            reporter
-                .update(
-                    InstallPhaseId::ExtractingOverrides,
-                    Some(InstallProgress {
-                        current: current.min(override_total_bytes),
-                        total: override_total_bytes,
-                        secondary: None,
-                    }),
-                    details,
-                )
-                .await?;
-            Ok(())
-        })
-    };
-    for (index, file) in override_file_entries {
-        let entry_name = file.filename().as_str().unwrap();
-        let entry_name =
-            entry_name.strip_prefix(&archive_base).unwrap_or(entry_name);
-        let relative_override_file_path =
-            SafeRelativeUtf8UnixPathBuf::try_from(entry_name.to_string())?;
-        let relative_override_file_path = relative_override_file_path
-            .strip_prefix("overrides")
-            .or_else(|_| relative_override_file_path.strip_prefix("client-overrides"))
-            .map_err(|_| {
-                crate::Error::from(crate::ErrorKind::OtherError(
-                    format!("Failed to strip override prefix from override file path: {relative_override_file_path}")
-                ))
-            })?;
-
-        let path =
-            instance_full_path.join(relative_override_file_path.as_str());
-        let override_context =
-            InstallErrorContext::new("extract modpack override")
-                .maybe_project_id(project_id.clone())
-                .maybe_version_id(version_id.clone())
-                .source_path(source_path.clone())
-                .entry_path(file.filename().as_str().unwrap_or_default())
-                .target_path(path.display().to_string())
-                .build();
-        reporter
-            .set_transient_context(override_context.clone())
-            .await?;
-        let extract_result = if override_total_bytes > 0 {
-            let progress =
-                &mut report_override_progress as &mut ExtractProgressFn<'_>;
-            zip_reader
-                .extract_entry(
-                    index,
-                    &path,
-                    &state.io_semaphore,
-                    Some(progress),
-                )
-                .await
-        } else {
-            zip_reader
-                .extract_entry(index, &path, &state.io_semaphore, None)
-                .await
-        };
-        let (size, hash) = reporter
-            .preserve_failure_context(override_context, extract_result)
-            .await?;
-
+    for extracted in extracted_overrides {
+        cached_pack_hashes.push(extracted.hash.clone());
         {
             let _permit = state.install_db_semaphore.acquire().await?;
             let record_context =
@@ -1611,20 +1637,22 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .maybe_project_id(project_id.clone())
                     .maybe_version_id(version_id.clone())
                     .source_path(source_path.clone())
-                    .entry_path(file.filename().as_str().unwrap_or_default())
-                    .target_path(path.display().to_string())
+                    .entry_path(extracted.spec.entry_name.clone())
+                    .target_path(
+                        extracted.spec.target_path.display().to_string(),
+                    )
                     .build();
             if let Some(project_type) = ProjectType::get_from_parent_folder(
-                relative_override_file_path.as_str(),
+                &extracted.spec.relative_path,
             ) {
                 reporter
                     .preserve_failure_context(
                         record_context,
                         crate::state::instances::commands::record_project_file_atomic(
                             &instance_id,
-                            relative_override_file_path.as_str(),
-                            &hash,
-                            size,
+                            &extracted.spec.relative_path,
+                            &extracted.hash,
+                            extracted.size,
                             project_type,
 							modpack_source_kind(version_id.as_deref()),
 							crate::state::instances::ContentOwnershipKind::PackManaged,
@@ -1638,6 +1666,35 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     .await?;
             }
         }
+    }
+
+    if let Some(ref version_id) = version_id {
+        let server_override_entries = zip_reader
+            .file()
+            .entries()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, entry)| {
+                let filename = entry.filename().as_str().ok()?;
+                (filename.starts_with(&server_overrides_prefix)
+                    && !filename.ends_with('/'))
+                .then_some(index)
+            })
+            .collect::<Vec<_>>();
+        for index in server_override_entries {
+            cached_pack_hashes.push(zip_reader.hash_entry(index).await?.1);
+        }
+        CachedEntry::cache_modpack_files(
+            version_id,
+            cached_pack_hashes,
+            cached_pack_project_ids,
+            &state.pool,
+        )
+        .await?;
+    } else {
+        tracing::warn!(
+            "No version_id available, skipping modpack file hash caching"
+        );
     }
 
     // If the icon doesn't exist, we expect icon.png to be a potential icon.
@@ -1903,6 +1960,37 @@ mod tests {
     use async_zip::{Compression, ZipEntryBuilder};
     use std::sync::Mutex as StdMutex;
 
+    fn override_spec(index: usize, target: &str) -> OverrideExtractionSpec {
+        OverrideExtractionSpec {
+            index,
+            entry_name: format!("overrides/{target}"),
+            crc32: 0,
+            uncompressed_size: 0,
+            relative_path: target.to_string(),
+            target_path: PathBuf::from(target),
+        }
+    }
+
+    #[test]
+    fn override_batches_bound_concurrency_and_order_duplicate_targets() {
+        let groups = override_extraction_groups(vec![
+            override_spec(0, "config/a.toml"),
+            override_spec(1, "config/b.toml"),
+            override_spec(2, "config/c.toml"),
+            override_spec(3, "config/d.toml"),
+            override_spec(4, "config/a.toml"),
+        ]);
+
+        assert!(groups.iter().all(|group| {
+            group
+                .windows(2)
+                .all(|pair| pair[0].target_path == pair[1].target_path)
+        }));
+        assert_eq!(groups.len(), 4);
+        assert_eq!(groups[0][0].index, 0);
+        assert_eq!(groups[0][1].index, 4);
+    }
+
     async fn run_failure_collection(
         failed_indices: &[usize],
     ) -> (Vec<usize>, Vec<RequiredFileFailure>) {
@@ -2047,5 +2135,93 @@ mod tests {
             reader.read_entry_to_string(index).await.unwrap(),
             r#"{"formatVersion":1,"game":"minecraft","versionId":"test","name":"test","files":[]}"#
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_override_readers_extract_the_original_entry_contents()
+    -> crate::Result<()> {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("overrides.mrpack");
+        let entries = [
+            ("overrides/config/first.toml", b"first = true".as_slice()),
+            ("overrides/config/second.toml", b"second = true".as_slice()),
+            (
+                "client-overrides/options.txt",
+                b"fancyGraphics:true".as_slice(),
+            ),
+        ];
+        let mut archive = tokio::fs::File::create(&path).await.unwrap();
+        let mut writer = ZipFileWriter::with_tokio(&mut archive);
+        for (name, contents) in entries {
+            writer
+                .write_entry_whole(
+                    ZipEntryBuilder::new(
+                        name.to_string().into(),
+                        Compression::Deflate,
+                    ),
+                    contents,
+                )
+                .await
+                .unwrap();
+        }
+        writer.close().await.unwrap();
+        drop(archive);
+
+        let source = CreatePackFile::Path(path);
+        let reader = MrpackZipReader::new(&source).await.unwrap();
+        let specs = reader
+            .file()
+            .entries()
+            .iter()
+            .enumerate()
+            .map(|(index, entry)| {
+                let entry_name = entry.filename().as_str().unwrap().to_string();
+                let relative_path =
+                    override_relative_path(&entry_name, "").unwrap();
+                OverrideExtractionSpec {
+                    index,
+                    entry_name,
+                    crc32: entry.crc32(),
+                    uncompressed_size: entry.uncompressed_size(),
+                    target_path: directory
+                        .path()
+                        .join("output")
+                        .join(&relative_path),
+                    relative_path,
+                }
+            })
+            .collect::<Vec<_>>();
+        let semaphore = Arc::new(crate::util::fetch::IoSemaphore(
+            tokio::sync::Semaphore::new(OVERRIDE_EXTRACTION_CONCURRENCY),
+        ));
+        let extracted = futures::stream::iter(specs)
+            .map(|spec| {
+                let source = source.clone();
+                let semaphore = Arc::clone(&semaphore);
+                async move {
+                    let mut reader = MrpackZipReader::new(&source).await?;
+                    reader
+                        .extract_override_entry(&spec, &semaphore, None)
+                        .await?;
+                    Ok::<_, crate::Error>(spec)
+                }
+            })
+            .buffer_unordered(OVERRIDE_EXTRACTION_CONCURRENCY)
+            .collect::<Vec<_>>()
+            .await;
+        let specs = extracted.into_iter().collect::<crate::Result<Vec<_>>>()?;
+
+        for spec in specs {
+            let expected = entries
+                .iter()
+                .find(|(name, _)| *name == spec.entry_name)
+                .unwrap()
+                .1;
+            assert_eq!(
+                tokio::fs::read(spec.target_path).await.unwrap(),
+                expected
+            );
+        }
+        Ok(())
     }
 }

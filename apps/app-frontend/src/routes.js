@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory } from 'vue-router'
 
 import {
+	hasBrowseReturnSnapshot,
 	isBrowseReturnNavigation,
 	prepareBrowseReturnNavigation,
 } from '@/helpers/browse-return-state.ts'
@@ -99,6 +100,7 @@ export default new createRouter({
 			meta: {
 				breadcrumb: [{ name: 'Multiplayer' }],
 				discordActivity: 'Idling...',
+				pageTransitionGroup: 'multiplayer',
 			},
 			children: [
 				{
@@ -508,7 +510,10 @@ export default new createRouter({
 		}
 	},
 	scrollBehavior(to, from) {
-		if (to.path.startsWith('/browse/') && isBrowseReturnNavigation(to.fullPath)) {
+		if (
+			to.path.startsWith('/browse/') &&
+			(isBrowseReturnNavigation(to.fullPath) || hasBrowseReturnSnapshot(to.fullPath))
+		) {
 			return false
 		}
 		if (to.path === from.path) return

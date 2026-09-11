@@ -85,8 +85,11 @@ fn main() {
     println!("cargo:rerun-if-changed=src/seed_map/cubiomes_bridge.c");
     println!("cargo:rerun-if-changed=src/seed_map/cubiomes_bridge.h");
     println!("cargo:rerun-if-changed=vendor/cubiomes");
-    #[cfg(not(target_os = "windows"))]
-    println!("cargo:rustc-link-lib=m");
+    // Build scripts run for the host, so use Cargo's target metadata rather
+    // than `cfg(target_os = ...)` when deciding whether libm is needed.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
+        println!("cargo:rustc-link-lib=m");
+    }
 
     // Sadly, there is no better way to do it right now
     // You could try parsing source code here and detecting #[tauri::command]
@@ -103,6 +106,9 @@ fn main() {
                         "check_mojang_services",
                         "set_mojang_auth_use_mirror",
                         "login",
+                        "browser_login",
+                        "begin_device_login",
+                        "poll_device_login",
                         "begin_yggdrasil_login",
                         "finish_yggdrasil_login",
                         "list_yggdrasil_saved_logins",
@@ -283,6 +289,7 @@ fn main() {
                         "logs_delete_logs",
                         "logs_delete_logs_by_filename",
                         "logs_get_latest_log_cursor",
+                        "logs_get_minecraft_latest_log_cursor",
                         "logs_get_live_log_buffer",
                         "logs_clear_live_log_buffer",
                         "logs_analyze_crash",
@@ -421,6 +428,8 @@ fn main() {
                 InlinedPlugin::new()
                     .commands(&[
                         "instance_remove",
+                        "instance_create_direct_link",
+                        "instance_sync_direct_links",
                         "instance_get",
                         "instance_get_many",
                         "instance_get_projects",
@@ -650,6 +659,14 @@ fn main() {
                     ),
             )
             .plugin(
+                "system-accent",
+                InlinedPlugin::new()
+                    .commands(&["system_accent_color"])
+                    .default_permission(
+                        DefaultPermissionRule::AllowAllCommands,
+                    ),
+            )
+            .plugin(
                 "files",
                 InlinedPlugin::new()
                     .commands(&[
@@ -772,6 +789,8 @@ fn main() {
                         "servers_install_modpack",
                         "servers_start",
                         "servers_send_command",
+                        "servers_send_console_input",
+                        "servers_resize_console",
                         "servers_stop",
                         "servers_kill",
                         "servers_kill_port_process",

@@ -23,7 +23,6 @@ import type {
 	BrowseDisplayMode,
 	BrowseDisplayModeOption,
 	BrowseInstallContentType,
-	BrowseSearchResponse,
 	CardAction,
 	ProjectType,
 	Tags,
@@ -194,13 +193,6 @@ function rememberBrowseContentProjectType(type: ProjectType) {
 
 watch(projectType, rememberBrowseContentProjectType, { immediate: true })
 
-type BrowseReturnState = {
-	searchResponse: BrowseSearchResponse
-	originalProjectHits: BrowseSearchResponse['projectHits']
-	originalServerHits: BrowseSearchResponse['serverHits']
-	translationActive: boolean
-}
-
 const curseForgeClassIds: Partial<Record<ProjectType, number>> = {
 	mod: 6,
 	plugin: 5,
@@ -211,13 +203,15 @@ const curseForgeClassIds: Partial<Record<ProjectType, number>> = {
 	[WORLD_BROWSE_PROJECT_TYPE]: 17,
 }
 
-const curseForgeCapability = ref(
-	await getCurseForgeCapability().catch(() => ({
+const [initialCurseForgeCapability, initialPlanetMinecraftAvailable] = await Promise.all([
+	getCurseForgeCapability().catch(() => ({
 		status: 'missing_key' as const,
 		configured: false,
 	})),
-)
-const planetMinecraftAvailable = ref(await planetMinecraftConnectorAvailable().catch(() => false))
+	planetMinecraftConnectorAvailable().catch(() => false),
+])
+const curseForgeCapability = ref(initialCurseForgeCapability)
+const planetMinecraftAvailable = ref(initialPlanetMinecraftAvailable)
 const rememberedContentSource = getLastBrowseContentSource()
 
 function resolveInitialContentSource(): BrowseContentSource {
@@ -260,6 +254,9 @@ function resolveInitialContentSource(): BrowseContentSource {
 }
 
 const contentSource = ref<BrowseContentSource>(resolveInitialContentSource())
+const sourceBeforeWorldMapBrowse = ref<BrowseContentSource>(
+	isWorldMapBrowse.value ? (getLastBrowseContentSource() ?? 'all') : contentSource.value,
+)
 if (isWorldMapBrowse.value) {
 	contentSource.value = 'curseforge'
 }
@@ -276,12 +273,12 @@ async function ensureCurseForgeCategories(projectTypeValue: ProjectType) {
 	}
 }
 
-if (
+const initialCurseForgeCategoriesPromise =
 	curseForgeCapability.value.configured &&
 	(contentSource.value === 'curseforge' || contentSource.value === 'all')
-) {
-	await ensureCurseForgeCategories(projectType.value).catch(handleError)
-}
+		? ensureCurseForgeCategories(projectType.value).catch(handleError)
+		: Promise.resolve()
+if (route.query.f || route.query.g) await initialCurseForgeCategoriesPromise
 
 const themeStore = useTheming()
 const serverSetupModalRef = ref<InstanceType<typeof CreationFlowModal> | null>(null)
@@ -497,6 +494,8 @@ watch(
 
 watchServerContextChanges()
 
+let initialInstanceFilterPromise: Promise<void> = Promise.resolve()
+let initialInstalledProjectsPromise: Promise<void> = Promise.resolve()
 await initInstanceContext()
 
 async function refreshInstalledProjectIds() {
@@ -577,29 +576,35 @@ async function initInstanceContext() {
 
 		if (instance.value?.link?.project_id) {
 			debugLog('checking linked project for server status', instance.value.link.project_id)
-			const projectV3 = await get_project_v3(
+			initialInstanceFilterPromise = get_project_v3(
 				instance.value.link.project_id,
 				'must_revalidate',
-			).catch(handleError)
-			if (projectV3?.minecraft_server != null) {
-				debugLog('instance is a server instance')
-				isServerInstance.value = true
-			}
+			)
+				.then((projectV3) => {
+					if (projectV3?.minecraft_server != null) {
+						debugLog('instance is a server instance')
+						isServerInstance.value = true
+					}
+				})
+				.catch((error) => handleError(error))
 		}
 	}
 	if (!instance.value && activeInstance.value?.link?.project_id) {
-		const projectV3 = await get_project_v3(
+		initialInstanceFilterPromise = get_project_v3(
 			activeInstance.value.link.project_id,
 			'must_revalidate',
-		).catch(handleError)
-		isServerInstance.value = projectV3?.minecraft_server != null
+		)
+			.then((projectV3) => {
+				isServerInstance.value = projectV3?.minecraft_server != null
+			})
+			.catch((error) => handleError(error))
 	}
-	await refreshInstalledProjectIds()
 
 	if (route.query.ai && !(route.params.projectType === 'modpack')) {
 		debugLog('setting instanceHideInstalled from query', route.query.ai)
 		instanceHideInstalled.value = route.query.ai === 'true'
 	}
+	initialInstalledProjectsPromise = refreshInstalledProjectIds()
 }
 
 const instanceFilters = computed(() => {
@@ -639,6 +644,13 @@ if (route.query.shi) {
 }
 const hiddenServerContentProjectIds = ref<Set<string>>(new Set())
 const hiddenServerContentProjectIdsInitialized = ref(false)
+
+function shouldHideInstalledProject(projectId: string): boolean {
+	if (isServerContext.value) {
+		return serverHideInstalled.value && hiddenServerContentProjectIds.value.has(projectId)
+	}
+	return !!activeInstance.value && instanceHideInstalled.value && allInstalledIds.value.has(projectId)
+}
 
 function syncHiddenServerContentProjectIds() {
 	hiddenServerContentProjectIds.value = new Set(serverContentProjectIds.value)
@@ -1003,20 +1015,10 @@ if (instance.value) {
 onBeforeRouteLeave((to) => {
 	if (isBrowseReturnSourcePath(to.path)) {
 		const viewport = document.querySelector<HTMLElement>('.app-viewport')
-		saveBrowseReturnSnapshot<BrowseReturnState>({
+		saveBrowseReturnSnapshot({
 			url: route.fullPath,
 			scrollTop: viewport?.scrollTop ?? 0,
-			state: {
-				searchResponse: {
-					projectHits: searchState.projectHits.value,
-					serverHits: searchState.serverHits.value,
-					total_hits: searchState.totalHits.value,
-					per_page: searchState.maxResults.value,
-				},
-				originalProjectHits: originalProjectHits.value,
-				originalServerHits: originalServerHits.value,
-				translationActive: translationActive.value,
-			},
+			state: { currentPage: searchState.currentPage.value },
 		})
 	}
 
@@ -1187,12 +1189,21 @@ const installContext = computed(() => {
 const installingProjectIds = ref<Set<string>>(new Set())
 const CART_CONTENT_TYPES = new Set(['mod', 'resourcepack', 'datapack', 'shader', 'world'])
 
-function setProjectInstalling(projectId: string, installing: boolean) {
+function projectInstallingKey(projectId: string, instanceId?: string | null) {
+	return `${instanceId ?? activeInstance.value?.id ?? ''}\0${projectId}`
+}
+
+function setProjectInstalling(
+	projectId: string,
+	installing: boolean,
+	instanceId?: string | null,
+) {
+	const key = projectInstallingKey(projectId, instanceId)
 	const next = new Set(installingProjectIds.value)
 	if (installing) {
-		next.add(projectId)
+		next.add(key)
 	} else {
-		next.delete(projectId)
+		next.delete(key)
 	}
 	installingProjectIds.value = next
 }
@@ -1250,7 +1261,7 @@ async function toggleContentSelection(
 		return
 	}
 
-	setProjectInstalling(project.project_id, true)
+	setProjectInstalling(project.project_id, true, target.id)
 	try {
 		const preferences = getInstanceInstallTargetPreferences(contentType)
 		let versionId = project.latest_version || null
@@ -1287,7 +1298,7 @@ async function toggleContentSelection(
 			preferences,
 		})
 	} finally {
-		setProjectInstalling(project.project_id, false)
+		setProjectInstalling(project.project_id, false, target.id)
 	}
 }
 
@@ -1396,7 +1407,7 @@ function getCardActions(
 			: projectResult.project_id
 	const selectionKey = makeContentSelectionKey(projectResult.provider, providerProjectId)
 	const isInstalling =
-		installingProjectIds.value.has(projectResult.project_id) ||
+		installingProjectIds.value.has(projectInstallingKey(projectResult.project_id)) ||
 		contentSelection.isInstalling(selectionKey)
 	const isSelected = contentSelection.isSelected(selectionKey)
 	const isInstalled =
@@ -1454,6 +1465,7 @@ function getCardActions(
 				color: isQueued && !isInstalling && !isInstallingSelection ? 'green' : 'brand',
 				type: 'outlined',
 				onClick: async () => {
+					const installInstanceId = activeInstance.value?.id ?? null
 					if (isQueued) {
 						removeQueuedServerInstall(projectResult.project_id)
 						return
@@ -1463,7 +1475,7 @@ function getCardActions(
 					const isModpack = contentType === 'modpack'
 					const shouldShowInstalling = isModpack || !isQueued
 					if (shouldShowInstalling) {
-						setProjectInstalling(projectResult.project_id, true)
+						setProjectInstalling(projectResult.project_id, true, installInstanceId)
 					}
 					try {
 						await requestInstall({
@@ -1494,7 +1506,7 @@ function getCardActions(
 						handleError(err as Error)
 					} finally {
 						if (shouldShowInstalling) {
-							setProjectInstalling(projectResult.project_id, false)
+							setProjectInstalling(projectResult.project_id, false, installInstanceId)
 						}
 					}
 				},
@@ -1567,14 +1579,14 @@ function getCardActions(
 			type: 'outlined',
 			onClick: async () => {
 				const installInstanceId = instance.value?.id ?? null
-				setProjectInstalling(projectResult.project_id, true)
+				setProjectInstalling(projectResult.project_id, true, installInstanceId)
 				try {
 					const selectedInstall =
 						instance.value && projectResult.provider === 'modrinth'
 							? await chooseInstanceInstallVersion(projectResult, currentProjectType)
 							: { versionId: null as string | null }
 					if (selectedInstall === null) {
-						setProjectInstalling(projectResult.project_id, false)
+						setProjectInstalling(projectResult.project_id, false, installInstanceId)
 						return
 					}
 					const selectedPreferences = getCurrentSelectedInstallPreferences(currentProjectType)
@@ -1591,7 +1603,7 @@ function getCardActions(
 						instance.value ? instance.value.id : null,
 						'SearchCard',
 						(versionId, installedProjectIds) => {
-							setProjectInstalling(projectResult.project_id, false)
+							setProjectInstalling(projectResult.project_id, false, installInstanceId)
 							if (versionId && activeInstance.value?.id === installInstanceId) {
 								onSearchResultsInstalled(installedProjectIds ?? [projectResult.project_id])
 							}
@@ -1606,7 +1618,7 @@ function getCardActions(
 						},
 					)
 				} catch (err) {
-					setProjectInstalling(projectResult.project_id, false)
+					setProjectInstalling(projectResult.project_id, false, installInstanceId)
 					handleError(err)
 				}
 			},
@@ -2486,29 +2498,32 @@ async function search(requestParams: string, signal: AbortSignal) {
 		}
 	}
 
-	const hits = (rawResults?.result.hits ?? []).map((hit) => {
-		const mapped = {
-			...hit,
-			title: hit.name,
-			description: hit.summary,
-			provider: 'modrinth' as const,
-		} as unknown as Labrinth.Search.v2.ResultSearchProject & {
-			installed?: boolean
-			provider: 'modrinth' | 'curseforge' | 'mcarchive' | 'planet_minecraft'
-		}
+	const hits = (rawResults?.result.hits ?? [])
+		.map((hit) => {
+			const mapped = {
+				...hit,
+				title: hit.name,
+				description: hit.summary,
+				provider: 'modrinth' as const,
+			} as unknown as Labrinth.Search.v2.ResultSearchProject & {
+				installed?: boolean
+				provider: 'modrinth' | 'curseforge' | 'mcarchive' | 'planet_minecraft'
+			}
 
-		if (activeInstance.value || isServerContext.value) {
-			const installedIds = activeInstance.value
-				? allInstalledIds.value
-				: serverContentProjectIds.value
-			mapped.installed = installedIds.has(hit.project_id)
-		}
+			if (activeInstance.value || isServerContext.value) {
+				const installedIds = activeInstance.value
+					? allInstalledIds.value
+					: serverContentProjectIds.value
+				mapped.installed = installedIds.has(hit.project_id)
+			}
 
-		return applyChineseTranslation(mapped, chineseResolution)
-	})
+			return applyChineseTranslation(mapped, chineseResolution)
+		})
+		.filter((hit) => !shouldHideInstalledProject(hit.project_id))
 
 	const directModrinthHits = rawDirectModrinth
 		.filter((project) => matchesDirectModrinthFilters(project, gameVersion, loader, categoryValues))
+		.filter((project) => !shouldHideInstalledProject(project.id))
 		.slice(0, limit)
 		.map(mapDirectModrinthProject)
 		.map((hit) => applyChineseTranslation(hit, chineseResolution))
@@ -2532,6 +2547,7 @@ async function search(requestParams: string, signal: AbortSignal) {
 	).length
 	const curseForgeHits = (rawCurseForge?.hits ?? [])
 		.map(mapCurseForgeHit)
+		.filter((hit) => !shouldHideInstalledProject(hit.project_id))
 		.map((hit) => {
 			if (activeInstance.value) hit.installed = allInstalledIds.value.has(hit.project_id)
 			return hit
@@ -2589,6 +2605,10 @@ const lockedFilterMessages = computed(() => ({
 	),
 }))
 
+type BrowseReturnState = {
+	currentPage: number
+}
+
 const browseReturnSnapshot = consumeBrowseReturnSnapshot<BrowseReturnState>(route.fullPath)
 
 const displayMode = ref<BrowseDisplayMode>(getLastBrowseContentDisplayMode())
@@ -2623,11 +2643,17 @@ const searchState = useBrowseSearch({
 		wid: effectiveServerWorldId.value || undefined,
 		ai: instanceHideInstalled.value ? 'true' : undefined,
 		shi: serverHideInstalled.value ? 'true' : undefined,
-		source: contentSource.value === 'all' ? undefined : contentSource.value,
+		source:
+			isWorldMapBrowse.value || contentSource.value === 'all' ? undefined : contentSource.value,
 	}),
-	initialSearchResponse: browseReturnSnapshot?.state.searchResponse,
 	displayMode,
 })
+
+function restoreBrowseReturnPage() {
+	if (!browseReturnSnapshot || !Number.isInteger(browseReturnSnapshot.state.currentPage)) return
+
+	searchState.currentPage.value = Math.max(1, browseReturnSnapshot.state.currentPage)
+}
 
 const NON_FILTER_BROWSE_QUERY_PARAMS = new Set([
 	'i',
@@ -2726,12 +2752,6 @@ const {
 	toggle,
 	cancel: cancelTranslation,
 } = useTranslationToggle()
-
-if (browseReturnSnapshot) {
-	originalProjectHits.value = browseReturnSnapshot.state.originalProjectHits
-	originalServerHits.value = browseReturnSnapshot.state.originalServerHits
-	translationActive.value = browseReturnSnapshot.state.translationActive
-}
 
 // Keep a pristine copy when genuine search results arrive (project hits).
 watch(
@@ -2845,17 +2865,21 @@ watch(contentSource, async (source) => {
 	await searchState.refreshSearch()
 })
 
-watch(projectType, async (type) => {
+watch(projectType, async (type, previousType) => {
+	if (type === WORLD_BROWSE_PROJECT_TYPE) {
+		sourceBeforeWorldMapBrowse.value = contentSource.value
+		contentSource.value = 'curseforge'
+		return
+	}
+	if (previousType === WORLD_BROWSE_PROJECT_TYPE) {
+		contentSource.value = sourceBeforeWorldMapBrowse.value
+	}
 	if (
 		type !== 'mod' &&
 		(contentSource.value === 'mcarchive' || contentSource.value === 'planet_minecraft')
 	) {
 		contentSource.value = 'all'
 		setLastBrowseContentSource('all')
-	}
-	if (type === WORLD_BROWSE_PROJECT_TYPE && contentSource.value !== 'curseforge') {
-		contentSource.value = 'curseforge'
-		return
 	}
 	if (contentSource.value === 'curseforge' || contentSource.value === 'all') {
 		await ensureCurseForgeCategories(type).catch(handleError)
@@ -2910,34 +2934,47 @@ watch(queuedServerInstallCount, (count) => {
 	}
 })
 
-if (!browseReturnSnapshot || contentSource.value === 'mcarchive') {
-	void searchState.refreshSearch()
-}
-
 type UnlistenFn = () => void
 
 let isUnmounted = false
 let unlistenInstances: UnlistenFn | null = null
+let pendingBrowseReturnScroll = browseReturnSnapshot !== null
+
+async function restoreBrowseReturnScroll() {
+	if (!browseReturnSnapshot) return
+
+	await nextTick()
+	await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+	if (isUnmounted) return
+	document.querySelector<HTMLElement>('.app-viewport')?.scrollTo({
+		top: browseReturnSnapshot.scrollTop,
+	})
+	completeBrowseReturnNavigation(route.fullPath)
+}
+
+watch(
+	searchState.loading,
+	(isLoading) => {
+		if (isLoading || !pendingBrowseReturnScroll) return
+
+		pendingBrowseReturnScroll = false
+		void restoreBrowseReturnScroll()
+	},
+	{ flush: 'post' },
+)
 
 onMounted(() => {
 	if (pendingRouteInstanceSwitch.value) {
 		instanceSelector.value?.requestSwitch(pendingRouteInstanceSwitch.value)
 		pendingRouteInstanceSwitch.value = null
 	}
-	if (browseReturnSnapshot) {
-		void nextTick().then(
-			() =>
-				new Promise<void>((resolve) => {
-					requestAnimationFrame(() => {
-						document.querySelector<HTMLElement>('.app-viewport')?.scrollTo({
-							top: browseReturnSnapshot.scrollTop,
-						})
-						completeBrowseReturnNavigation(route.fullPath)
-						resolve()
-					})
-				}),
-		)
-	}
+	const initialSearchDependencies = [initialInstanceFilterPromise]
+	if (instanceHideInstalled.value) initialSearchDependencies.push(initialInstalledProjectsPromise)
+	void Promise.allSettled(initialSearchDependencies).then(() => {
+		if (isUnmounted) return
+		restoreBrowseReturnPage()
+		void searchState.refreshSearch()
+	})
 
 	instance_listener(async (event: { event: string; instance_id: string }) => {
 		if (
@@ -2966,7 +3003,6 @@ onUnmounted(() => {
 })
 
 function getProjectBrowseQuery() {
-	if (!installContext.value) return undefined
 	return {
 		...route.query,
 		b: route.fullPath,

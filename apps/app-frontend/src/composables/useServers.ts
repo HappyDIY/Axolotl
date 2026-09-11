@@ -2,7 +2,15 @@ import { computeServerStatus, type ServerStatus } from '@modrinth/server'
 import { injectNotificationManager } from '@modrinth/ui'
 import { computed, reactive, ref } from 'vue'
 
-import { serverEventListener, type ServerExitReason, type ServerInfoData, servers } from '@/helpers/servers'
+import {
+	base64ToBytes,
+	serverEventListener,
+	type ServerExitReason,
+	type ServerInfoData,
+	servers,
+} from '@/helpers/servers'
+
+import { ServerConsoleBuffer } from './server-console-buffer'
 
 const LOG_CAPACITY = 5000
 
@@ -27,6 +35,9 @@ const serverList = ref<ServerInfoData[]>([])
 const logLines = reactive<Record<string, string[]>>({})
 const isRefreshing = ref(false)
 let listenerPromise: Promise<() => void> | null = null
+const consoleOutputListeners = new Map<string, Set<(data: Uint8Array) => void>>()
+const consoleOutputBuffers = new Map<string, ServerConsoleBuffer>()
+const CONSOLE_OUTPUT_CAPACITY = 64 * 1024
 
 export interface ServerView extends ServerInfoData {
 	status: ServerStatus
@@ -54,9 +65,19 @@ async function ensureListener() {
 		listenerPromise = serverEventListener((serverId, payload) => {
 			if (payload.event === 'log') {
 				void appendLog(serverId, payload.line)
+			} else if (payload.event === 'console_output') {
+				const data = base64ToBytes(payload.data)
+				const buffer =
+					consoleOutputBuffers.get(serverId) ?? new ServerConsoleBuffer(CONSOLE_OUTPUT_CAPACITY)
+				buffer.push(data)
+				consoleOutputBuffers.set(serverId, buffer)
+				for (const listener of consoleOutputListeners.get(serverId) ?? []) {
+					listener(data)
+				}
 			} else if (payload.event === 'started') {
 				void refresh()
 			} else if (payload.event === 'stopped') {
+				consoleOutputBuffers.delete(serverId)
 				void refresh()
 				if (payload.reason) exitReasonHandler?.(serverId, payload.reason)
 			}
@@ -65,11 +86,33 @@ async function ensureListener() {
 	return listenerPromise
 }
 
+export function subscribeServerConsoleOutput(
+	serverId: string,
+	listener: (data: Uint8Array) => void,
+): () => void {
+	const listeners = consoleOutputListeners.get(serverId) ?? new Set()
+	listeners.add(listener)
+	consoleOutputListeners.set(serverId, listeners)
+	for (const data of consoleOutputBuffers.get(serverId)?.values() ?? []) listener(data)
+	void ensureListener()
+	return () => {
+		listeners.delete(listener)
+		if (listeners.size === 0) consoleOutputListeners.delete(serverId)
+	}
+}
+
 export async function hydrateLog(serverId: string) {
-	if (logLines[serverId]?.length) return
 	try {
 		const buffer = await servers.getLogBuffer(serverId)
-		if (buffer.length > 0) logLines[serverId] = [...buffer]
+		// The backend log buffer is the authoritative, lossless source: the
+		// per-line `server` events can be dropped in bursts (e.g. the server's
+		// startup or a `help` dump), but every line is still persisted there.
+		// Reconcile by appending only the lines we haven't displayed yet rather
+		// than blindly replacing, so live events and this catch-up stay in sync.
+		const current = (logLines[serverId] ??= [])
+		if (buffer.length > current.length) {
+			for (const line of buffer.slice(current.length)) current.push(line)
+		}
 	} catch {
 		// Server may not have logs yet
 	}

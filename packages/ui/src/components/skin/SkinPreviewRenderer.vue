@@ -46,6 +46,7 @@
 			:antialias="true"
 			:dpr="rendererDpr"
 			:renderer-options="{
+				antialias: true,
 				outputColorSpace: THREE.SRGBColorSpace,
 				toneMapping: THREE.NoToneMapping,
 				toneMappingExposure: 10.0,
@@ -187,6 +188,15 @@ const selectedModelSrc = computed(() =>
 )
 
 let subtitleResizeObserver: ResizeObserver | undefined
+let themeObserver: MutationObserver | undefined
+const previewThemeRevision = ref(0)
+
+const isDarkPreviewTheme = computed(() => {
+	previewThemeRevision.value
+	if (typeof document === 'undefined') return false
+	const classList = document.documentElement.classList
+	return classList.contains('dark-mode') || classList.contains('oled-mode')
+})
 
 function getSubtitleLayoutRoot(element: HTMLElement) {
 	const elementChildren = Array.from(element.children).filter(
@@ -311,19 +321,33 @@ const {
 	isModelLoaded,
 })
 
-const rendererDpr: [number, number] = [1, 1.5]
-const radialSpotlightShader = createRadialSpotlightShader()
+const rendererDpr: [number, number] = [1, 2]
+const radialSpotlightShader = createRadialSpotlightShader(isDarkPreviewTheme.value)
 const isReady = computed(() => isModelLoaded.value && isTextureLoaded.value && hasResolvedFit.value)
 const { isPreviewVisible, showLoading } = useSkinPreviewLoading(isReady)
 
-onMounted(observeSubtitleElement)
+onMounted(() => {
+	observeSubtitleElement()
+	if (typeof MutationObserver === 'undefined') return
+	themeObserver = new MutationObserver(() => {
+		previewThemeRevision.value += 1
+	})
+	themeObserver.observe(document.documentElement, {
+		attributes: true,
+		attributeFilter: ['class'],
+	})
+})
 
 watch(hasSubtitle, () => nextTick(observeSubtitleElement), { flush: 'post' })
 watch(scene, syncDamageFlashShaderMaterials, { immediate: true })
 watch(damageFlashIntensity, syncDamageFlashShaderMaterials)
+watch(isDarkPreviewTheme, (isDarkTheme) => {
+	radialSpotlightShader.uniforms.innerColor.value.setHex(isDarkTheme ? 0xd1d5db : 0x000000)
+})
 
 onUnmounted(() => {
 	subtitleResizeObserver?.disconnect()
+	themeObserver?.disconnect()
 })
 
 const { fontSize: nametagFontSize } = useDynamicFontSize({
