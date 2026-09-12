@@ -436,7 +436,7 @@ pub fn install(window: &WebviewWindow) -> tauri::Result<()> {
 }
 
 #[tauri::command]
-pub fn update_traffic_lights_anchor(
+pub async fn update_traffic_lights_anchor(
     window: WebviewWindow,
     anchor: DomAnchorRect,
 ) -> Result<(), String> {
@@ -444,24 +444,24 @@ pub fn update_traffic_lights_anchor(
         return Err("invalid titlebar anchor geometry".to_string());
     }
 
+    let (result_tx, result_rx) = tokio::sync::oneshot::channel();
     window
         .with_webview(move |platform_webview| {
-            match unsafe {
+            let result = unsafe {
                 upsert_controller(
                     platform_webview.ns_window(),
                     platform_webview.inner(),
                 )
-            } {
-                Ok(controller) => {
-                    controller.anchor.set(Some(anchor));
-                    controller.schedule_reposition();
-                }
-                Err(error) => tracing::warn!(
-                    "Failed to update native traffic-light positioning: {error}"
-                ),
             }
+            .map(|controller| {
+                controller.anchor.set(Some(anchor));
+                controller.schedule_reposition();
+            });
+            let _ = result_tx.send(result);
         })
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+
+    result_rx.await.map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
