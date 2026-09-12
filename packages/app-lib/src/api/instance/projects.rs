@@ -697,6 +697,7 @@ pub async fn restore_pack_member_default(
                 crate::api::curseforge::CurseForgeInstallRequest {
                     defer_persistence: false,
                     persistence_tx: None,
+                    verification_tx: None,
 					instance_id: instance_id.to_string(),
 					project_id: project_id.parse().map_err(|_| {
 						crate::ErrorKind::InputError(

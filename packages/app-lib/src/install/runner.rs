@@ -4754,6 +4754,7 @@ pub(crate) async fn install_optifabric_file(
         crate::api::curseforge::CurseForgeInstallRequest {
             defer_persistence: false,
             persistence_tx: None,
+            verification_tx: None,
             instance_id: instance_id.to_string(),
             project_id: OPTIFABRIC_CURSEFORGE_PROJECT_ID,
             file_id,
