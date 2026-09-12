@@ -8633,20 +8633,18 @@ async fn persist_curseforge_database_batch(
         .iter()
         .filter_map(|task| task.verified_pending)
         .collect::<Vec<_>>();
-    let write_result: crate::Result<()> = tokio::select! {
-        biased;
-        _ = context.cancellation.cancelled() => {
-            Err(ErrorKind::OtherError(
-                "CurseForge modpack database registration canceled".to_string(),
-            ).into())
-        }
-        result = crate::state::instances::commands::record_project_files_with_verified_curseforge_atomic(
+    // The permit wait is cancelable, but once the transaction starts we must
+    // observe whether it committed before deciding to finalize or restore the
+    // corresponding files. Dropping a COMMIT future on cancellation leaves
+    // the filesystem/database outcome ambiguous.
+    let write_result: crate::Result<()> =
+        crate::state::instances::commands::record_project_files_with_verified_curseforge_atomic(
             instance_id,
             &records,
             &verified_pending,
             &state,
-        ) => result,
-    };
+        )
+        .await;
     if let Err(error) = write_result {
         drop(database_permit);
         restore_curseforge_materializations(instance_id, batch).await;

@@ -265,17 +265,16 @@ async fn persist_modpack_record_batch(
         .iter()
         .map(|task| task.record.clone())
         .collect::<Vec<_>>();
-    tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => Err(crate::ErrorKind::OtherError(
-            "modpack database registration canceled".to_string(),
-        ).into()),
-        result = crate::state::instances::commands::record_project_files_atomic(
-            instance_id,
-            &records,
-            &state,
-        ) => result,
-    }
+    // Cancellation remains responsive while waiting for the database permit,
+    // but an atomic write that has started must be driven to a definitive
+    // result. Dropping the SQL future while COMMIT is in flight makes it
+    // impossible to know whether the files should be finalized or restored.
+    crate::state::instances::commands::record_project_files_atomic(
+        instance_id,
+        &records,
+        &state,
+    )
+    .await
 }
 
 async fn receive_modpack_database_batch<T>(
@@ -2098,19 +2097,15 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         reporter
             .preserve_failure_context(
                 record_context,
-                tokio::select! {
-                    biased;
-                    _ = cancellation.cancelled() => {
-                        Err(crate::ErrorKind::OtherError(
-                            "modpack override registration canceled".to_string(),
-                        ).into())
-                    }
-                    result = crate::state::instances::commands::record_project_files_atomic(
-                        &instance_id,
-                        &override_records,
-                        state,
-                    ) => result,
-                },
+                // Do not race an in-flight SQLite transaction against
+                // cancellation. The permit wait above is cancelable; after
+                // the write begins its outcome must be observed.
+                crate::state::instances::commands::record_project_files_atomic(
+                    &instance_id,
+                    &override_records,
+                    state,
+                )
+                .await,
             )
             .await?;
     }
