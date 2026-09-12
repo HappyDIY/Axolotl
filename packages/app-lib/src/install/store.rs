@@ -309,6 +309,50 @@ pub async fn update_state(
     get_required(id, app_state).await
 }
 
+/// Persists a recoverable runtime checkpoint without reopening a terminal or
+/// paused job. The status predicate makes a delayed checkpoint harmless when
+/// job finalization wins the database semaphore first.
+pub async fn checkpoint_running_state(
+    id: Uuid,
+    state: &InstallJobState,
+    app_state: &State,
+) -> crate::Result<Option<InstallJobRecord>> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
+    let now = Utc::now();
+    let json = serde_json::to_string(state)?;
+    let instance_id = instance_id(state);
+    let id_value = id.to_string();
+    let modified = now.timestamp();
+    let result = sqlx::query(
+        "
+		UPDATE install_jobs
+		SET instance_id = (SELECT id FROM instances WHERE id = ?),
+			state = ?, modified = ?
+		WHERE id = ? AND status = ?
+		",
+    )
+    .bind(instance_id)
+    .bind(json)
+    .bind(modified)
+    .bind(id_value)
+    .bind(InstallJobStatus::Running.as_str())
+    .execute(&app_state.pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(get_required(id, app_state).await?))
+}
+
 pub async fn update_status(
     id: Uuid,
     status: InstallJobStatus,
