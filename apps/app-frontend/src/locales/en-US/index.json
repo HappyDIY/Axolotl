@@ -1754,6 +1754,18 @@
   "app.error.space-title": {
     "message": "Not enough space"
   },
+  "app.error.state-database-newer-description": {
+    "message": "The database was last opened by a newer version of Axolotl, which upgraded it to a format this version cannot read. Your instances and settings are still there."
+  },
+  "app.error.state-database-newer-fix-downgrade": {
+    "message": "If you are trying out a build rather than using the launcher normally, revert the database with scripts/axolotl/downgrade-app-db.mjs instead."
+  },
+  "app.error.state-database-newer-fix-intro": {
+    "message": "To start the launcher again, either:"
+  },
+  "app.error.state-database-newer-fix-update": {
+    "message": "Reinstall the newer version of Axolotl - it opens this database as it is."
+  },
   "app.error.state-description": {
     "message": "Axolotl Launcher failed to load correctly. A file may be corrupted or an essential file may be missing."
   },
@@ -2248,6 +2260,9 @@
   },
   "app.home.worlds.pinned": {
     "message": "Pinned worlds"
+  },
+  "app.initialization.quit": {
+    "message": "Quit launcher"
   },
   "app.install.phase.downloading_content": {
     "message": "Downloading content"
