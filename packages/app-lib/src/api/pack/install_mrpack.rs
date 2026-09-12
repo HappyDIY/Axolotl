@@ -2159,13 +2159,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         for index in server_override_entries {
             cached_pack_hashes.push(zip_reader.hash_entry(index).await?.1);
         }
-        CachedEntry::cache_modpack_files(
+        CachedEntry::cache_modpack_files_best_effort(
             version_id,
             cached_pack_hashes,
             cached_pack_project_ids,
             &state.pool,
         )
-        .await?;
+        .await;
     } else {
         tracing::warn!(
             "No version_id available, skipping modpack file hash caching"

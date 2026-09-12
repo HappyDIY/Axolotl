@@ -3357,22 +3357,47 @@ impl CachedEntry {
         project_ids: Vec<String>,
         pool: &SqlitePool,
     ) -> crate::Result<()> {
+        let entry =
+            Self::modpack_files_entry(version_id, file_hashes, project_ids);
+        Self::upsert_many(&[entry], pool).await
+    }
+
+    pub(crate) async fn cache_modpack_files_best_effort(
+        version_id: &str,
+        file_hashes: Vec<String>,
+        project_ids: Vec<String>,
+        pool: &SqlitePool,
+    ) {
+        let entry =
+            Self::modpack_files_entry(version_id, file_hashes, project_ids);
+        Self::persist_fetched_cache_best_effort(
+            CacheValueType::ModpackFiles,
+            &[entry],
+            pool,
+            CacheRefreshSource::Foreground,
+        )
+        .await;
+    }
+
+    fn modpack_files_entry(
+        version_id: &str,
+        file_hashes: Vec<String>,
+        project_ids: Vec<String>,
+    ) -> CachedEntry {
         let data = CachedModpackFiles {
             version_id: version_id.to_string(),
             file_hashes,
             project_ids,
         };
 
-        let entry = CachedEntry {
+        CachedEntry {
             id: version_id.to_string(),
             alias: None,
             expires: Utc::now().timestamp()
                 + CacheValueType::ModpackFiles.expiry(),
             type_: CacheValueType::ModpackFiles,
             data: Some(CacheValue::ModpackFiles(data)),
-        };
-
-        Self::upsert_many(&[entry], pool).await
+        }
     }
 
     /// Get modpack file hashes from cache
