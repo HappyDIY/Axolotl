@@ -26,6 +26,9 @@ import {
 	Admonition,
 	Avatar,
 	BigOptionButton,
+	bindingMatchesKeyboardEvent,
+	bindingMatchesMouseEvent,
+	bindingMatchesWheelEvent,
 	ButtonStyled,
 	Checkbox,
 	clientInstallableLoaders,
@@ -35,6 +38,7 @@ import {
 	CreationFlowModal,
 	defineMessages,
 	I18nDebugPanel,
+	type KeyBinding,
 	LoadingBar,
 	NewModal,
 	NotificationPanel,
@@ -45,8 +49,10 @@ import {
 	provideNotificationManager,
 	providePageContext,
 	providePopupNotificationManager,
+	ScrollToTopButton,
 	useDebugLogger,
 	useFormatBytes,
+	useModalStack,
 	useVIntl,
 } from '@modrinth/ui'
 import BatchScanOverlay from '@modrinth/ui/src/components/flows/drop/BatchScanOverlay.vue'
@@ -119,18 +125,25 @@ import { install_create_modpack_instance, install_get_modpack_preview } from '@/
 import { type DirectLinkSyncReport, get as getInstance, run } from '@/helpers/instance'
 import { reconcileMojangAuthSourceAtStartup } from '@/helpers/mojang-auth'
 import { cancelLogin, get as getCreds, login, logout } from '@/helpers/mr_auth.ts'
+import { getNavShortcutEnabled } from '@/helpers/nav-shortcut-state'
 import { mergeUrlQuery, parseModrinthLink } from '@/helpers/project-links.ts'
+import { getQuickScrollEnabled, getShowScrollTop } from '@/helpers/scroll-top-state'
 import {
 	get as getSettings,
 	getLastBrowseContentProjectType,
 	getPrivacySettings,
 	getUpdateChannel,
 	getUpdatePreferences,
-	isBrowseContentProjectType,
 	type PrivacySettings,
 	savePrivacySettings,
 	set as setSettings,
 } from '@/helpers/settings.ts'
+import {
+	discoverContentTarget,
+	SHORTCUT_ACTIONS,
+	type ShortcutAction,
+} from '@/helpers/shortcut-actions'
+import { resolveAllBindings } from '@/helpers/shortcut-bindings'
 import { getSidebarExpanded, setSidebarExpanded } from '@/helpers/sidebar-state.ts'
 import { get_opening_command, initialize_state, set_discord_activity } from '@/helpers/state'
 import {
@@ -178,6 +191,8 @@ import { AppNotificationManager } from './providers/app-notifications'
 import { AppPopupNotificationManager } from './providers/app-popup-notifications'
 
 const themeStore = useTheming()
+/** While a dialog is open no shortcut fires, including the one being recorded. */
+const { hasModal } = useModalStack()
 const router = useRouter()
 const route = useRoute()
 const onSkinsPage = computed(() => route.path === '/skins')
@@ -185,20 +200,7 @@ const onSchematicWorkshopPage = computed(() => route.path === '/lab/schematic-pr
 const isSchematicFile = (path: string) => /\.(litematic|schematic|schem)$/i.test(path)
 const APP_LEFT_NAV_WIDTH = '4rem'
 
-const discoverContentPath = computed(() => {
-	const projectType = route.params.projectType
-	if (
-		!route.query.i &&
-		!route.query.sid &&
-		!route.query.wid &&
-		typeof projectType === 'string' &&
-		isBrowseContentProjectType(projectType)
-	) {
-		return `/browse/${projectType}`
-	}
-
-	return `/browse/${getLastBrowseContentProjectType()}`
-})
+const discoverContentPath = computed(() => discoverContentTarget(route))
 
 function getPageTransitionKey(route: RouteLocationNormalizedLoaded) {
 	const transitionGroup = route.meta.pageTransitionGroup
@@ -482,7 +484,201 @@ function handleGlobalKeydown(event: KeyboardEvent) {
 		event.preventDefault()
 		event.stopPropagation()
 	}
+
+	handleScrollShortcutKey(event)
+	handleNavShortcutKey(event)
 }
+
+/** Editing surfaces keep these keys for themselves. */
+function isEditableTarget(target: EventTarget | null) {
+	return (
+		target instanceof HTMLInputElement ||
+		target instanceof HTMLTextAreaElement ||
+		target instanceof HTMLSelectElement ||
+		(target instanceof HTMLElement && target.isContentEditable)
+	)
+}
+
+function scrollsAtOwnLevel(element: Element) {
+	const { overflowY } = getComputedStyle(element)
+	return /(auto|scroll|overlay)/.test(overflowY) && element.scrollHeight > element.clientHeight
+}
+
+/** A container that scrolls the page itself rather than a widget on it. */
+function isPageScroller(element: Element) {
+	return scrollsAtOwnLevel(element) && element.clientHeight >= window.innerHeight / 2
+}
+
+/** Nearest scrolling ancestor, whatever its size. */
+function nearestScrollContainer(target: EventTarget | null) {
+	let element = target instanceof Element ? target : null
+	while (element) {
+		if (scrollsAtOwnLevel(element)) return element
+		element = element.parentElement
+	}
+	return null
+}
+
+/**
+ * The page's own scroller. Most pages scroll inside `.app-viewport`, but some
+ * screens (settings, consoles, studios) turn that element's scrolling off and
+ * host a full-height container inside it, so fall back to whatever fills the
+ * middle of the viewport.
+ */
+function resolvePageScroller() {
+	const viewport = document.querySelector<HTMLElement>('.app-viewport')
+	if (!viewport) return null
+	if (isPageScroller(viewport)) return viewport
+
+	const bounds = viewport.getBoundingClientRect()
+	let element: Element | null = document.elementFromPoint(
+		bounds.left + bounds.width / 2,
+		bounds.top + bounds.height / 2,
+	)
+	while (element) {
+		if (isPageScroller(element)) return element
+		element = element.parentElement
+	}
+
+	return viewport
+}
+
+/** The combination an action answers to now: recorded if there is one, default otherwise. */
+function bindingFor(action: ShortcutAction): KeyBinding {
+	return themeStore.shortcutBindings[action.id] ?? action.defaultBinding
+}
+
+/** Whether an action is switched on and reachable in the current state. */
+function shortcutIsAvailable(action: ShortcutAction): boolean {
+	if (!themeStore[action.enabledField]) return false
+	return !action.unavailable?.({
+		worldsTabEnabled: themeStore.featureFlags.worlds_tab,
+		offline: offline.value,
+	})
+}
+
+/**
+ * Finds the action a combination belongs to. Shortcuts stand down entirely
+ * while a dialog is open, so the one being recorded cannot fire, and editing
+ * surfaces keep their keys. `includeDisabled` is for scrolling, which has to
+ * recognise its keys even while it is off in order to hold them back.
+ */
+function findShortcut<E extends Event>(
+	event: E,
+	matches: (binding: KeyBinding, event: E) => boolean,
+	{ includeDisabled = false }: { includeDisabled?: boolean } = {},
+): ShortcutAction | null {
+	if (hasModal.value) return null
+	if (isEditableTarget(event.target)) return null
+
+	for (const action of SHORTCUT_ACTIONS) {
+		if (!includeDisabled && !shortcutIsAvailable(action)) continue
+		if (matches(bindingFor(action), event)) return action
+	}
+
+	return null
+}
+
+/** Does what an action is for. Scrolling actions move the page's own scroller. */
+function runShortcut(action: ShortcutAction, event: Event) {
+	if (action.target) {
+		router.push(action.target(route))
+		return
+	}
+
+	const focusedContainer = nearestScrollContainer(event.target)
+	if (focusedContainer && !isPageScroller(focusedContainer)) return
+
+	const scroller = resolvePageScroller()
+	if (!scroller) return
+
+	action.applyScroll?.(scroller)
+}
+
+/**
+ * Quick scrolling for the page's own scroll container. The setting decides
+ * whether the keys act at all: while it is off they stay inert, and while it is
+ * on they move the page. A focused list or popover still scrolls itself, so
+ * local keyboard scrolling keeps working.
+ */
+function handleScrollShortcutKey(event: KeyboardEvent) {
+	if (event.isComposing) return
+
+	const match = findShortcut(event, bindingMatchesKeyboardEvent, { includeDisabled: true })
+	if (match?.group !== 'scroll') return
+
+	const focusedContainer = nearestScrollContainer(event.target)
+	if (focusedContainer && !isPageScroller(focusedContainer)) return
+
+	const scroller = resolvePageScroller()
+	if (!scroller) return
+
+	// Take the key over even when the feature is off: the browser would scroll
+	// a focused page container on its own, which would make the setting a lie.
+	event.preventDefault()
+	if (!shortcutIsAvailable(match)) return
+
+	match.applyScroll?.(scroller)
+}
+
+/**
+ * Jump to a menu item with the combination it is set to. Every shortcut is off
+ * by default and enabled individually from the Shortcut settings page.
+ */
+function handleNavShortcutKey(event: KeyboardEvent) {
+	if (event.isComposing) return
+
+	const match = findShortcut(event, bindingMatchesKeyboardEvent)
+	if (match?.group !== 'nav') return
+
+	event.preventDefault()
+	runShortcut(match, event)
+}
+
+/** Whether any action listens to the pointer, so the listeners can stay cheap. */
+const hasPointerBindings = computed(() =>
+	SHORTCUT_ACTIONS.some((action) => bindingFor(action).device === 'mouse'),
+)
+
+function handleShortcutMouse(event: MouseEvent) {
+	if (!hasPointerBindings.value) return
+
+	const match = findShortcut(event, bindingMatchesMouseEvent)
+	if (!match) return
+
+	// A shortcut owns this button, so the pointer event stops here.
+	event.preventDefault()
+	event.stopPropagation()
+	runShortcut(match, event)
+}
+
+function handleShortcutWheel(event: WheelEvent) {
+	if (!hasPointerBindings.value) return
+
+	const match = findShortcut(event, bindingMatchesWheelEvent)
+	if (!match) return
+
+	event.preventDefault()
+	event.stopPropagation()
+	runShortcut(match, event)
+}
+
+/**
+ * Hand the keyboard over to the page after the menu navigates. Without this the
+ * focus stays on the nav button, so Tab keeps walking the rail and the page's
+ * own shortcuts act on whatever happened to be focused before.
+ */
+watch(
+	() => route.path,
+	async () => {
+		await nextTick()
+		const active = document.activeElement
+		const navRail = document.querySelector('.app-grid-navbar')
+		const cameFromMenu = !active || active === document.body || (navRail?.contains(active) ?? false)
+		if (!cameFromMenu) return
+		document.querySelector<HTMLElement>('.app-viewport')?.focus({ preventScroll: true })
+	},
+)
 
 onMounted(async () => {
 	unlistenLightweightModeError = await listen<string>('lightweight-mode-error', ({ payload }) => {
@@ -498,6 +694,9 @@ onMounted(async () => {
 	await useCheckDisableMouseover()
 
 	window.addEventListener('keydown', handleGlobalKeydown, true)
+	window.addEventListener('mousedown', handleShortcutMouse, true)
+	// Not passive: a bound wheel direction has to keep the page from scrolling.
+	window.addEventListener('wheel', handleShortcutWheel, { capture: true, passive: false })
 	unlistenCloseRequested = await getCurrentWindow().onCloseRequested(handleCloseRequested)
 	document.querySelector('body').addEventListener('click', handleClick)
 	document.querySelector('body').addEventListener('auxclick', handleAuxClick)
@@ -580,6 +779,8 @@ onUnmounted(async () => {
 	if (maximizedStateTimer) clearTimeout(maximizedStateTimer)
 	unlistenWindowResize?.()
 	window.removeEventListener('keydown', handleGlobalKeydown, true)
+	window.removeEventListener('mousedown', handleShortcutMouse, true)
+	window.removeEventListener('wheel', handleShortcutWheel, { capture: true, passive: false })
 	unlistenCloseRequested?.()
 	unlistenLightweightModeError?.()
 	unlistenSystemAccentColor?.()
@@ -1136,8 +1337,15 @@ async function setupApp() {
 	themeStore.homeLayout = home_layout
 	themeStore.minimalHomeInstanceId = minimal_home_instance_id
 	themeStore.closeBehavior = close_behavior
+	themeStore.showScrollTop = getShowScrollTop()
+	themeStore.quickScrollEnabled = getQuickScrollEnabled()
 	themeStore.devMode = developer_mode
 	themeStore.featureFlags = feature_flags
+	for (const shortcut of SHORTCUT_ACTIONS) {
+		if (shortcut.group === 'nav')
+			themeStore[shortcut.enabledField] = getNavShortcutEnabled(shortcut.id)
+	}
+	themeStore.shortcutBindings = resolveAllBindings()
 	stateInitialized.value = true
 	if (privacyConsentPending.value) {
 		await nextTick()
@@ -2288,6 +2496,9 @@ function handleClick(e) {
 }
 
 function handleAuxClick(e) {
+	// A shortcut answers to this button, so the click is not a click at all.
+	if (findShortcut(e, bindingMatchesMouseEvent)) return
+
 	// disables middle click -> new tab
 	if (e.button === 1) {
 		e.preventDefault()
@@ -2542,7 +2753,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 			'has-transparent-background': themeStore.transparentBackground,
 		}"
 	>
-		<div class="app-viewport flex-grow router-view">
+		<div class="app-viewport flex-grow router-view" tabindex="-1">
 			<div
 				class="loading-indicator-container h-8 fixed z-50 pointer-events-none"
 				:style="{
@@ -2585,6 +2796,7 @@ provideAppUpdateDownloadProgress(appUpdateDownload)
 					</Transition>
 				</RouterView>
 			</div>
+			<ScrollToTopButton v-if="themeStore.showScrollTop" />
 		</div>
 		<div
 			class="app-sidebar mt-px shrink-0 flex flex-col border-0 border-l-[1px] border-[--brand-gradient-border] border-solid"

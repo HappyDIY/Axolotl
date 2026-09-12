@@ -23,6 +23,7 @@ const settingsComponentFiles = {
 	'home-navigation': ['./AppearanceSettings.vue'],
 	'language-translation': ['./LanguageSettings.vue', './TranslationSettings.vue'],
 	ai: ['./AISettings.vue'],
+	'shortcut-settings': ['./KeybindSettings.vue'],
 	'java-performance': ['./JavaSettings.vue'],
 	'launch-defaults': [
 		'./DefaultInstanceSettings.vue',
@@ -165,6 +166,7 @@ test('settings navigation groups preserve the intended Axolotl information archi
 		'home-navigation',
 		'language-translation',
 		'ai',
+		'shortcut-settings',
 	])
 	assert.deepEqual(categoriesForGroup('game'), [
 		'java-performance',

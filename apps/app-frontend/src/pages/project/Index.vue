@@ -387,7 +387,6 @@
 			@create="serverInstallContent.handleServerModpackFlowCreate"
 		/>
 		<CreateModpackServerModal ref="modpackServerModal" @created="handleModpackServerCreated" />
-		<ScrollToTopButton />
 	</div>
 </template>
 
@@ -438,7 +437,6 @@ import {
 	ProjectSidebarTags,
 	requestInstall,
 	SelectedProjectsFloatingBar,
-	ScrollToTopButton,
 	usesTargetGameVersion,
 	useVIntl,
 } from '@modrinth/ui'

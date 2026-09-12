@@ -686,6 +686,12 @@
   "app.appearance-settings.show-play-time.title": {
     "message": "显示总游玩时间"
   },
+  "app.appearance-settings.show-scroll-top.description": {
+    "message": "在可滚动页面显示悬浮的返回顶部按钮。"
+  },
+  "app.appearance-settings.show-scroll-top.title": {
+    "message": "显示\u201c回到顶部\u201d按钮"
+  },
   "app.appearance-settings.sidebar-instance-count.description": {
     "message": "侧边栏中显示的最大实例数量。设为 0 则显示全部。"
   },
@@ -7513,6 +7519,111 @@
   },
   "app.settings.tabs.language-translation": {
     "message": "语言与翻译"
+  },
+  "app.settings.tabs.shortcut-settings": {
+    "message": "快捷键管理"
+  },
+  "app.shortcut-settings.change-shortcut": {
+    "message": "更改「{action}」的快捷键"
+  },
+  "app.shortcut-settings.end-action": {
+    "message": "滚动到页面底部"
+  },
+  "app.shortcut-settings.end-action-description": {
+    "message": "将当前页面移动到底部。"
+  },
+  "app.shortcut-settings.enable": {
+    "message": "启用快捷滚动"
+  },
+  "app.shortcut-settings.home-action": {
+    "message": "滚动到页面顶部"
+  },
+  "app.shortcut-settings.home-action-description": {
+    "message": "将当前页面移动到顶部。"
+  },
+  "app.shortcut-settings.nav-create": {
+    "message": "新建实例"
+  },
+  "app.shortcut-settings.nav-create-description": {
+    "message": "前往新建实例。"
+  },
+  "app.shortcut-settings.nav-description": {
+    "message": "使用各自的快捷键跳转到对应菜单项。每个快捷键默认关闭，需逐个启用。"
+  },
+  "app.shortcut-settings.nav-discover": {
+    "message": "发现内容"
+  },
+  "app.shortcut-settings.nav-discover-description": {
+    "message": "前往浏览内容。"
+  },
+  "app.shortcut-settings.nav-downloads": {
+    "message": "下载"
+  },
+  "app.shortcut-settings.nav-downloads-description": {
+    "message": "前往下载。"
+  },
+  "app.shortcut-settings.nav-home": {
+    "message": "首页"
+  },
+  "app.shortcut-settings.nav-home-description": {
+    "message": "前往首页。"
+  },
+  "app.shortcut-settings.nav-lab": {
+    "message": "实验室"
+  },
+  "app.shortcut-settings.nav-lab-description": {
+    "message": "前往实验室。"
+  },
+  "app.shortcut-settings.nav-library": {
+    "message": "内容库"
+  },
+  "app.shortcut-settings.nav-library-description": {
+    "message": "前往内容库。"
+  },
+  "app.shortcut-settings.nav-multiplayer": {
+    "message": "多人游戏"
+  },
+  "app.shortcut-settings.nav-multiplayer-description": {
+    "message": "前往多人游戏。"
+  },
+  "app.shortcut-settings.nav-settings": {
+    "message": "设置"
+  },
+  "app.shortcut-settings.nav-settings-description": {
+    "message": "前往设置。"
+  },
+  "app.shortcut-settings.nav-skins": {
+    "message": "皮肤选择器"
+  },
+  "app.shortcut-settings.nav-skins-description": {
+    "message": "前往皮肤选择器。"
+  },
+  "app.shortcut-settings.nav-title": {
+    "message": "导航快捷键"
+  },
+  "app.shortcut-settings.nav-worlds": {
+    "message": "世界"
+  },
+  "app.shortcut-settings.nav-worlds-description": {
+    "message": "前往你的世界。"
+  },
+  "app.shortcut-settings.page-down-action": {
+    "message": "向下滚动一屏"
+  },
+  "app.shortcut-settings.page-down-action-description": {
+    "message": "将当前页面向下移动一屏。"
+  },
+  "app.shortcut-settings.page-up-action": {
+    "message": "向上滚动一屏"
+  },
+  "app.shortcut-settings.page-up-action-description": {
+    "message": "将当前页面向上移动一屏。"
+  },
+  "app.shortcut-settings.scroll-description": {
+    "message": "使用键盘在长页面中快速滚动。"
+  },
+  "app.shortcut-settings.scroll-title": {
+    "message": "快速滚动"
   },
   "app.settings.tabs.launch-defaults": {
     "message": "启动与实例默认值"

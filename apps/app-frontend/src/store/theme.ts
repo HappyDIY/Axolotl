@@ -1,5 +1,17 @@
 import { defineStore } from 'pinia'
 
+/**
+ * Mirrors `KeyBinding` from `@modrinth/ui`. Declared here so this module stays
+ * loadable without the UI package, which the settings tests rely on.
+ */
+export interface ShortcutBinding {
+	device: 'keyboard' | 'mouse'
+	code: string
+	mod: boolean
+	shift: boolean
+	alt: boolean
+}
+
 let systemThemeMq: MediaQueryList | null = null
 
 export const DEFAULT_FEATURE_FLAGS = {
@@ -127,6 +139,29 @@ export type ThemeStore = {
 	minimalHomeInstanceId: string | null
 	closeBehavior: CloseBehavior
 
+	/** Whether the floating "back to top" button is shown on scrollable pages. */
+	showScrollTop: boolean
+	/** Whether quick scrolling shortcuts (Home/End/PageUp/PageDown) are active. */
+	quickScrollEnabled: boolean
+	/** Per-nav-item quick jump shortcuts (Ctrl/Cmd + number), off by default. */
+	shortcutNavHome: boolean
+	shortcutNavWorlds: boolean
+	shortcutNavDiscover: boolean
+	shortcutNavSkins: boolean
+	shortcutNavMultiplayer: boolean
+	shortcutNavLibrary: boolean
+	shortcutNavLab: boolean
+	shortcutNavDownloads: boolean
+	shortcutNavCreate: boolean
+	shortcutNavSettings: boolean
+
+	/**
+	 * The combination every shortcut answers to, keyed by action id. Kept here so
+	 * pages re-render when one is recorded; the value itself lives in local
+	 * storage, next to the enable flags.
+	 */
+	shortcutBindings: Record<string, ShortcutBinding>
+
 	devMode: boolean
 	featureFlags: FeatureFlags
 }
@@ -150,6 +185,22 @@ export const DEFAULT_THEME_STORE: ThemeStore = {
 	homeLayout: 'standard',
 	minimalHomeInstanceId: null,
 	closeBehavior: 'ask',
+
+	showScrollTop: true,
+	quickScrollEnabled: false,
+
+	shortcutNavHome: false,
+	shortcutNavWorlds: false,
+	shortcutNavDiscover: false,
+	shortcutNavSkins: false,
+	shortcutNavMultiplayer: false,
+	shortcutNavLibrary: false,
+	shortcutNavLab: false,
+	shortcutNavDownloads: false,
+	shortcutNavCreate: false,
+	shortcutNavSettings: false,
+
+	shortcutBindings: {},
 
 	devMode: false,
 	featureFlags: DEFAULT_FEATURE_FLAGS,
