@@ -2,6 +2,7 @@ import { createContext } from '@modrinth/ui'
 import { computed, type ComputedRef, type Ref, ref } from 'vue'
 
 import { setCurseForgeManualDownloads } from '@/helpers/curseforge-manual'
+import { mergeRefreshedDownloadJobs } from '@/helpers/download-job-refresh'
 import { download_request_listener, install_job_listener, loading_listener } from '@/helpers/events'
 import {
 	download_history_clear,
@@ -85,8 +86,13 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 	const pendingRequestUpdatesByJob = new Map<string, DownloadRequestUpdate[]>()
 	const pendingRequestUpdates: DownloadRequestUpdate[] = []
 	const pendingProgressUpdateIndexes = new Map<string, number>()
+	const jobRevisions = new Map<string, number>()
 	let requestFlushTimer: ReturnType<typeof setTimeout> | null = null
 	let legacyRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+	function bumpJobRevision(jobId: string) {
+		jobRevisions.set(jobId, (jobRevisions.get(jobId) ?? 0) + 1)
+	}
 
 	function persistManualDownloadsFromJob(job: InstallJobSnapshot) {
 		if (job.status !== 'waiting_for_user' && job.status !== 'succeeded') return
@@ -131,6 +137,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		} else {
 			jobs.value = [job, ...jobs.value].sort((a, b) => b.created.localeCompare(a.created))
 		}
+		bumpJobRevision(job.job_id)
 		const pending = pendingRequestUpdatesByJob.get(job.job_id)
 		if (pending) {
 			pendingRequestUpdatesByJob.delete(job.job_id)
@@ -192,6 +199,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			applyRequestUpdateToJob(update, job)
 		}
 		for (const job of mutableJobs.values()) syncLiveByteProgress(job)
+		for (const job of mutableJobs.values()) bumpJobRevision(job.job_id)
 		jobs.value = next
 	}
 
@@ -258,16 +266,22 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 	}
 
 	async function refresh() {
+		// A list request can race with realtime install/download events. Record
+		// the local revision at dispatch so its older response cannot roll a job
+		// back to the state it had before those events arrived.
+		const revisionsAtDispatch = new Map(jobRevisions)
 		const page = await download_job_list({ limit: 250 }).catch((error) => {
 			handleError(error)
 			return null
 		})
 		if (page && !disposed) {
-			const activeSynthetics = jobs.value.filter(
-				(job) => syntheticIds.has(job.job_id) && activeStatuses.has(job.status),
-			)
-			jobs.value = [...page.jobs, ...activeSynthetics].sort((a, b) =>
-				b.created.localeCompare(a.created),
+			jobs.value = mergeRefreshedDownloadJobs(
+				page.jobs,
+				jobs.value,
+				revisionsAtDispatch,
+				jobRevisions,
+				syntheticIds,
+				activeStatuses,
 			)
 			const seenInstances = new Set<string>()
 			for (const job of page.jobs) {
@@ -434,6 +448,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			pendingInitialUpdates.length = 0
 			pendingRequestUpdatesByJob.clear()
 			pendingProgressUpdateIndexes.clear()
+			jobRevisions.clear()
 			syntheticCancelHandlers.clear()
 			if (requestFlushTimer !== null) {
 				clearTimeout(requestFlushTimer)
