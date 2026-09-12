@@ -571,6 +571,7 @@ mod tests {
                 dependency_plan_id: None,
                 defer_persistence: false,
                 persistence_tx: None,
+                verification_tx: None,
             },
             display_title: "CurseForge content".to_string(),
             display_icon: None,

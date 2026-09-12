@@ -24,7 +24,7 @@ use crate::state::{
 };
 use crate::util::fetch::{
     ContentValidation, DownloadMeta, DownloadReason, DownloadRequest,
-    Integrity, ResourceClass, download_to_path, sha1_file_async,
+    Integrity, ResourceClass, download_to_path,
 };
 use crate::util::io;
 use async_zip::base::read::seek::ZipFileReader as SeekZipFileReader;
@@ -68,6 +68,15 @@ const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
 const CONTENT_DATABASE_BATCH_SIZE: usize = 64;
 const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
+
+struct MrpackVerificationTask {
+    project: PackFile,
+    project_path: String,
+    target_path: PathBuf,
+    downloaded_bytes: u64,
+    attempts: u32,
+    finalize_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+}
 
 pub(crate) enum MrpackInstallOutcome {
     #[allow(dead_code)]
@@ -1091,6 +1100,111 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             }
             persist_modpack_record_batch(&completion_instance_id, &batch).await
         });
+        let (verification_tx, mut verification_rx) =
+            mpsc::channel::<MrpackVerificationTask>(128);
+        let verification_context = content_context.clone();
+        let verification_completion_tx = completion_tx.clone();
+        let verification_worker = tokio::spawn(async move {
+            while let Some(task) = verification_rx.recv().await {
+                let MrpackVerificationTask {
+                    project,
+                    project_path,
+                    target_path,
+                    downloaded_bytes,
+                    attempts,
+                    finalize_permit,
+                } = task;
+                let result: crate::Result<()> = async {
+                    let cancellation = verification_context.reporter.cancellation_token();
+                    if cancellation.is_cancelled() {
+                        return Err(crate::ErrorKind::OtherError(
+                            "modpack verification canceled".to_string(),
+                        ).into());
+                    }
+                    verification_context
+                        .reporter
+                        .record_download_stage(
+                            project_path.clone(),
+                            DownloadItemStatus::Finalizing,
+                        )
+                        .await?;
+                    verification_context
+                        .reporter
+                        .record_download_stage(
+                            project_path.clone(),
+                            DownloadItemStatus::Metadata,
+                        )
+                        .await?;
+                    let sha1 = if let Some(hash) = project.hashes.get(&PackFileHash::Sha1) {
+                        hash.clone()
+                    } else {
+                        crate::util::fetch::sha1_file_cancellable(
+                            &target_path,
+                            &cancellation,
+                        )
+                        .await?.1
+                    };
+                    let file_info = verification_context
+                        .file_infos_by_hash
+                        .lock()
+                        .await
+                        .as_ref()
+                        .and_then(|infos| infos.get(&sha1))
+                        .cloned();
+                    drop(finalize_permit);
+                    let provider_ref = file_info
+                        .as_ref()
+                        .map(|file| {
+                            crate::Result::Ok(ContentProviderRef::Modrinth {
+                                project_id: ModrinthProjectId::new(file.project_id.clone())?,
+                                version_id: Some(ModrinthVersionId::new(file.version_id.clone())?),
+                            })
+                        })
+                        .transpose()?;
+                    let record = ProjectType::get_from_parent_folder(project.path.as_str())
+                        .map(|project_type| crate::state::instances::commands::ProjectFileRecord {
+                            relative_path: project_path.clone(),
+                            sha1,
+                            size: downloaded_bytes,
+                            project_type,
+                            source_kind: modpack_source_kind(
+                                verification_context.pack_version_id.as_deref(),
+                            ),
+                            ownership_kind: crate::state::instances::ContentOwnershipKind::PackManaged,
+                            provider_ref,
+                            origin: false,
+                            known_modrinth_project_id: file_info.as_ref().map(|file| file.project_id.clone()),
+                            known_modrinth_version_id: file_info.as_ref().map(|file| file.version_id.clone()),
+                        });
+                    let event = if attempts == 0 {
+                        InstallJobEventKind::ContentFileRecovered {
+                            path: project_path.clone(),
+                            bytes: downloaded_bytes,
+                        }
+                    } else {
+                        InstallJobEventKind::ContentFileCompleted {
+                            path: project_path.clone(),
+                            bytes: downloaded_bytes,
+                        }
+                    };
+                    verification_context.mark_file_settled(downloaded_bytes, event).await?;
+                    if let Some(record) = record {
+                        verification_completion_tx
+                            .send(record)
+                            .await
+                            .map_err(|_| crate::ErrorKind::OtherError(
+                                "modpack database worker stopped".to_string(),
+                            ))?;
+                    }
+                    Ok(())
+                }.await;
+                if let Err(error) = result {
+                    verification_context.reporter.cancellation_token().cancel();
+                    return Err(error);
+                }
+            }
+            Ok(())
+        });
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
@@ -1104,8 +1218,8 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             let content_context = content_context.clone();
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
-             let native_pipeline = native_pipeline.clone();
-            let completion_tx = completion_tx.clone();
+            let native_pipeline = native_pipeline.clone();
+            let verification_tx = verification_tx.clone();
              async move {
                 let project_size = project.file_size as u64;
                 let project_path =
@@ -1267,20 +1381,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
-                content_context
-                    .reporter
-                    .record_download_stage(
-                        project_path.clone(),
-                        DownloadItemStatus::Finalizing,
-                    )
-                    .await?;
                 let finalize_permit = match native_pipeline.as_ref() {
                     Some((_, finalize)) => {
                         let cancellation =
                             content_context.reporter.cancellation_token();
                         let wait = tokio::time::timeout(
                             FINALIZE_WAIT_TIMEOUT,
-                            finalize.acquire(),
+                            Arc::clone(finalize).acquire_owned(),
                         );
                         Some(tokio::select! {
                             _ = cancellation.cancelled() => {
@@ -1297,91 +1404,19 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     }
                     None => None,
                 };
-                content_context
-                    .reporter
-                    .record_download_stage(
-                        project_path.clone(),
-                        DownloadItemStatus::Metadata,
-                    )
-                    .await?;
-                let path = target_path;
-                let sha1 = if let Some(hash) =
-                    project.hashes.get(&PackFileHash::Sha1)
-                {
-                    hash.clone()
-                } else {
-                    sha1_file_async(&path).await?.1
-                };
-
-                let file_info = content_context
-                    .file_infos_by_hash
-                    .lock()
-                    .await
-                    .as_ref()
-                    .and_then(|infos| infos.get(&sha1))
-                    .cloned();
-                drop(finalize_permit);
-
-                let provider_ref = file_info
-                    .as_ref()
-                    .map(|file| {
-                        crate::Result::Ok(ContentProviderRef::Modrinth {
-                            project_id: ModrinthProjectId::new(
-                                file.project_id.clone(),
-                            )?,
-                            version_id: Some(ModrinthVersionId::new(
-                                file.version_id.clone(),
-                            )?),
-                        })
+                verification_tx
+                    .send(MrpackVerificationTask {
+                        project: project.clone(),
+                        project_path: project_path.to_string(),
+                        target_path,
+                        downloaded_bytes,
+                        attempts: download.attempts as u32,
+                        finalize_permit,
                     })
-                    .transpose()?;
-                let record = ProjectType::get_from_parent_folder(
-                    project.path.as_str(),
-                )
-                .map(|project_type| {
-                    crate::state::instances::commands::ProjectFileRecord {
-                        relative_path: project_path.clone(),
-                        sha1: sha1.clone(),
-                        size: downloaded_bytes,
-                        project_type,
-                        source_kind: modpack_source_kind(
-                            content_context.pack_version_id.as_deref(),
-                        ),
-                        ownership_kind: crate::state::instances::ContentOwnershipKind::PackManaged,
-                        provider_ref,
-                        origin: false,
-                        known_modrinth_project_id: file_info
-                            .as_ref()
-                            .map(|file| file.project_id.clone()),
-                        known_modrinth_version_id: file_info
-                            .as_ref()
-                            .map(|file| file.version_id.clone()),
-                    }
-                });
-                let event = if download.attempts == 0 {
-                    InstallJobEventKind::ContentFileRecovered {
-                        path: project_path.clone(),
-                        bytes: downloaded_bytes,
-                    }
-                } else {
-                    InstallJobEventKind::ContentFileCompleted {
-                        path: project_path.clone(),
-                        bytes: downloaded_bytes,
-                    }
-                };
-                // Publish progress as soon as this file is ready. Database
-                // registration is intentionally deferred and batched below,
-                // but the UI must not observe artificial 64-file plateaus.
-                content_context
-                    .mark_file_settled(downloaded_bytes, event.clone())
-                    .await?;
-                if let Some(record) = record {
-                    completion_tx.send(record).await.map_err(|_| {
-                        crate::ErrorKind::OtherError(
-                            "modpack database worker stopped".to_string(),
-                        )
-                    })?;
-                }
+                    .await
+                    .map_err(|_| crate::ErrorKind::OtherError(
+                        "modpack verification worker stopped".to_string(),
+                    ))?;
                 Ok(())
                 }
                 .await;
@@ -1447,6 +1482,12 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     )
     .await?;
         drop(completion_tx);
+        drop(verification_tx);
+        verification_worker.await.map_err(|error| {
+            crate::ErrorKind::OtherError(format!(
+                "modpack verification worker failed: {error}"
+            ))
+        })??;
         completion_worker.await.map_err(|error| {
             crate::ErrorKind::OtherError(format!(
                 "modpack database worker failed: {error}"
