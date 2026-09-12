@@ -268,17 +268,31 @@ fn materialize_staged_archive_entry(
     }
 
     let backup = sibling_path(target, ".installing.previous");
-    remove_file_if_exists(&backup)?;
+    let created = sibling_path(target, ".installing.created");
+    if backup.exists() || created.exists() {
+        return Err(crate::ErrorKind::FSError(format!(
+            "Archive target has an unfinished replacement that must be recovered first: {}",
+            target.display()
+        ))
+        .into());
+    }
     let previous = if target.exists() {
         std::fs::rename(target, &backup)
             .map_err(|error| io::IOError::with_path(error, target))?;
         Some(backup)
     } else {
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&created)
+            .map_err(|error| io::IOError::with_path(error, &created))?;
         None
     };
     if let Err(error) = std::fs::rename(&temporary, target) {
         if let Some(previous) = previous.as_deref() {
             let _ = std::fs::rename(previous, target);
+        } else {
+            let _ = remove_file_if_exists(&created);
         }
         let _ = remove_file_if_exists(&temporary);
         return Err(io::IOError::with_path(error, target).into());
@@ -292,6 +306,7 @@ fn materialize_staged_archive_entry(
 /// Callers use the database transaction as their commit point and then either
 /// finalize this batch or roll it back.
 #[must_use = "published archive replacements must be finalized or rolled back"]
+#[derive(Debug)]
 pub(crate) struct StagedArchiveReplacements {
     replacements: HashMap<PathBuf, Option<PathBuf>>,
     replacement_order: Vec<PathBuf>,
@@ -410,8 +425,15 @@ pub(crate) fn discard_staged_archive_entries(
 fn finalize_archive_replacements(
     replacements: &HashMap<PathBuf, Option<PathBuf>>,
 ) -> crate::Result<()> {
-    for previous in replacements.values().flatten() {
-        remove_file_if_exists(previous)?;
+    for (target, previous) in replacements {
+        if let Some(previous) = previous {
+            remove_file_if_exists(previous)?;
+        } else {
+            remove_file_if_exists(&sibling_path(
+                target,
+                ".installing.created",
+            ))?;
+        }
     }
     Ok(())
 }
@@ -422,15 +444,106 @@ fn rollback_archive_replacements(
 ) -> crate::Result<()> {
     for target in replacement_order.iter().rev() {
         remove_file_if_exists(target)?;
-        if let Some(previous) =
-            replacements.get(target).and_then(Option::as_ref)
-            && previous.exists()
-        {
-            std::fs::rename(previous, target)
-                .map_err(|error| io::IOError::with_path(error, target))?;
+        match replacements.get(target).and_then(Option::as_ref) {
+            Some(previous) => {
+                if !previous.exists() {
+                    return Err(crate::ErrorKind::FSError(format!(
+                        "Archive replacement backup is missing: {}",
+                        previous.display()
+                    ))
+                    .into());
+                }
+                std::fs::rename(previous, target)
+                    .map_err(|error| io::IOError::with_path(error, target))?;
+            }
+            None => {
+                remove_file_if_exists(&sibling_path(
+                    target,
+                    ".installing.created",
+                ))?;
+            }
         }
         let temporary = sibling_path(target, ".installing");
         remove_file_if_exists(&temporary)?;
+    }
+    Ok(())
+}
+
+/// Restores archive replacements left armed when the process stopped during
+/// an install. The sidecars are private implementation details and are only
+/// consumed while rolling back a known interrupted instance job.
+pub(crate) fn recover_interrupted_archive_replacements(
+    instance_root: &Path,
+) -> crate::Result<()> {
+    fn collect_files(
+        directory: &Path,
+        files: &mut Vec<PathBuf>,
+    ) -> crate::Result<()> {
+        let entries = match std::fs::read_dir(directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(());
+            }
+            Err(error) => {
+                return Err(io::IOError::with_path(error, directory).into());
+            }
+        };
+        for entry in entries {
+            let entry = entry
+                .map_err(|error| io::IOError::with_path(error, directory))?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path)
+                .map_err(|error| io::IOError::with_path(error, &path))?;
+            if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                collect_files(&path, files)?;
+            } else if metadata.is_file() {
+                files.push(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn target_for_sidecar(path: &Path, suffix: &str) -> Option<PathBuf> {
+        let name = path.file_name()?.to_str()?;
+        let target_name = name.strip_suffix(suffix)?;
+        Some(path.with_file_name(target_name))
+    }
+
+    let mut files = Vec::new();
+    collect_files(instance_root, &mut files)?;
+
+    // Restore backups before processing created markers. The two marker kinds
+    // are mutually exclusive for one target, but this order is conservative
+    // if a damaged install happens to contain both.
+    for previous in files.iter().filter(|path| {
+        target_for_sidecar(path, ".installing.previous").is_some()
+    }) {
+        if !previous.exists() {
+            continue;
+        }
+        let target = target_for_sidecar(previous, ".installing.previous")
+            .expect("filtered archive backup path");
+        remove_file_if_exists(&target)?;
+        std::fs::rename(previous, &target)
+            .map_err(|error| io::IOError::with_path(error, &target))?;
+        remove_file_if_exists(&sibling_path(&target, ".installing.created"))?;
+    }
+    for marker in files.iter().filter(|path| {
+        target_for_sidecar(path, ".installing.created").is_some()
+    }) {
+        if !marker.exists() {
+            continue;
+        }
+        let target = target_for_sidecar(marker, ".installing.created")
+            .expect("filtered archive created marker path");
+        remove_file_if_exists(&target)?;
+        remove_file_if_exists(marker)?;
+    }
+    for staging in files.iter().filter(|path| {
+        target_for_sidecar(path, ".installing").is_some()
+            || target_for_sidecar(path, ".installing.download").is_some()
+    }) {
+        remove_file_if_exists(staging)?;
     }
     Ok(())
 }
@@ -741,6 +854,76 @@ mod tests {
 
         assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
         assert!(!created.exists());
+        assert!(!sibling_path(&created, ".installing.created").exists());
+    }
+
+    #[test]
+    fn interrupted_archive_replacements_are_recovered_from_sidecars() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("config/existing.txt");
+        let created = root.path().join("config/created.txt");
+        let unfinished = root.path().join("config/unfinished.txt");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"old-existing").unwrap();
+        write_archive_entry_to_staging(
+            &mut Cursor::new(b"new-existing"),
+            &existing,
+            None,
+        )
+        .unwrap();
+        write_archive_entry_to_staging(
+            &mut Cursor::new(b"new-created"),
+            &created,
+            None,
+        )
+        .unwrap();
+        let replacements = materialize_staged_archive_entries(
+            &[existing.clone(), created.clone()],
+            None,
+        )
+        .unwrap();
+        std::mem::forget(replacements);
+        // A damaged state may contain both marker kinds. The authoritative
+        // previous backup must win and must not be deleted by the later
+        // created-marker pass.
+        std::fs::write(sibling_path(&existing, ".installing.created"), b"")
+            .unwrap();
+        std::fs::write(sibling_path(&unfinished, ".installing"), b"partial")
+            .unwrap();
+
+        recover_interrupted_archive_replacements(root.path()).unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
+        assert!(!created.exists());
+        assert!(!sibling_path(&existing, ".installing.previous").exists());
+        assert!(!sibling_path(&created, ".installing.created").exists());
+        assert!(!sibling_path(&unfinished, ".installing").exists());
+    }
+
+    #[test]
+    fn stale_archive_backup_is_not_silently_overwritten() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config/example.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"current").unwrap();
+        let backup = sibling_path(&target, ".installing.previous");
+        std::fs::write(&backup, b"recoverable-original").unwrap();
+        write_archive_entry_to_staging(
+            &mut Cursor::new(b"replacement"),
+            &target,
+            None,
+        )
+        .unwrap();
+
+        let error = materialize_staged_archive_entries(
+            std::slice::from_ref(&target),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("unfinished replacement"));
+        assert_eq!(std::fs::read(&backup).unwrap(), b"recoverable-original");
+        assert_eq!(std::fs::read(&target).unwrap(), b"current");
     }
 
     #[test]
