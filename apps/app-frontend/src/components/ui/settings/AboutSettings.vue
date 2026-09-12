@@ -231,7 +231,7 @@ const messages = defineMessages({
 		defaultMessage: 'Project license (GPL-3.0)',
 	},
 	copyingLicense: {
-    	id: 'app.settings.about.copying-license',
+    	id: 'app.settings.about.copying-guidelines',
     	defaultMessage: 'Copying guidelines',
 	},
 	thirdPartyLicenses: {
