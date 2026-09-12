@@ -65,7 +65,8 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
 const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
-const CONTENT_DATABASE_BATCH_SIZE: usize = 64;
+const CONTENT_DATABASE_BATCH_SIZE: usize = 25;
+const CONTENT_DATABASE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
 
@@ -76,6 +77,12 @@ struct MrpackVerificationTask {
     downloaded_bytes: u64,
     attempts: u32,
     finalize_semaphore: Option<Arc<Semaphore>>,
+}
+
+struct MrpackDatabaseTask {
+    record: crate::state::instances::commands::ProjectFileRecord,
+    settled_bytes: u64,
+    event: InstallJobEventKind,
 }
 
 pub(crate) enum MrpackInstallOutcome {
@@ -125,28 +132,82 @@ struct RequiredFileFailure {
 
 async fn persist_modpack_record_batch(
     instance_id: &str,
-    records: &[crate::state::instances::commands::ProjectFileRecord],
+    batch: &[MrpackDatabaseTask],
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> crate::Result<()> {
-    if records.is_empty() {
+    if batch.is_empty() {
         return Ok(());
     }
     let state = State::get().await?;
-    let _permit = tokio::time::timeout(
-        FINALIZE_WAIT_TIMEOUT,
-        state.install_db_semaphore.acquire(),
-    )
-    .await
-    .map_err(|_| {
-        crate::ErrorKind::NetworkError(
-            "timed out waiting for modpack database".to_string(),
-        )
-    })??;
-    crate::state::instances::commands::record_project_files_atomic(
-        instance_id,
-        records,
-        &state,
-    )
-    .await
+    let _permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(crate::ErrorKind::OtherError(
+                "modpack database registration canceled".to_string(),
+            ).into());
+        }
+        permit = tokio::time::timeout(
+            FINALIZE_WAIT_TIMEOUT,
+            state.install_db_semaphore.acquire(),
+        ) => permit.map_err(|_| {
+            crate::ErrorKind::NetworkError(
+                "timed out waiting for modpack database".to_string(),
+            )
+        })??,
+    };
+    let records = batch
+        .iter()
+        .map(|task| task.record.clone())
+        .collect::<Vec<_>>();
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(crate::ErrorKind::OtherError(
+            "modpack database registration canceled".to_string(),
+        ).into()),
+        result = crate::state::instances::commands::record_project_files_atomic(
+            instance_id,
+            &records,
+            &state,
+        ) => result,
+    }
+}
+
+async fn receive_modpack_database_batch<T>(
+    receiver: &mut mpsc::Receiver<T>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> crate::Result<Option<Vec<T>>> {
+    let first = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(crate::ErrorKind::OtherError(
+                "modpack database worker canceled".to_string(),
+            ).into());
+        }
+        task = receiver.recv() => match task {
+            Some(task) => task,
+            None => return Ok(None),
+        },
+    };
+    let mut batch = Vec::with_capacity(CONTENT_DATABASE_BATCH_SIZE);
+    batch.push(first);
+    let deadline =
+        tokio::time::Instant::now() + CONTENT_DATABASE_FLUSH_INTERVAL;
+    while batch.len() < CONTENT_DATABASE_BATCH_SIZE {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(crate::ErrorKind::OtherError(
+                    "modpack database worker canceled".to_string(),
+                ).into());
+            }
+            task = receiver.recv() => match task {
+                Some(task) => batch.push(task),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    Ok(Some(batch))
 }
 
 impl RequiredFileFailure {
@@ -433,7 +494,19 @@ impl ModpackContentInstallContext {
         settled_bytes: u64,
         event: InstallJobEventKind,
     ) -> crate::Result<()> {
-        let current = self.content_progress.fetch_add(1, Ordering::Relaxed) + 1;
+        self.mark_files_settled(1, settled_bytes, vec![event]).await
+    }
+
+    async fn mark_files_settled(
+        &self,
+        settled_files: u64,
+        settled_bytes: u64,
+        events: Vec<InstallJobEventKind>,
+    ) -> crate::Result<()> {
+        let current = self
+            .content_progress
+            .fetch_add(settled_files, Ordering::Relaxed)
+            + settled_files;
         let current_bytes = self
             .content_bytes_progress
             .fetch_add(settled_bytes, Ordering::Relaxed)
@@ -454,7 +527,7 @@ impl ModpackContentInstallContext {
                     ),
                 }),
                 self.modpack_details.clone(),
-                vec![event],
+                events,
             )
             .await
     }
@@ -1081,24 +1154,49 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     )),
                 )
             });
-        let (completion_tx, mut completion_rx) = mpsc::channel::<
-            crate::state::instances::commands::ProjectFileRecord,
-        >(128);
+        let (completion_tx, mut completion_rx) =
+            mpsc::channel::<MrpackDatabaseTask>(128);
         let completion_instance_id = content_context.instance_id.clone();
+        let completion_context = content_context.clone();
         let completion_worker = tokio::spawn(async move {
-            let mut batch = Vec::with_capacity(CONTENT_DATABASE_BATCH_SIZE);
-            while let Some(record) = completion_rx.recv().await {
-                batch.push(record);
-                if batch.len() >= CONTENT_DATABASE_BATCH_SIZE {
+            let cancellation = completion_context.reporter.cancellation_token();
+            let result: crate::Result<()> = async {
+                while let Some(batch) = receive_modpack_database_batch(
+                    &mut completion_rx,
+                    &cancellation,
+                )
+                .await?
+                {
                     persist_modpack_record_batch(
                         &completion_instance_id,
                         &batch,
+                        &cancellation,
                     )
                     .await?;
-                    batch.clear();
+                    if cancellation.is_cancelled() {
+                        return Err(crate::ErrorKind::OtherError(
+                            "modpack database worker canceled".to_string(),
+                        )
+                        .into());
+                    }
+                    completion_context
+                        .mark_files_settled(
+                            batch.len() as u64,
+                            batch.iter().map(|task| task.settled_bytes).sum(),
+                            batch
+                                .iter()
+                                .map(|task| task.event.clone())
+                                .collect(),
+                        )
+                        .await?;
                 }
+                Ok(())
             }
-            persist_modpack_record_batch(&completion_instance_id, &batch).await
+            .await;
+            if result.is_err() {
+                cancellation.cancel();
+            }
+            result
         });
         let (verification_tx, mut verification_rx) =
             mpsc::channel::<MrpackVerificationTask>(128);
@@ -1219,14 +1317,25 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                             bytes: downloaded_bytes,
                         }
                     };
-                    verification_context.mark_file_settled(downloaded_bytes, event).await?;
                     if let Some(record) = record {
-                        verification_completion_tx
-                            .send(record)
-                            .await
-                            .map_err(|_| crate::ErrorKind::OtherError(
+                        tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                return Err(crate::ErrorKind::OtherError(
+                                    "modpack database registration canceled".to_string(),
+                                ).into());
+                            }
+                            result = verification_completion_tx.send(MrpackDatabaseTask {
+                                record,
+                                settled_bytes: downloaded_bytes,
+                                event,
+                            }) => result.map_err(|_| crate::ErrorKind::OtherError(
                                 "modpack database worker stopped".to_string(),
-                            ))?;
+                            ))?,
+                        }
+                    } else {
+                        verification_context
+                            .mark_file_settled(downloaded_bytes, event)
+                            .await?;
                     }
                     Ok(())
                 }.await;
@@ -2086,6 +2195,85 @@ mod tests {
         assert_eq!(groups.len(), 4);
         assert_eq!(groups[0][0].index, 0);
         assert_eq!(groups[0][1].index, 4);
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_flushes_when_channel_closes() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        sender.send(1_u8).await.unwrap();
+        sender.send(2_u8).await.unwrap();
+        drop(sender);
+
+        let batch = receive_modpack_database_batch(
+            &mut receiver,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_flushes_at_size_limit() {
+        let (sender, mut receiver) = mpsc::channel(CONTENT_DATABASE_BATCH_SIZE);
+        for index in 0..CONTENT_DATABASE_BATCH_SIZE {
+            sender.send(index).await.unwrap();
+        }
+
+        let batch = tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_modpack_database_batch(
+                &mut receiver,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a full database batch should flush immediately")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch.len(), CONTENT_DATABASE_BATCH_SIZE);
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_wait_is_cancelable() {
+        let (_sender, mut receiver) = mpsc::channel::<u8>(1);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_modpack_database_batch(&mut receiver, &cancellation),
+        )
+        .await
+        .expect("database queue cancellation should be immediate")
+        .unwrap_err();
+
+        assert!(error.to_string().contains("canceled"));
+    }
+
+    #[tokio::test]
+    async fn partial_modpack_database_batch_flushes_on_interval() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        // Keep the sender alive so only the flush interval can finish the
+        // partial batch.
+        sender.send(7_u8).await.unwrap();
+
+        let batch = tokio::time::timeout(
+            CONTENT_DATABASE_FLUSH_INTERVAL + Duration::from_millis(250),
+            receive_modpack_database_batch(
+                &mut receiver,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a partial database batch should flush on the interval")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch, vec![7]);
     }
 
     async fn run_failure_collection(
