@@ -223,6 +223,12 @@ fn override_extraction_groups(
     groups
 }
 
+fn mrpack_override_staging_path(target_path: &Path) -> PathBuf {
+    let mut path = target_path.as_os_str().to_os_string();
+    path.push(".installing");
+    PathBuf::from(path)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RequiredFileFailure {
     manifest_index: usize,
@@ -758,6 +764,7 @@ impl MrpackZipReader {
     async fn extract_override_entry(
         &mut self,
         spec: &OverrideExtractionSpec,
+        path: &Path,
         semaphore: &crate::util::fetch::IoSemaphore,
         progress: Option<&mut ExtractProgressFn<'_>>,
     ) -> crate::Result<(u64, String)> {
@@ -783,7 +790,7 @@ impl MrpackZipReader {
             ))
             .into());
         }
-        self.extract_entry(spec.index, &spec.target_path, semaphore, progress)
+        self.extract_entry(spec.index, path, semaphore, progress)
             .await
     }
 }
@@ -1892,10 +1899,19 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     for parent in override_parents.drain() {
         io::create_dir_all(&parent).await?;
     }
+    let mut seen_override_targets = HashSet::new();
+    let override_targets = override_specs
+        .iter()
+        .filter_map(|spec| {
+            seen_override_targets
+                .insert(spec.target_path.clone())
+                .then(|| spec.target_path.clone())
+        })
+        .collect::<Vec<_>>();
     let override_groups = Arc::new(Mutex::new(VecDeque::from(
         override_extraction_groups(override_specs),
     )));
-    let mut extracted_overrides =
+    let extraction_result =
         futures::stream::iter(0..OVERRIDE_EXTRACTION_CONCURRENCY)
             .map(|_| {
                 let file = file.clone();
@@ -1974,9 +1990,12 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                                     &mut report_progress
                                         as &mut ExtractProgressFn<'_>,
                                 );
+                            let staging_path =
+                                mrpack_override_staging_path(&spec.target_path);
                             let extract_result = reader
                                 .extract_override_entry(
                                     &spec,
+                                    &staging_path,
                                     &state.io_semaphore,
                                     progress,
                                 )
@@ -2001,50 +2020,99 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<crate::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect::<crate::Result<Vec<_>>>();
+    let mut extracted_overrides = match extraction_result {
+        Ok(extracted) => extracted.into_iter().flatten().collect::<Vec<_>>(),
+        Err(error) => {
+            let cleanup_targets = override_targets.clone();
+            let cleanup_result = tokio::task::spawn_blocking(move || {
+                crate::api::pack::archive_util::discard_staged_archive_entries(
+                    &cleanup_targets,
+                )
+            })
+            .await?;
+            if let Err(cleanup_error) = cleanup_result {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to clean staged MRPack overrides: {cleanup_error}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    };
+    crate::api::pack::archive_util::run_blocking_instance_write(
+        instance_id.clone(),
+        reporter.cancellation_token(),
+        {
+            let override_targets = override_targets.clone();
+            move |cancellation| {
+                crate::api::pack::archive_util::commit_staged_archive_entries(
+                    &override_targets,
+                    Some(cancellation),
+                )
+            }
+        },
+    )
+    .await?;
     extracted_overrides.sort_unstable_by_key(|extracted| extracted.spec.index);
 
+    let mut override_records = Vec::new();
     for extracted in extracted_overrides {
         cached_pack_hashes.push(extracted.hash.clone());
+        if let Some(project_type) =
+            ProjectType::get_from_parent_folder(&extracted.spec.relative_path)
         {
-            let _permit = state.install_db_semaphore.acquire().await?;
-            let record_context =
-                InstallErrorContext::new("record modpack override")
-                    .maybe_project_id(project_id.clone())
-                    .maybe_version_id(version_id.clone())
-                    .source_path(source_path.clone())
-                    .entry_path(extracted.spec.entry_name.clone())
-                    .target_path(
-                        extracted.spec.target_path.display().to_string(),
-                    )
-                    .build();
-            if let Some(project_type) = ProjectType::get_from_parent_folder(
-                &extracted.spec.relative_path,
-            ) {
-                reporter
-                    .preserve_failure_context(
-                        record_context,
-                        crate::state::instances::commands::record_project_file_atomic(
-                            &instance_id,
-                            &extracted.spec.relative_path,
-                            &extracted.hash,
-                            extracted.size,
-                            project_type,
-							modpack_source_kind(version_id.as_deref()),
-							crate::state::instances::ContentOwnershipKind::PackManaged,
-							None,
-                            false,
-                            None,
-                            state,
-                        )
-                        .await,
-                    )
-                    .await?;
-            }
+            override_records
+                .push(crate::state::instances::commands::ProjectFileRecord {
+                relative_path: extracted.spec.relative_path,
+                sha1: extracted.hash,
+                size: extracted.size,
+                project_type,
+                source_kind: modpack_source_kind(version_id.as_deref()),
+                ownership_kind:
+                    crate::state::instances::ContentOwnershipKind::PackManaged,
+                provider_ref: None,
+                origin: false,
+                known_modrinth_project_id: None,
+                known_modrinth_version_id: None,
+            });
         }
+    }
+    if !override_records.is_empty() {
+        let cancellation = reporter.cancellation_token();
+        let _permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(crate::ErrorKind::OtherError(
+                    "modpack override registration canceled".to_string(),
+                ).into());
+            }
+            permit = state.install_db_semaphore.acquire() => permit?,
+        };
+        let record_context =
+            InstallErrorContext::new("record modpack overrides")
+                .maybe_project_id(project_id.clone())
+                .maybe_version_id(version_id.clone())
+                .source_path(source_path.clone())
+                .build();
+        reporter
+            .preserve_failure_context(
+                record_context,
+                tokio::select! {
+                    biased;
+                    _ = cancellation.cancelled() => {
+                        Err(crate::ErrorKind::OtherError(
+                            "modpack override registration canceled".to_string(),
+                        ).into())
+                    }
+                    result = crate::state::instances::commands::record_project_files_atomic(
+                        &instance_id,
+                        &override_records,
+                        state,
+                    ) => result,
+                },
+            )
+            .await?;
     }
 
     if let Some(ref version_id) = version_id {
@@ -2713,8 +2781,15 @@ mod tests {
                 let semaphore = Arc::clone(&semaphore);
                 async move {
                     let mut reader = MrpackZipReader::new(&source).await?;
+                    let staging_path =
+                        mrpack_override_staging_path(&spec.target_path);
                     reader
-                        .extract_override_entry(&spec, &semaphore, None)
+                        .extract_override_entry(
+                            &spec,
+                            &staging_path,
+                            &semaphore,
+                            None,
+                        )
                         .await?;
                     Ok::<_, crate::Error>(spec)
                 }
@@ -2723,6 +2798,33 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         let specs = extracted.into_iter().collect::<crate::Result<Vec<_>>>()?;
+
+        for spec in &specs {
+            let expected = entries
+                .iter()
+                .find(|(name, _)| *name == spec.entry_name)
+                .unwrap()
+                .1;
+            assert!(!spec.target_path.exists());
+            assert_eq!(
+                tokio::fs::read(mrpack_override_staging_path(
+                    &spec.target_path
+                ))
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+        let targets = specs
+            .iter()
+            .map(|spec| spec.target_path.clone())
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            crate::api::pack::archive_util::commit_staged_archive_entries(
+                &targets, None,
+            )
+        })
+        .await??;
 
         for spec in specs {
             let expected = entries
