@@ -393,50 +393,63 @@ pub(crate) async fn install_mcbbs_pack_with_reporter(
         .await?;
     let instance_path =
         crate::api::instance::get_full_path(&instance_id).await?;
-    archive_util::extract_archive_subdir_for_instance(
-        instance_id.clone(),
-        reporter.cancellation_token(),
-        archive_path,
-        format!("{base_folder}overrides/"),
-        instance_path.clone(),
+    let archive_cancellation = reporter.cancellation_token();
+    let (_, archive_replacements) =
+        archive_util::materialize_archive_subdir_for_instance(
+            instance_id.clone(),
+            archive_cancellation.clone(),
+            archive_path,
+            format!("{base_folder}overrides/"),
+            instance_path.clone(),
+        )
+        .await?;
+
+    let post_archive_result: crate::Result<()> = async {
+        minecraft_install.join().await?;
+
+        if let Some(lite_loader_version) = lite_loader_as_adjunct {
+            install_liteloader_component(
+                &state,
+                &instance_id,
+                &game_version,
+                loader,
+                &lite_loader_version,
+            )
+            .await?;
+        }
+        if let Some(optifine_version) = optifine_as_mod {
+            install_optifine_mod(
+                &state,
+                &instance_id,
+                reporter.cancellation_token(),
+                &game_version,
+                &optifine_version,
+                &instance_path,
+            )
+            .await?;
+            record_optifine_component(&instance_id, &optifine_version).await?;
+        }
+        if let Some(optifabric_version) = optifabric_version {
+            install_optifabric_component(
+                &instance_id,
+                &game_version,
+                &optifabric_version,
+            )
+            .await?;
+        }
+
+        reporter.clear_context().await?;
+        Ok(())
+    }
+    .await;
+    archive_util::settle_staged_archive_install(
+        instance_id,
+        archive_cancellation,
+        archive_replacements,
+        post_archive_result,
+        "MCBBS overrides",
     )
-    .await?;
-
-    minecraft_install.join().await?;
-
-    if let Some(lite_loader_version) = lite_loader_as_adjunct {
-        install_liteloader_component(
-            &state,
-            &instance_id,
-            &game_version,
-            loader,
-            &lite_loader_version,
-        )
-        .await?;
-    }
-    if let Some(optifine_version) = optifine_as_mod {
-        install_optifine_mod(
-            &state,
-            &instance_id,
-            reporter.cancellation_token(),
-            &game_version,
-            &optifine_version,
-            &instance_path,
-        )
-        .await?;
-        record_optifine_component(&instance_id, &optifine_version).await?;
-    }
-    if let Some(optifabric_version) = optifabric_version {
-        install_optifabric_component(
-            &instance_id,
-            &game_version,
-            &optifabric_version,
-        )
-        .await?;
-    }
-
-    reporter.clear_context().await?;
-    Ok(())
+    .await
 }
 
 pub(crate) async fn record_optifine_component(

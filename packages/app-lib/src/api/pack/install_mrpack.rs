@@ -19,12 +19,12 @@ use crate::state::instances::ContentSourceKind;
 use crate::state::instances::adapters::sqlite::content_rows;
 use crate::state::{
     CachedEntry, ContentProviderRef, EditInstance, InstanceInstallStage,
-    KnownModrinthFile, ModrinthHashMatch, ModrinthProjectId, ModrinthVersionId,
-    Settings, SideType,
+    ModrinthHashMatch, ModrinthProjectId, ModrinthVersionId, Settings,
+    SideType,
 };
 use crate::util::fetch::{
     ContentValidation, DownloadMeta, DownloadReason, DownloadRequest,
-    Integrity, ResourceClass, download_to_path, sha1_file_async,
+    Integrity, ResourceClass, download_to_path,
 };
 use crate::util::io;
 use async_zip::base::read::seek::ZipFileReader as SeekZipFileReader;
@@ -49,7 +49,7 @@ use crate::data::ProjectType;
 use std::io::{Cursor, ErrorKind};
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 
 type ExtractProgressFn<'a> = dyn FnMut(u64) -> Pin<Box<dyn Future<Output = crate::Result<()>> + Send + 'a>>
     + Send
@@ -65,8 +65,125 @@ const ITEM_FAILURE_REASON_CHAR_LIMIT: usize = 1_024;
 const AUTO_RETRY_PASSES: usize = 2;
 const NATIVE_CONTENT_TASK_CONCURRENCY: usize = 32;
 const NATIVE_CONTENT_FINALIZE_CONCURRENCY: usize = 4;
+const CONTENT_DATABASE_BATCH_SIZE: usize = 25;
+const CONTENT_DATABASE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
 const FINALIZE_WAIT_TIMEOUT: Duration = Duration::from_secs(45);
 const OVERRIDE_EXTRACTION_CONCURRENCY: usize = 4;
+
+struct MrpackVerificationTask {
+    project: PackFile,
+    project_path: String,
+    download_path: PathBuf,
+    target_path: PathBuf,
+    downloaded_bytes: u64,
+    attempts: u32,
+    finalize_semaphore: Option<Arc<Semaphore>>,
+}
+
+impl Drop for MrpackVerificationTask {
+    fn drop(&mut self) {
+        // A verifier can be dropped when another pipeline stage fails. The
+        // final target is never stored here until materialization succeeds,
+        // so removing this staged file cannot damage the installed instance.
+        let _ = std::fs::remove_file(&self.download_path);
+    }
+}
+
+struct MrpackDatabaseTask {
+    record: crate::state::instances::commands::ProjectFileRecord,
+    settled_bytes: u64,
+    event: InstallJobEventKind,
+    target_path: PathBuf,
+    previous_path: Option<PathBuf>,
+}
+
+fn mrpack_staged_download_path(target_path: &Path) -> PathBuf {
+    let mut path = target_path.as_os_str().to_os_string();
+    path.push(".installing.download");
+    PathBuf::from(path)
+}
+
+async fn seed_mrpack_staged_download(target_path: &Path, download_path: &Path) {
+    if download_path.exists() || !target_path.exists() {
+        return;
+    }
+    match tokio::fs::hard_link(target_path, download_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => {}
+        Err(error) => tracing::debug!(
+            path = %target_path.display(),
+            staged_path = %download_path.display(),
+            %error,
+            "Could not seed staged MRPack download from existing file"
+        ),
+    }
+}
+
+async fn remove_mrpack_staged_file(path: &Path) {
+    if tokio::fs::try_exists(path).await.unwrap_or(false)
+        && let Err(error) = crate::util::io::remove_file(path).await
+    {
+        tracing::warn!(
+            path = %path.display(),
+            %error,
+            "Failed to remove staged MRPack download"
+        );
+    }
+}
+
+async fn restore_mrpack_materialization(
+    instance_id: &str,
+    target_path: &Path,
+    previous_path: Option<&Path>,
+) {
+    let Ok(state) = State::get().await else {
+        return;
+    };
+    let _instance_lock = state.lock_instance_content(instance_id).await;
+    if let Err(error) = crate::state::restore_project_materialization(
+        target_path,
+        previous_path,
+    )
+    .await
+    {
+        tracing::error!(
+            instance_id,
+            path = %target_path.display(),
+            %error,
+            "Failed to restore MRPack file after database failure"
+        );
+    }
+}
+
+async fn restore_mrpack_materializations(
+    instance_id: &str,
+    tasks: &[MrpackDatabaseTask],
+) {
+    for task in tasks.iter().rev() {
+        restore_mrpack_materialization(
+            instance_id,
+            &task.target_path,
+            task.previous_path.as_deref(),
+        )
+        .await;
+    }
+}
+
+async fn finalize_mrpack_materializations(tasks: &[MrpackDatabaseTask]) {
+    for task in tasks {
+        if let Err(error) = crate::state::finalize_project_materialization(
+            task.previous_path.as_deref(),
+        )
+        .await
+        {
+            tracing::warn!(
+                path = %task.target_path.display(),
+                %error,
+                "Failed to remove previous MRPack file backup"
+            );
+        }
+    }
+}
 
 pub(crate) enum MrpackInstallOutcome {
     #[allow(dead_code)]
@@ -106,11 +223,96 @@ fn override_extraction_groups(
     groups
 }
 
+fn mrpack_override_staging_path(target_path: &Path) -> PathBuf {
+    let mut path = target_path.as_os_str().to_os_string();
+    path.push(".installing");
+    PathBuf::from(path)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct RequiredFileFailure {
     manifest_index: usize,
     path: String,
     reason: String,
+}
+
+async fn persist_modpack_record_batch(
+    instance_id: &str,
+    batch: &[MrpackDatabaseTask],
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> crate::Result<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let state = State::get().await?;
+    let _permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(crate::ErrorKind::OtherError(
+                "modpack database registration canceled".to_string(),
+            ).into());
+        }
+        permit = tokio::time::timeout(
+            FINALIZE_WAIT_TIMEOUT,
+            state.install_db_semaphore.acquire(),
+        ) => permit.map_err(|_| {
+            crate::ErrorKind::NetworkError(
+                "timed out waiting for modpack database".to_string(),
+            )
+        })??,
+    };
+    let records = batch
+        .iter()
+        .map(|task| task.record.clone())
+        .collect::<Vec<_>>();
+    // Cancellation remains responsive while waiting for the database permit,
+    // but an atomic write that has started must be driven to a definitive
+    // result. Dropping the SQL future while COMMIT is in flight makes it
+    // impossible to know whether the files should be finalized or restored.
+    crate::state::instances::commands::record_project_files_atomic(
+        instance_id,
+        &records,
+        &state,
+    )
+    .await
+}
+
+async fn receive_modpack_database_batch<T>(
+    receiver: &mut mpsc::Receiver<T>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> crate::Result<Option<Vec<T>>> {
+    let first = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(crate::ErrorKind::OtherError(
+                "modpack database worker canceled".to_string(),
+            ).into());
+        }
+        task = receiver.recv() => match task {
+            Some(task) => task,
+            None => return Ok(None),
+        },
+    };
+    let mut batch = Vec::with_capacity(CONTENT_DATABASE_BATCH_SIZE);
+    batch.push(first);
+    let deadline =
+        tokio::time::Instant::now() + CONTENT_DATABASE_FLUSH_INTERVAL;
+    while batch.len() < CONTENT_DATABASE_BATCH_SIZE {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                // Return the partial batch to the database worker so it can
+                // restore every file already materialized for this batch.
+                break;
+            }
+            task = receiver.recv() => match task {
+                Some(task) => batch.push(task),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    Ok(Some(batch))
 }
 
 impl RequiredFileFailure {
@@ -229,8 +431,6 @@ struct ModpackContentInstallContext {
     download_source: Arc<Mutex<Option<String>>>,
     fallback_count: Arc<AtomicU64>,
     file_infos_by_hash: Arc<Mutex<Option<HashMap<String, ModrinthHashMatch>>>>,
-    file_infos_loading: Arc<Mutex<()>>,
-    file_info_hashes: Arc<Vec<String>>,
     chinese_titles_by_sha1: Arc<HashMap<String, String>>,
     existing_paths_by_original: Arc<HashMap<String, String>>,
     num_files: usize,
@@ -399,7 +599,19 @@ impl ModpackContentInstallContext {
         settled_bytes: u64,
         event: InstallJobEventKind,
     ) -> crate::Result<()> {
-        let current = self.content_progress.fetch_add(1, Ordering::Relaxed) + 1;
+        self.mark_files_settled(1, settled_bytes, vec![event]).await
+    }
+
+    async fn mark_files_settled(
+        &self,
+        settled_files: u64,
+        settled_bytes: u64,
+        events: Vec<InstallJobEventKind>,
+    ) -> crate::Result<()> {
+        let current = self
+            .content_progress
+            .fetch_add(settled_files, Ordering::Relaxed)
+            + settled_files;
         let current_bytes = self
             .content_bytes_progress
             .fetch_add(settled_bytes, Ordering::Relaxed)
@@ -420,7 +632,7 @@ impl ModpackContentInstallContext {
                     ),
                 }),
                 self.modpack_details.clone(),
-                vec![event],
+                events,
             )
             .await
     }
@@ -551,6 +763,7 @@ impl MrpackZipReader {
     async fn extract_override_entry(
         &mut self,
         spec: &OverrideExtractionSpec,
+        path: &Path,
         semaphore: &crate::util::fetch::IoSemaphore,
         progress: Option<&mut ExtractProgressFn<'_>>,
     ) -> crate::Result<(u64, String)> {
@@ -576,7 +789,7 @@ impl MrpackZipReader {
             ))
             .into());
         }
-        self.extract_entry(spec.index, &spec.target_path, semaphore, progress)
+        self.extract_entry(spec.index, path, semaphore, progress)
             .await
     }
 }
@@ -877,6 +1090,16 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     } else {
         HashMap::new()
     });
+    // Resolve and cache the shared hash metadata before the Minecraft install
+    // and content database writes begin competing for SQLite's single writer.
+    load_modpack_file_infos(
+        &file_infos_by_hash,
+        &file_infos_loading,
+        &file_info_hashes,
+        &state.pool,
+        &state.api_semaphore,
+    )
+    .await;
     let existing_paths_by_original = Arc::new(
         content_rows::get_instance_files(&instance_id, &state.pool)
             .await?
@@ -902,8 +1125,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         download_source: Arc::new(Mutex::new(None)),
         fallback_count: Arc::new(AtomicU64::new(0)),
         file_infos_by_hash,
-        file_infos_loading,
-        file_info_hashes,
         chinese_titles_by_sha1,
         existing_paths_by_original,
         num_files,
@@ -1039,6 +1260,270 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     )),
                 )
             });
+        let (completion_tx, mut completion_rx) =
+            mpsc::channel::<MrpackDatabaseTask>(128);
+        let completion_instance_id = content_context.instance_id.clone();
+        let completion_context = content_context.clone();
+        let completion_worker = tokio::spawn(async move {
+            let cancellation = completion_context.reporter.cancellation_token();
+            let result: crate::Result<()> = async {
+                while let Some(batch) = receive_modpack_database_batch(
+                    &mut completion_rx,
+                    &cancellation,
+                )
+                .await?
+                {
+                    if let Err(error) = persist_modpack_record_batch(
+                        &completion_instance_id,
+                        &batch,
+                        &cancellation,
+                    )
+                    .await
+                    {
+                        restore_mrpack_materializations(
+                            &completion_instance_id,
+                            &batch,
+                        )
+                        .await;
+                        return Err(error);
+                    }
+                    // The database transaction is the commit point. Once it
+                    // succeeds, the newly materialized files must remain even
+                    // if cancellation arrives before progress is reported.
+                    finalize_mrpack_materializations(&batch).await;
+                    if cancellation.is_cancelled() {
+                        return Err(crate::ErrorKind::OtherError(
+                            "modpack database worker canceled".to_string(),
+                        )
+                        .into());
+                    }
+                    completion_context
+                        .mark_files_settled(
+                            batch.len() as u64,
+                            batch.iter().map(|task| task.settled_bytes).sum(),
+                            batch
+                                .iter()
+                                .map(|task| task.event.clone())
+                                .collect(),
+                        )
+                        .await?;
+                }
+                Ok(())
+            }
+            .await;
+            if result.is_err() {
+                while let Ok(task) = completion_rx.try_recv() {
+                    restore_mrpack_materialization(
+                        &completion_instance_id,
+                        &task.target_path,
+                        task.previous_path.as_deref(),
+                    )
+                    .await;
+                }
+                cancellation.cancel();
+            }
+            result
+        });
+        let (verification_tx, mut verification_rx) =
+            mpsc::channel::<MrpackVerificationTask>(128);
+        let verification_context = content_context.clone();
+        let verification_completion_tx = completion_tx.clone();
+        let verification_worker = tokio::spawn(async move {
+            let cancellation =
+                verification_context.reporter.cancellation_token();
+            let worker_context = verification_context.clone();
+            let worker_completion_tx = verification_completion_tx.clone();
+            let result = crate::install::try_for_each_concurrent_draining(
+                futures::stream::poll_fn(move |cx| {
+                    verification_rx.poll_recv(cx)
+                }),
+                Some(NATIVE_CONTENT_FINALIZE_CONCURRENCY),
+                cancellation.clone(),
+                move |task| {
+                    let verification_context = worker_context.clone();
+                    let verification_completion_tx =
+                        worker_completion_tx.clone();
+                    async move {
+                let result: crate::Result<()> = async {
+                    let cancellation = verification_context.reporter.cancellation_token();
+                    if cancellation.is_cancelled() {
+                        remove_mrpack_staged_file(&task.download_path).await;
+                        return Err(crate::ErrorKind::OtherError(
+                            "modpack verification canceled".to_string(),
+                        ).into());
+                    }
+                    let finalize_permit = if let Some(semaphore) = task.finalize_semaphore.clone() {
+                        Some(tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                remove_mrpack_staged_file(&task.download_path).await;
+                                return Err(crate::ErrorKind::OtherError(
+                                    "modpack finalization canceled while waiting for worker".to_string(),
+                                ).into());
+                            }
+                            permit = tokio::time::timeout(
+                                FINALIZE_WAIT_TIMEOUT,
+                                semaphore.acquire_owned(),
+                            ) => permit.map_err(|_| crate::ErrorKind::NetworkError(
+                                "timed out waiting for modpack finalization worker".to_string(),
+                            ))??,
+                        })
+                    } else {
+                        None
+                    };
+                    verification_context
+                        .reporter
+                        .record_download_stage(
+                            task.project_path.clone(),
+                            DownloadItemStatus::Finalizing,
+                        )
+                        .await?;
+                    verification_context
+                        .reporter
+                        .record_download_stage(
+                            task.project_path.clone(),
+                            DownloadItemStatus::Metadata,
+                        )
+                        .await?;
+                    let sha1 = if let Some(hash) = task.project.hashes.get(&PackFileHash::Sha1) {
+                        hash.clone()
+                    } else {
+                        crate::util::fetch::sha1_file_cancellable(
+                            &task.download_path,
+                            &cancellation,
+                        )
+                        .await?.1
+                    };
+                    let file_info = verification_context
+                        .file_infos_by_hash
+                        .lock()
+                        .await
+                        .as_ref()
+                        .and_then(|infos| infos.get(&sha1))
+                        .cloned();
+                    drop(finalize_permit);
+                    let provider_ref = file_info
+                        .as_ref()
+                        .map(|file| {
+                            crate::Result::Ok(ContentProviderRef::Modrinth {
+                                project_id: ModrinthProjectId::new(file.project_id.clone())?,
+                                version_id: Some(ModrinthVersionId::new(file.version_id.clone())?),
+                            })
+                        })
+                        .transpose()?;
+                    let record = ProjectType::get_from_parent_folder(task.project.path.as_str())
+                        .map(|project_type| crate::state::instances::commands::ProjectFileRecord {
+                            relative_path: task.project_path.clone(),
+                            sha1,
+                            size: task.downloaded_bytes,
+                            project_type,
+                            source_kind: modpack_source_kind(
+                                verification_context.pack_version_id.as_deref(),
+                            ),
+                            ownership_kind: crate::state::instances::ContentOwnershipKind::PackManaged,
+                            provider_ref,
+                            origin: false,
+                            known_modrinth_project_id: file_info.as_ref().map(|file| file.project_id.clone()),
+                            known_modrinth_version_id: file_info.as_ref().map(|file| file.version_id.clone()),
+                        });
+                    let event = if task.attempts == 0 {
+                        InstallJobEventKind::ContentFileRecovered {
+                            path: task.project_path.clone(),
+                            bytes: task.downloaded_bytes,
+                        }
+                    } else {
+                        InstallJobEventKind::ContentFileCompleted {
+                            path: task.project_path.clone(),
+                            bytes: task.downloaded_bytes,
+                        }
+                    };
+                    let state = State::get().await?;
+                    let instance_lock = tokio::select! {
+                        biased;
+                        _ = cancellation.cancelled() => {
+                            remove_mrpack_staged_file(&task.download_path).await;
+                            return Err(crate::ErrorKind::OtherError(
+                                "modpack materialization canceled".to_string(),
+                            ).into());
+                        }
+                        lock = state.lock_instance_content(&verification_context.instance_id) => lock,
+                    };
+                    let previous_path = match crate::state::materialize_project_download(
+                        &task.download_path,
+                        &task.target_path,
+                    )
+                    .await
+                    {
+                        Ok(previous_path) => previous_path,
+                        Err(error) => {
+                            drop(instance_lock);
+                            remove_mrpack_staged_file(&task.download_path).await;
+                            return Err(error);
+                        }
+                    };
+                    drop(instance_lock);
+                    remove_mrpack_staged_file(&task.download_path).await;
+                    if let Some(record) = record {
+                        let database_task = MrpackDatabaseTask {
+                            record,
+                            settled_bytes: task.downloaded_bytes,
+                            event,
+                            target_path: task.target_path.clone(),
+                            previous_path,
+                        };
+                        let restore_target_path = database_task.target_path.clone();
+                        let restore_previous_path = database_task.previous_path.clone();
+                        let send_result = tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                Err(crate::ErrorKind::OtherError(
+                                    "modpack database registration canceled".to_string(),
+                                ).into())
+                            }
+                            result = verification_completion_tx.send(database_task) => result.map_err(|_| crate::ErrorKind::OtherError(
+                                "modpack database worker stopped".to_string(),
+                            ).into()),
+                        };
+                        if let Err(error) = send_result {
+                            restore_mrpack_materialization(
+                                &verification_context.instance_id,
+                                &restore_target_path,
+                                restore_previous_path.as_deref(),
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                    } else {
+                        let report_result = verification_context
+                            .mark_file_settled(task.downloaded_bytes, event)
+                            .await;
+                        if let Err(error) = report_result {
+                            restore_mrpack_materialization(
+                                &verification_context.instance_id,
+                                &task.target_path,
+                                previous_path.as_deref(),
+                            )
+                            .await;
+                            return Err(error);
+                        }
+                        crate::state::finalize_project_materialization(
+                            previous_path.as_deref(),
+                        )
+                        .await?;
+                    }
+                    Ok(())
+                }.await;
+                if let Err(error) = result {
+                    return Err(error);
+                }
+                Ok(())
+                    }
+                },
+            )
+            .await;
+            if result.is_err() {
+                cancellation.cancel();
+            }
+            result
+        });
         let pass_failures =
             collect_required_file_failures_concurrently(
         tasks,
@@ -1053,12 +1538,15 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             let skipped_missing_content_paths =
                 skipped_missing_content_paths.clone();
             let native_pipeline = native_pipeline.clone();
-            async move {
+            let verification_tx = verification_tx.clone();
+             async move {
                 let project_size = project.file_size as u64;
                 let project_path =
                     content_context.resolve_install_path(&project);
                 let target_path =
                     content_context.instance_full_path.join(&project_path);
+                let download_path =
+                    mrpack_staged_download_path(&target_path);
                 let context =
                     InstallErrorContext::new("download modpack content file")
                         .maybe_project_id(
@@ -1185,6 +1673,10 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                         DownloadItemStatus::Connecting,
                     )
                     .await?;
+                // Seed the staging path with an existing installation when
+                // possible. The downloader can then verify/reuse it without
+                // ever deleting the live target when validation fails.
+                seed_mrpack_staged_download(&target_path, &download_path).await;
                 let download = match download_to_path(
                     DownloadRequest::new(primary_url, ResourceClass::Modpack)
                         .with_candidate_urls(
@@ -1201,7 +1693,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                             project_path.clone(),
                             project_path.clone(),
                         ),
-                    &target_path,
+                    &download_path,
                     &state.download_semaphore,
                     &state.pool,
                     None,
@@ -1214,157 +1706,32 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
-                content_context
-                    .reporter
-                    .record_download_stage(
-                        project_path.clone(),
-                        DownloadItemStatus::Finalizing,
-                    )
-                    .await?;
-                let finalize_permit = match native_pipeline.as_ref() {
-                    Some((_, finalize)) => {
-                        let cancellation =
-                            content_context.reporter.cancellation_token();
-                        let wait = tokio::time::timeout(
-                            FINALIZE_WAIT_TIMEOUT,
-                            finalize.acquire(),
-                        );
-                        Some(tokio::select! {
-                            _ = cancellation.cancelled() => {
-                                return Err(crate::ErrorKind::OtherError(
-                                    "modpack finalization canceled while waiting for worker".to_string(),
-                                ).into());
-                            }
-                            result = wait => result.map_err(|_| {
-                                crate::ErrorKind::NetworkError(
-                                    "timed out waiting for modpack finalization worker".to_string(),
-                                )
-                            })??,
-                        })
+                let verification_task = MrpackVerificationTask {
+                    project: project.clone(),
+                    project_path: project_path.clone(),
+                    download_path,
+                    target_path,
+                    downloaded_bytes,
+                    attempts: download.attempts as u32,
+                    finalize_semaphore: native_pipeline
+                        .as_ref()
+                        .map(|(_, finalize)| Arc::clone(finalize)),
+                };
+                let enqueue_cancellation =
+                    content_context.reporter.cancellation_token();
+                tokio::select! {
+                    biased;
+                    _ = enqueue_cancellation.cancelled() => {
+                        return Err(crate::ErrorKind::OtherError(
+                            "modpack verification enqueue canceled".to_string(),
+                        ).into());
                     }
-                    None => None,
-                };
-                content_context
-                    .reporter
-                    .record_download_stage(
-                        project_path.clone(),
-                        DownloadItemStatus::Metadata,
-                    )
-                    .await?;
-                let path = target_path;
-                let sha1 = if let Some(hash) =
-                    project.hashes.get(&PackFileHash::Sha1)
-                {
-                    hash.clone()
-                } else {
-                    sha1_file_async(&path).await?.1
-                };
-
-                load_modpack_file_infos(
-                    &content_context.file_infos_by_hash,
-                    &content_context.file_infos_loading,
-                    &content_context.file_info_hashes,
-                    &state.pool,
-                    &state.api_semaphore,
-                )
-                .await;
-                let file_info = content_context
-                    .file_infos_by_hash
-                    .lock()
-                    .await
-                    .as_ref()
-                    .and_then(|infos| infos.get(&sha1))
-                    .cloned();
-                {
-                    content_context
-                        .reporter
-                        .record_download_stage(
-                            project_path.clone(),
-                            DownloadItemStatus::WaitingForDatabase,
-                        )
-                        .await?;
-                    let cancellation =
-                        content_context.reporter.cancellation_token();
-                    let _permit = tokio::select! {
-                        _ = cancellation.cancelled() => {
-                            return Err(crate::ErrorKind::OtherError(
-                                "modpack finalization canceled while waiting for database".to_string(),
-                            ).into());
-                        }
-                        result = tokio::time::timeout(
-                            FINALIZE_WAIT_TIMEOUT,
-                            state.install_db_semaphore.acquire(),
-                        ) => result.map_err(|_| {
-                            crate::ErrorKind::NetworkError(
-                                "timed out waiting for modpack database".to_string(),
-                            )
-                        })??,
-                    };
-                    if let Some(project_type) =
-                    ProjectType::get_from_parent_folder(project.path.as_str())
-                    {
-                    let provider_ref = match file_info.as_ref() {
-                        Some(file) => Some(ContentProviderRef::Modrinth {
-                            project_id: ModrinthProjectId::new(
-                                file.project_id.clone(),
-                            )?,
-                            version_id: Some(ModrinthVersionId::new(
-                                file.version_id.clone(),
-                            )?),
-                        }),
-                        None => None,
-                    };
-                    content_context
-                        .reporter
-                        .preserve_failure_context(
-                            context.clone(),
-                            crate::state::instances::commands::record_project_file_atomic(
-                                &content_context.instance_id,
-                                &project_path,
-                                &sha1,
-                                downloaded_bytes,
-                                project_type,
-								modpack_source_kind(
-									content_context.pack_version_id.as_deref(),
-								),
-								crate::state::instances::ContentOwnershipKind::PackManaged,
-                                provider_ref.as_ref(),
-                                false,
-                                file_info.as_ref().map(|file| KnownModrinthFile {
-                                    project_id: &file.project_id,
-                                    version_id: &file.version_id,
-                                }),
-                                state,
-                            )
-                            .await,
-                        )
-                        .await?;
+                    result = verification_tx.send(verification_task) => {
+                        result.map_err(|_| crate::ErrorKind::OtherError(
+                            "modpack verification worker stopped".to_string(),
+                        ))?;
                     }
                 }
-                drop(finalize_permit);
-
-								let recovered = download.attempts == 0; //When recovered, the download attempts were set to 0 by download_to_path_inner()
-								if recovered {
-									content_context
-										.mark_file_settled(
-												downloaded_bytes,
-												InstallJobEventKind::ContentFileRecovered {
-														path: project_path.clone(),
-														bytes: downloaded_bytes,
-												},
-										)
-										.await?;
-								} else {
-									content_context
-											.mark_file_settled(
-													downloaded_bytes,
-													InstallJobEventKind::ContentFileCompleted {
-															path: project_path.clone(),
-															bytes: downloaded_bytes,
-													},
-											)
-											.await?;
-								}
                 Ok(())
                 }
                 .await;
@@ -1429,6 +1796,18 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         },
     )
     .await?;
+        drop(completion_tx);
+        drop(verification_tx);
+        verification_worker.await.map_err(|error| {
+            crate::ErrorKind::OtherError(format!(
+                "modpack verification worker failed: {error}"
+            ))
+        })??;
+        completion_worker.await.map_err(|error| {
+            crate::ErrorKind::OtherError(format!(
+                "modpack database worker failed: {error}"
+            ))
+        })??;
         required_file_failures = pass_failures;
         if required_file_failures.is_empty() {
             break;
@@ -1513,10 +1892,19 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
     for parent in override_parents.drain() {
         io::create_dir_all(&parent).await?;
     }
+    let mut seen_override_targets = HashSet::new();
+    let override_targets = override_specs
+        .iter()
+        .filter_map(|spec| {
+            seen_override_targets
+                .insert(spec.target_path.clone())
+                .then(|| spec.target_path.clone())
+        })
+        .collect::<Vec<_>>();
     let override_groups = Arc::new(Mutex::new(VecDeque::from(
         override_extraction_groups(override_specs),
     )));
-    let mut extracted_overrides =
+    let extraction_result =
         futures::stream::iter(0..OVERRIDE_EXTRACTION_CONCURRENCY)
             .map(|_| {
                 let file = file.clone();
@@ -1595,9 +1983,12 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                                     &mut report_progress
                                         as &mut ExtractProgressFn<'_>,
                                 );
+                            let staging_path =
+                                mrpack_override_staging_path(&spec.target_path);
                             let extract_result = reader
                                 .extract_override_entry(
                                     &spec,
+                                    &staging_path,
                                     &state.io_semaphore,
                                     progress,
                                 )
@@ -1622,51 +2013,131 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             .collect::<Vec<_>>()
             .await
             .into_iter()
-            .collect::<crate::Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
+            .collect::<crate::Result<Vec<_>>>();
+    let mut extracted_overrides = match extraction_result {
+        Ok(extracted) => extracted.into_iter().flatten().collect::<Vec<_>>(),
+        Err(error) => {
+            let cleanup_targets = override_targets.clone();
+            let cleanup_result = tokio::task::spawn_blocking(move || {
+                crate::api::pack::archive_util::discard_staged_archive_entries(
+                    &cleanup_targets,
+                )
+            })
+            .await?;
+            if let Err(cleanup_error) = cleanup_result {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to clean staged MRPack overrides: {cleanup_error}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    };
+    let override_replacements =
+        crate::api::pack::archive_util::run_blocking_instance_write(
+        instance_id.clone(),
+        reporter.cancellation_token(),
+        {
+            let override_targets = override_targets.clone();
+            move |cancellation| {
+                crate::api::pack::archive_util::materialize_staged_archive_entries(
+                    &override_targets,
+                    Some(cancellation),
+                )
+            }
+        },
+    )
+    .await?;
     extracted_overrides.sort_unstable_by_key(|extracted| extracted.spec.index);
 
+    let mut override_records = Vec::new();
     for extracted in extracted_overrides {
         cached_pack_hashes.push(extracted.hash.clone());
+        if let Some(project_type) =
+            ProjectType::get_from_parent_folder(&extracted.spec.relative_path)
         {
-            let _permit = state.install_db_semaphore.acquire().await?;
-            let record_context =
-                InstallErrorContext::new("record modpack override")
-                    .maybe_project_id(project_id.clone())
-                    .maybe_version_id(version_id.clone())
-                    .source_path(source_path.clone())
-                    .entry_path(extracted.spec.entry_name.clone())
-                    .target_path(
-                        extracted.spec.target_path.display().to_string(),
-                    )
-                    .build();
-            if let Some(project_type) = ProjectType::get_from_parent_folder(
-                &extracted.spec.relative_path,
-            ) {
-                reporter
-                    .preserve_failure_context(
-                        record_context,
-                        crate::state::instances::commands::record_project_file_atomic(
-                            &instance_id,
-                            &extracted.spec.relative_path,
-                            &extracted.hash,
-                            extracted.size,
-                            project_type,
-							modpack_source_kind(version_id.as_deref()),
-							crate::state::instances::ContentOwnershipKind::PackManaged,
-							None,
-                            false,
-                            None,
-                            state,
-                        )
-                        .await,
-                    )
-                    .await?;
-            }
+            override_records
+                .push(crate::state::instances::commands::ProjectFileRecord {
+                relative_path: extracted.spec.relative_path,
+                sha1: extracted.hash,
+                size: extracted.size,
+                project_type,
+                source_kind: modpack_source_kind(version_id.as_deref()),
+                ownership_kind:
+                    crate::state::instances::ContentOwnershipKind::PackManaged,
+                provider_ref: None,
+                origin: false,
+                known_modrinth_project_id: None,
+                known_modrinth_version_id: None,
+            });
         }
     }
+    let override_registration_result: crate::Result<()> = async {
+        if override_records.is_empty() {
+            return Ok(());
+        }
+        let cancellation = reporter.cancellation_token();
+        let _permit = tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                return Err(crate::ErrorKind::OtherError(
+                    "modpack override registration canceled".to_string(),
+                ).into());
+            }
+            permit = state.install_db_semaphore.acquire() => permit?,
+        };
+        let record_context =
+            InstallErrorContext::new("record modpack overrides")
+                .maybe_project_id(project_id.clone())
+                .maybe_version_id(version_id.clone())
+                .source_path(source_path.clone())
+                .build();
+        // Do not race an in-flight SQLite transaction against cancellation.
+        // The permit wait above is cancelable; after the write begins its
+        // outcome must be observed. Release the permit before persisting a
+        // failure context because the install-job store uses the same
+        // semaphore and would otherwise deadlock on an error.
+        let record_result =
+            crate::state::instances::commands::record_project_files_atomic(
+                &instance_id,
+                &override_records,
+                state,
+            )
+            .await;
+        drop(_permit);
+        reporter
+            .preserve_failure_context(record_context, record_result)
+            .await?;
+        Ok(())
+    }
+    .await;
+    let replacement_result = match override_registration_result {
+        Ok(()) => {
+            crate::api::pack::archive_util::run_blocking_instance_write(
+                instance_id.clone(),
+                reporter.cancellation_token(),
+                move |_| override_replacements.finalize(),
+            )
+            .await
+        }
+        Err(error) => {
+            let rollback_result =
+                crate::api::pack::archive_util::run_blocking_instance_write(
+                    instance_id.clone(),
+                    reporter.cancellation_token(),
+                    move |_| override_replacements.rollback(),
+                )
+                .await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to restore MRPack overrides: {rollback_error}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    };
+    replacement_result?;
 
     if let Some(ref version_id) = version_id {
         let server_override_entries = zip_reader
@@ -1684,13 +2155,13 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         for index in server_override_entries {
             cached_pack_hashes.push(zip_reader.hash_entry(index).await?.1);
         }
-        CachedEntry::cache_modpack_files(
+        CachedEntry::cache_modpack_files_best_effort(
             version_id,
             cached_pack_hashes,
             cached_pack_project_ids,
             &state.pool,
         )
-        .await?;
+        .await;
     } else {
         tracing::warn!(
             "No version_id available, skipping modpack file hash caching"
@@ -1991,6 +2462,140 @@ mod tests {
         assert_eq!(groups[0][1].index, 4);
     }
 
+    #[tokio::test]
+    async fn mrpack_materialization_restores_existing_file_on_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("mods/example.jar");
+        let staged = mrpack_staged_download_path(&target);
+        tokio::fs::create_dir_all(target.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&target, b"previous").await.unwrap();
+        tokio::fs::write(&staged, b"downloaded").await.unwrap();
+
+        let previous =
+            crate::state::materialize_project_download(&staged, &target)
+                .await
+                .unwrap();
+        remove_mrpack_staged_file(&staged).await;
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"downloaded");
+
+        crate::state::restore_project_materialization(
+            &target,
+            previous.as_deref(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"previous");
+        assert!(!staged.exists());
+        assert!(previous.is_some_and(|path| !path.exists()));
+    }
+
+    #[tokio::test]
+    async fn mrpack_materialization_keeps_new_file_after_commit() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("mods/example.jar");
+        let staged = mrpack_staged_download_path(&target);
+        tokio::fs::create_dir_all(target.parent().unwrap())
+            .await
+            .unwrap();
+        tokio::fs::write(&target, b"previous").await.unwrap();
+        tokio::fs::write(&staged, b"downloaded").await.unwrap();
+
+        let previous =
+            crate::state::materialize_project_download(&staged, &target)
+                .await
+                .unwrap();
+        remove_mrpack_staged_file(&staged).await;
+        crate::state::finalize_project_materialization(previous.as_deref())
+            .await
+            .unwrap();
+
+        assert_eq!(tokio::fs::read(&target).await.unwrap(), b"downloaded");
+        assert!(previous.is_some_and(|path| !path.exists()));
+        assert!(!staged.exists());
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_flushes_when_channel_closes() {
+        let (sender, mut receiver) = mpsc::channel(4);
+        sender.send(1_u8).await.unwrap();
+        sender.send(2_u8).await.unwrap();
+        drop(sender);
+
+        let batch = receive_modpack_database_batch(
+            &mut receiver,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_flushes_at_size_limit() {
+        let (sender, mut receiver) = mpsc::channel(CONTENT_DATABASE_BATCH_SIZE);
+        for index in 0..CONTENT_DATABASE_BATCH_SIZE {
+            sender.send(index).await.unwrap();
+        }
+
+        let batch = tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_modpack_database_batch(
+                &mut receiver,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a full database batch should flush immediately")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch.len(), CONTENT_DATABASE_BATCH_SIZE);
+    }
+
+    #[tokio::test]
+    async fn modpack_database_batch_wait_is_cancelable() {
+        let (_sender, mut receiver) = mpsc::channel::<u8>(1);
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_modpack_database_batch(&mut receiver, &cancellation),
+        )
+        .await
+        .expect("database queue cancellation should be immediate")
+        .unwrap_err();
+
+        assert!(error.to_string().contains("canceled"));
+    }
+
+    #[tokio::test]
+    async fn partial_modpack_database_batch_flushes_on_interval() {
+        let (sender, mut receiver) = mpsc::channel(2);
+        // Keep the sender alive so only the flush interval can finish the
+        // partial batch.
+        sender.send(7_u8).await.unwrap();
+
+        let batch = tokio::time::timeout(
+            CONTENT_DATABASE_FLUSH_INTERVAL + Duration::from_millis(250),
+            receive_modpack_database_batch(
+                &mut receiver,
+                &tokio_util::sync::CancellationToken::new(),
+            ),
+        )
+        .await
+        .expect("a partial database batch should flush on the interval")
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(batch, vec![7]);
+    }
+
     async fn run_failure_collection(
         failed_indices: &[usize],
     ) -> (Vec<usize>, Vec<RequiredFileFailure>) {
@@ -2200,8 +2805,15 @@ mod tests {
                 let semaphore = Arc::clone(&semaphore);
                 async move {
                     let mut reader = MrpackZipReader::new(&source).await?;
+                    let staging_path =
+                        mrpack_override_staging_path(&spec.target_path);
                     reader
-                        .extract_override_entry(&spec, &semaphore, None)
+                        .extract_override_entry(
+                            &spec,
+                            &staging_path,
+                            &semaphore,
+                            None,
+                        )
                         .await?;
                     Ok::<_, crate::Error>(spec)
                 }
@@ -2210,6 +2822,33 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
         let specs = extracted.into_iter().collect::<crate::Result<Vec<_>>>()?;
+
+        for spec in &specs {
+            let expected = entries
+                .iter()
+                .find(|(name, _)| *name == spec.entry_name)
+                .unwrap()
+                .1;
+            assert!(!spec.target_path.exists());
+            assert_eq!(
+                tokio::fs::read(mrpack_override_staging_path(
+                    &spec.target_path
+                ))
+                .await
+                .unwrap(),
+                expected
+            );
+        }
+        let targets = specs
+            .iter()
+            .map(|spec| spec.target_path.clone())
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            crate::api::pack::archive_util::commit_staged_archive_entries(
+                &targets, None,
+            )
+        })
+        .await??;
 
         for spec in specs {
             let expected = entries

@@ -514,6 +514,14 @@ async fn restore_existing_instance(
         .instance_game_dir(&rollback.instance.instance);
     let _instance_lock = state.lock_instance_content(instance_id).await;
 
+    let recovery_root = instance_base.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::api::pack::archive_util::recover_interrupted_archive_replacements(
+            &recovery_root,
+        )
+    })
+    .await??;
+
     if rollback.content.is_some() {
         clean_replacement_files(job_state, &instance_base, state).await?;
         restore_snapshot_files(job_state, &instance_base, state).await?;

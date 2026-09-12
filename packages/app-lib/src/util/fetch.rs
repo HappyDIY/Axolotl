@@ -5871,6 +5871,31 @@ pub async fn sha1_file_async(
     Ok((size, hasher.digest().to_string()))
 }
 
+pub async fn sha1_file_cancellable(
+    path: impl AsRef<Path>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> crate::Result<(u64, String)> {
+    let path = path.as_ref();
+    let mut file = File::open(path)
+        .await
+        .map_err(|e| IOError::with_path(e, path))?;
+    let mut hasher = sha1_smol::Sha1::new();
+    let mut size = 0;
+    let mut buffer = vec![0; 262144];
+    loop {
+        let bytes_read = tokio::select! {
+            _ = cancellation.cancelled() => return Err(ErrorKind::OtherError("download canceled during verification".to_string()).into()),
+            result = file.read(&mut buffer) => result.map_err(|e| IOError::with_path(e, path))?,
+        };
+        if bytes_read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..bytes_read]);
+        size += bytes_read as u64;
+    }
+    Ok((size, hasher.digest().to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

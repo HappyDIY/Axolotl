@@ -1,6 +1,5 @@
 use super::model::{
-    DownloadJobSummary, InstallJobKind, InstallJobSnapshot, InstallJobState,
-    InstallJobStatus,
+    InstallJobKind, InstallJobSnapshot, InstallJobState, InstallJobStatus,
 };
 use crate::state::{InstanceInstallStage, State};
 use chrono::{DateTime, TimeZone, Utc};
@@ -102,8 +101,6 @@ pub async fn insert(
     )
     .execute(&app_state.pool)
     .await?;
-
-    sync_download_details(id, state, app_state).await?;
 
     get(id, app_state).await?.ok_or_else(|| {
         crate::ErrorKind::OtherError(format!(
@@ -278,6 +275,16 @@ pub async fn update_state(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let json = serde_json::to_string(state)?;
     let instance_id = instance_id(state);
@@ -299,91 +306,51 @@ pub async fn update_state(
     .execute(&app_state.pool)
     .await?;
 
-    sync_download_details(id, state, app_state).await?;
-
     get_required(id, app_state).await
 }
 
-/// Updates the job state JSON and the denormalized download summary columns
-/// in a single statement, using a caller-supplied serialized state so the
-/// reporter mutex is not held across the DB write.
-pub async fn update_state_with_progress_columns(
+/// Persists a recoverable runtime checkpoint without reopening a terminal or
+/// paused job. The status predicate makes a delayed checkpoint harmless when
+/// job finalization wins the database semaphore first.
+pub async fn checkpoint_running_state(
     id: Uuid,
-    json: &str,
-    provider: &str,
-    summary: &DownloadJobSummary,
+    state: &InstallJobState,
     app_state: &State,
-) -> crate::Result<InstallJobRecord> {
+) -> crate::Result<Option<InstallJobRecord>> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
-    let instance_id = instance_id_from_json(json);
+    let json = serde_json::to_string(state)?;
+    let instance_id = instance_id(state);
     let id_value = id.to_string();
     let modified = now.timestamp();
-
-    sqlx::query(
-        "UPDATE install_jobs
-         SET instance_id = (SELECT id FROM instances WHERE id = ?),
-             state = ?, modified = ?, provider = ?, files_total = ?,
-             files_completed = ?, bytes_total = ?, bytes_downloaded = ?
-         WHERE id = ?",
+    let result = sqlx::query(
+        "
+		UPDATE install_jobs
+		SET instance_id = (SELECT id FROM instances WHERE id = ?),
+			state = ?, modified = ?
+		WHERE id = ? AND status = ?
+		",
     )
     .bind(instance_id)
     .bind(json)
     .bind(modified)
-    .bind(provider)
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
-    .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
     .bind(id_value)
+    .bind(InstallJobStatus::Running.as_str())
     .execute(&app_state.pool)
     .await?;
-
-    get_required(id, app_state).await
-}
-
-fn instance_id_from_json(json: &str) -> Option<String> {
-    serde_json::from_str::<serde_json::Value>(json)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("target")
-                .and_then(|target| target.get("instance_id"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned)
-        })
-}
-
-/// Persists a serialized job state. The caller serializes and summarizes
-/// under the reporter lock; this function only performs the DB write so the
-/// reporter mutex is never held across the transaction.
-pub async fn update_progress_state(
-    id: Uuid,
-    json: &str,
-    provider: &str,
-    summary: &DownloadJobSummary,
-    app_state: &State,
-) -> crate::Result<()> {
-    let modified = Utc::now().timestamp();
-    let id_value = id.to_string();
-
-    sqlx::query(
-        "UPDATE install_jobs
-         SET state = ?, modified = ?, provider = ?, files_total = ?,
-             files_completed = ?, bytes_total = ?, bytes_downloaded = ?
-         WHERE id = ?",
-    )
-    .bind(json)
-    .bind(modified)
-    .bind(provider)
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
-    .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
-    .bind(id_value)
-    .execute(&app_state.pool)
-    .await?;
-
-    Ok(())
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    Ok(Some(get_required(id, app_state).await?))
 }
 
 pub async fn update_status(
@@ -392,6 +359,16 @@ pub async fn update_status(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<InstallJobRecord> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let finished = status.is_finished().then_some(now.timestamp());
     let json = serde_json::to_string(state)?;
@@ -417,8 +394,6 @@ pub async fn update_status(
     .execute(&app_state.pool)
     .await?;
 
-    sync_download_details(id, state, app_state).await?;
-
     get_required(id, app_state).await
 }
 
@@ -429,6 +404,16 @@ pub async fn update_status_if(
     state: &InstallJobState,
     app_state: &State,
 ) -> crate::Result<Option<InstallJobRecord>> {
+    let _db_permit =
+        app_state
+            .install_db_semaphore
+            .acquire()
+            .await
+            .map_err(|_| {
+                crate::ErrorKind::OtherError(
+                    "install database semaphore closed".to_string(),
+                )
+            })?;
     let now = Utc::now();
     let finished = status.is_finished().then_some(now.timestamp());
     let json = serde_json::to_string(state)?;
@@ -452,7 +437,6 @@ pub async fn update_status_if(
         return Ok(None);
     }
 
-    sync_download_details(id, state, app_state).await?;
     Ok(Some(get_required(id, app_state).await?))
 }
 
@@ -543,13 +527,6 @@ pub async fn complete_running_job(
     }
     transaction.commit().await?;
 
-    if let Err(error) = sync_download_details(id, state, app_state).await {
-        tracing::warn!(
-            job_id = %id,
-            error = %error,
-            "Install job succeeded, but final download details could not be synchronized"
-        );
-    }
     Ok(Some(get_required(id, app_state).await?))
 }
 
@@ -636,6 +613,10 @@ mod tests {
                 excluded_dependency_project_ids: Vec::new(),
                 force_dependency_project_ids: Vec::new(),
                 dependency_plan_id: None,
+                defer_persistence: false,
+                verification_tx: None,
+                pre_resolved_relative_path: None,
+                expected_file_name: None,
             },
             display_title: "CurseForge content".to_string(),
             display_icon: None,
@@ -1170,28 +1151,4 @@ fn timestamp(value: i64) -> DateTime<Utc> {
 
 fn optional_timestamp(value: i64) -> Option<DateTime<Utc>> {
     Utc.timestamp_opt(value, 0).single()
-}
-
-async fn sync_download_details(
-    id: Uuid,
-    state: &InstallJobState,
-    app_state: &State,
-) -> crate::Result<()> {
-    let id_value = id.to_string();
-    let summary = state.download_summary();
-    sqlx::query(
-        "UPDATE install_jobs
-         SET provider = ?, files_total = ?, files_completed = ?,
-             bytes_total = ?, bytes_downloaded = ?
-         WHERE id = ?",
-    )
-    .bind(state.provider().as_str())
-    .bind(summary.files_total.map(|value| value as i64))
-    .bind(summary.files_completed as i64)
-    .bind(summary.bytes_total.map(|value| value as i64))
-    .bind(summary.bytes_downloaded as i64)
-    .bind(&id_value)
-    .execute(&app_state.pool)
-    .await?;
-    Ok(())
 }
