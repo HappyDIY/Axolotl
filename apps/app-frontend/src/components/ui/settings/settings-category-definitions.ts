@@ -5,6 +5,7 @@ export type SettingsCategoryId =
 	| 'home-navigation'
 	| 'language-translation'
 	| 'ai'
+	| 'shortcut-settings'
 	| 'java-performance'
 	| 'launch-defaults'
 	| 'content-downloads'
@@ -60,6 +61,15 @@ export const settingsCategoryDefinitions: SettingsCategoryDefinition[] = [
 		group: 'launcher',
 		flushContent: true,
 		onboardingId: 'settings-tab-ai',
+	},
+	{
+		id: 'shortcut-settings',
+		name: defineMessage({
+			id: 'app.settings.tabs.shortcut-settings',
+			defaultMessage: 'Shortcut settings',
+		}),
+		group: 'launcher',
+		onboardingId: 'settings-tab-shortcut-settings',
 	},
 	{
 		id: 'java-performance',

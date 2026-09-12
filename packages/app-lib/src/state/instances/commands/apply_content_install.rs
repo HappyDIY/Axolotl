@@ -12,10 +12,10 @@ use crate::state::instances::{
     },
 };
 use crate::state::{
-    CacheBehaviour, CachedEntry, ContentProviderRef, CurseForgeFileId,
-    CurseForgeProjectId, Dependency, DependencyType, KnownModrinthFile,
-    ModLoader, ModrinthProjectId, ModrinthVersionId, ProjectType, State,
-    Version, cache_file_hash, cache_file_hash_metadata,
+    CacheBehaviour, CacheValue, CachedEntry, CachedFileHash,
+    ContentProviderRef, CurseForgeFileId, CurseForgeProjectId, Dependency,
+    DependencyType, KnownModrinthFile, ModLoader, ModrinthProjectId,
+    ModrinthVersionId, ProjectType, State, Version, cache_file_hash,
 };
 use crate::util::fetch::{
     self, ContentValidation, DownloadMeta, DownloadReason, DownloadRequest,
@@ -71,6 +71,20 @@ pub(crate) struct DownloadedProjectVersion {
     pub project_type: ProjectType,
     pub project_id: String,
     pub version_id: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectFileRecord {
+    pub relative_path: String,
+    pub sha1: String,
+    pub size: u64,
+    pub project_type: ProjectType,
+    pub source_kind: ContentSourceKind,
+    pub ownership_kind: ContentOwnershipKind,
+    pub provider_ref: Option<ContentProviderRef>,
+    pub origin: bool,
+    pub known_modrinth_project_id: Option<String>,
+    pub known_modrinth_version_id: Option<String>,
 }
 
 pub(crate) struct InstanceInstallProjectRequest {
@@ -2106,18 +2120,24 @@ pub(crate) async fn record_project_file_atomic(
     known_modrinth_file: Option<KnownModrinthFile<'_>>,
     state: &State,
 ) -> crate::Result<()> {
-    record_project_file_atomic_with_pending_completion(
-        instance_id,
-        relative_path,
-        sha1,
+    let record = ProjectFileRecord {
+        relative_path: relative_path.to_string(),
+        sha1: sha1.to_string(),
         size,
         project_type,
         source_kind,
         ownership_kind,
-        provider_ref,
+        provider_ref: provider_ref.cloned(),
         origin,
-        known_modrinth_file,
-        PendingManualDownloadCompletion::None,
+        known_modrinth_project_id: known_modrinth_file
+            .map(|file| file.project_id.to_string()),
+        known_modrinth_version_id: known_modrinth_file
+            .map(|file| file.version_id.to_string()),
+    };
+    record_project_files_atomic_with_pending_completion(
+        instance_id,
+        std::slice::from_ref(&record),
+        &[],
         state,
     )
     .await
@@ -2140,58 +2160,70 @@ pub(crate) async fn record_verified_curseforge_project_file_atomic(
         project_id,
         file_id: Some(file_id),
     };
-    record_project_file_atomic_with_pending_completion(
-        instance_id,
-        relative_path,
-        sha1,
+    let record = ProjectFileRecord {
+        relative_path: relative_path.to_string(),
+        sha1: sha1.to_string(),
         size,
         project_type,
         source_kind,
         ownership_kind,
-        Some(&provider_ref),
+        provider_ref: Some(provider_ref),
         origin,
-        None,
-        PendingManualDownloadCompletion::VerifiedCurseForge {
-            project_id,
-            file_id,
-        },
+        known_modrinth_project_id: None,
+        known_modrinth_version_id: None,
+    };
+    let verified_pending = [(project_id, file_id)];
+    record_project_files_atomic_with_pending_completion(
+        instance_id,
+        std::slice::from_ref(&record),
+        &verified_pending,
         state,
     )
     .await
 }
 
-#[derive(Clone, Copy)]
-enum PendingManualDownloadCompletion {
-    None,
-    VerifiedCurseForge {
-        project_id: CurseForgeProjectId,
-        file_id: CurseForgeFileId,
-    },
+pub(crate) async fn record_project_files_atomic(
+    instance_id: &str,
+    records: &[ProjectFileRecord],
+    state: &State,
+) -> crate::Result<()> {
+    record_project_files_atomic_with_pending_completion(
+        instance_id,
+        records,
+        &[],
+        state,
+    )
+    .await
+}
+
+pub(crate) async fn record_project_files_with_verified_curseforge_atomic(
+    instance_id: &str,
+    records: &[ProjectFileRecord],
+    verified_pending: &[(CurseForgeProjectId, CurseForgeFileId)],
+    state: &State,
+) -> crate::Result<()> {
+    record_project_files_atomic_with_pending_completion(
+        instance_id,
+        records,
+        verified_pending,
+        state,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn record_project_file_atomic_with_pending_completion(
+async fn record_project_files_atomic_with_pending_completion(
     instance_id: &str,
-    relative_path: &str,
-    sha1: &str,
-    size: u64,
-    project_type: ProjectType,
-    source_kind: ContentSourceKind,
-    ownership_kind: ContentOwnershipKind,
-    provider_ref: Option<&ContentProviderRef>,
-    origin: bool,
-    known_modrinth_file: Option<KnownModrinthFile<'_>>,
-    pending_completion: PendingManualDownloadCompletion,
+    records: &[ProjectFileRecord],
+    verified_pending: &[(CurseForgeProjectId, CurseForgeFileId)],
     state: &State,
 ) -> crate::Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
     let _instance_lock = state.lock_instance_content(instance_id).await;
 
     let scope = resolve_content_scope(instance_id, None, state).await?;
-    let file_name = Path::new(relative_path)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
     let mut tx = begin_content_write(&state.pool).await?;
     content_rows::ensure_content_write_parents(
         &scope.instance.id,
@@ -2199,116 +2231,148 @@ async fn record_project_file_atomic_with_pending_completion(
         &mut tx,
     )
     .await?;
-    let file = content_rows::upsert_instance_file_from_parts_in_transaction(
-        content_rows::UpsertInstanceFile {
-            instance_id: &scope.instance.id,
-            relative_path,
-            file_name: &file_name,
-            enabled: !relative_path.ends_with(".disabled"),
-            sha1,
-            size,
-            missing: false,
-            local_mod_data: None,
-            icon_path: None,
-        },
-        &mut tx,
-    )
-    .await?;
-    let entry = content_rows::upsert_content_entry_from_parts_in_transaction(
-        content_rows::UpsertContentEntry {
-            instance_id: &scope.instance.id,
-            content_set_id: &scope.content_set_id,
-            file_id: Some(&file.id),
-            project_type,
-            source_kind,
-            ownership_kind,
-            auto_dependency: false,
-            server_requirement: ContentRequirement::Required,
-            client_requirement: ContentRequirement::Required,
-            enabled: file.enabled,
-        },
-        &mut tx,
-    )
-    .await?;
-    if let Some(provider_ref) = provider_ref {
-        content_rows::upsert_content_provider_ref_in_transaction(
-            &entry.id,
-            provider_ref,
-            origin,
-            &mut tx,
-        )
-        .await?;
-    }
-    if ownership_kind == ContentOwnershipKind::PackManaged {
-        let now = chrono::Utc::now();
-        let member_key = provider_ref.map_or_else(
-            || format!("path:{}", relative_path.to_lowercase()),
-            |provider_ref| {
-                format!(
-                    "{}:{}:{}",
-                    provider_ref.provider().as_str(),
-                    provider_ref.database_project_id(),
-                    project_type.get_name(),
-                )
-            },
-        );
-        content_rows::upsert_pack_member_in_transaction(
-            &PackMember {
-                id: format!("pack-member:{}", entry.id),
-                content_set_id: scope.content_set_id.clone(),
-                content_entry_id: Some(entry.id.clone()),
-                member_key,
-                project_type,
-                expected_relative_path: relative_path.to_string(),
-                provider: provider_ref.map(ContentProviderRef::provider),
-                provider_project_id: provider_ref
-                    .map(ContentProviderRef::database_project_id),
-                provider_release_id: provider_ref
-                    .and_then(ContentProviderRef::database_release_id),
-                required: true,
-                expected_sha1: Some(sha1.to_string()),
-                expected_size: Some(size),
-                expected_fingerprint: None,
-                materialization_state: PackMemberMaterializationState::Present,
-                override_kind: if !file.enabled {
-                    PackMemberOverrideKind::Disabled
-                } else if source_kind == ContentSourceKind::Local {
-                    PackMemberOverrideKind::Version
-                } else {
-                    PackMemberOverrideKind::None
+    let mut hash_cache_entries = Vec::with_capacity(records.len());
+    for record in records {
+        let file_name = Path::new(&record.relative_path)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        let file =
+            content_rows::upsert_instance_file_from_parts_in_transaction(
+                content_rows::UpsertInstanceFile {
+                    instance_id: &scope.instance.id,
+                    relative_path: &record.relative_path,
+                    file_name: &file_name,
+                    enabled: !record.relative_path.ends_with(".disabled"),
+                    sha1: &record.sha1,
+                    size: record.size,
+                    missing: false,
+                    local_mod_data: None,
+                    icon_path: None,
                 },
-                reconciled: true,
-                created_at: now,
-                modified_at: now,
-            },
-            &mut tx,
-        )
-        .await?;
+                &mut tx,
+            )
+            .await?;
+        let entry =
+            content_rows::upsert_content_entry_from_parts_in_transaction(
+                content_rows::UpsertContentEntry {
+                    instance_id: &scope.instance.id,
+                    content_set_id: &scope.content_set_id,
+                    file_id: Some(&file.id),
+                    project_type: record.project_type,
+                    source_kind: record.source_kind,
+                    ownership_kind: record.ownership_kind,
+                    auto_dependency: false,
+                    server_requirement: ContentRequirement::Required,
+                    client_requirement: ContentRequirement::Required,
+                    enabled: file.enabled,
+                },
+                &mut tx,
+            )
+            .await?;
+        if let Some(provider_ref) = record.provider_ref.as_ref() {
+            content_rows::upsert_content_provider_ref_in_transaction(
+                &entry.id,
+                provider_ref,
+                record.origin,
+                &mut tx,
+            )
+            .await?;
+        }
+        if record.ownership_kind == ContentOwnershipKind::PackManaged {
+            let now = chrono::Utc::now();
+            let member_key = record.provider_ref.as_ref().map_or_else(
+                || format!("path:{}", record.relative_path.to_lowercase()),
+                |provider_ref| {
+                    format!(
+                        "{}:{}:{}",
+                        provider_ref.provider().as_str(),
+                        provider_ref.database_project_id(),
+                        record.project_type.get_name(),
+                    )
+                },
+            );
+            content_rows::upsert_pack_member_in_transaction(
+                &PackMember {
+                    id: format!("pack-member:{}", entry.id),
+                    content_set_id: scope.content_set_id.clone(),
+                    content_entry_id: Some(entry.id.clone()),
+                    member_key,
+                    project_type: record.project_type,
+                    expected_relative_path: record.relative_path.clone(),
+                    provider: record
+                        .provider_ref
+                        .as_ref()
+                        .map(ContentProviderRef::provider),
+                    provider_project_id: record
+                        .provider_ref
+                        .as_ref()
+                        .map(ContentProviderRef::database_project_id),
+                    provider_release_id: record
+                        .provider_ref
+                        .as_ref()
+                        .and_then(ContentProviderRef::database_release_id),
+                    required: true,
+                    expected_sha1: Some(record.sha1.clone()),
+                    expected_size: Some(record.size),
+                    expected_fingerprint: None,
+                    materialization_state:
+                        PackMemberMaterializationState::Present,
+                    override_kind: if !file.enabled {
+                        PackMemberOverrideKind::Disabled
+                    } else if record.source_kind == ContentSourceKind::Local {
+                        PackMemberOverrideKind::Version
+                    } else {
+                        PackMemberOverrideKind::None
+                    },
+                    reconciled: true,
+                    created_at: now,
+                    modified_at: now,
+                },
+                &mut tx,
+            )
+            .await?;
+        }
+        if let Some((project_id, file_id)) =
+            record.provider_ref.as_ref().and_then(|provider_ref| {
+                let ContentProviderRef::CurseForge {
+                    project_id,
+                    file_id: Some(file_id),
+                } = provider_ref
+                else {
+                    return None;
+                };
+                verified_pending
+                    .contains(&(*project_id, *file_id))
+                    .then_some((*project_id, *file_id))
+            })
+        {
+            content_rows::complete_pending_manual_download(
+                instance_id,
+                &project_id.get().to_string(),
+                &file_id.get().to_string(),
+                Some(&entry.id),
+                &mut tx,
+            )
+            .await?;
+        }
+        hash_cache_entries.push(
+            CacheValue::FileHash(CachedFileHash {
+                path: format!(
+                    "{}/{}",
+                    scope.instance.path, record.relative_path
+                ),
+                size: record.size,
+                hash: record.sha1.clone(),
+                project_type: Some(record.project_type),
+                project_id: record.known_modrinth_project_id.clone(),
+                version_id: record.known_modrinth_version_id.clone(),
+            })
+            .get_entry(),
+        );
     }
-    if let PendingManualDownloadCompletion::VerifiedCurseForge {
-        project_id,
-        file_id,
-    } = pending_completion
-    {
-        content_rows::complete_pending_manual_download(
-            instance_id,
-            &project_id.get().to_string(),
-            &file_id.get().to_string(),
-            Some(&entry.id),
-            &mut tx,
-        )
-        .await?;
-    }
-    cache_file_hash_metadata(
-        &scope.instance.path,
-        relative_path,
-        size,
-        sha1.to_string(),
-        Some(project_type),
-        known_modrinth_file,
-        &mut *tx,
-    )
-    .await?;
+    CachedEntry::upsert_many(&hash_cache_entries, &mut *tx).await?;
     content_rows::bump_content_set_revision_in_transaction(
         &scope.content_set_id,
         &mut tx,

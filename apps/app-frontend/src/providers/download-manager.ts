@@ -2,6 +2,7 @@ import { createContext } from '@modrinth/ui'
 import { computed, type ComputedRef, type Ref, ref } from 'vue'
 
 import { setCurseForgeManualDownloads } from '@/helpers/curseforge-manual'
+import { mergeRefreshedDownloadJobs } from '@/helpers/download-job-refresh'
 import { download_request_listener, install_job_listener, loading_listener } from '@/helpers/events'
 import {
 	download_history_clear,
@@ -18,6 +19,7 @@ import {
 } from '@/helpers/install'
 import type { LoadingBar } from '@/helpers/state'
 import { progress_bars_list } from '@/helpers/state'
+import { effectiveInstallProgress, hasDeterminateInstallProgress } from '@/helpers/install-progress'
 
 const activeStatuses = new Set(['queued', 'running', 'canceling', 'waiting_for_user'])
 export const downloadBarTypes = new Set([
@@ -84,8 +86,14 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 	> = []
 	const pendingRequestUpdatesByJob = new Map<string, DownloadRequestUpdate[]>()
 	const pendingRequestUpdates: DownloadRequestUpdate[] = []
+	const pendingProgressUpdateIndexes = new Map<string, number>()
+	const jobRevisions = new Map<string, number>()
 	let requestFlushTimer: ReturnType<typeof setTimeout> | null = null
 	let legacyRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+	function bumpJobRevision(jobId: string) {
+		jobRevisions.set(jobId, (jobRevisions.get(jobId) ?? 0) + 1)
+	}
 
 	function persistManualDownloadsFromJob(job: InstallJobSnapshot) {
 		if (job.status !== 'waiting_for_user' && job.status !== 'succeeded') return
@@ -111,10 +119,15 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			pendingInitialUpdates.push({ kind: 'job', job })
 			return
 		}
+		// Preserve event arrival order. A full snapshot is authoritative over
+		// download-request updates received before it; otherwise a delayed frame
+		// flush can regress a completed item back to downloading.
+		flushRequestUpdates()
 		const current = jobs.value.find((candidate) => candidate.job_id === job.job_id)
 		if (current && current.modified.localeCompare(job.modified) > 0) return
 		const currentIndex = jobs.value.findIndex((candidate) => candidate.job_id === job.job_id)
 		if (currentIndex !== -1) {
+			job = preserveMonotonicProgress(jobs.value[currentIndex], job)
 			// Progress snapshots are frequent. Keep an existing job in its current
 			// position instead of rebuilding and sorting the whole list on every
 			// update. Jobs created within the same second have identical timestamps;
@@ -126,6 +139,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		} else {
 			jobs.value = [job, ...jobs.value].sort((a, b) => b.created.localeCompare(a.created))
 		}
+		bumpJobRevision(job.job_id)
 		const pending = pendingRequestUpdatesByJob.get(job.job_id)
 		if (pending) {
 			pendingRequestUpdatesByJob.delete(job.job_id)
@@ -139,6 +153,18 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			pendingInitialUpdates.push({ kind: 'request', update })
 			return
 		}
+		const key = `${update.job_id}\0${update.id}`
+		if (update.type === 'progress') {
+			const pendingIndex = pendingProgressUpdateIndexes.get(key)
+			if (pendingIndex != null) {
+				pendingRequestUpdates[pendingIndex] = update
+				scheduleRequestFlush()
+				return
+			}
+			pendingProgressUpdateIndexes.set(key, pendingRequestUpdates.length)
+		} else {
+			pendingProgressUpdateIndexes.delete(key)
+		}
 		pendingRequestUpdates.push(update)
 		scheduleRequestFlush()
 	}
@@ -148,32 +174,60 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		requestFlushTimer = setTimeout(() => {
 			requestFlushTimer = null
 			flushRequestUpdates()
-		}, 120)
+		}, 16)
 	}
 
 	function flushRequestUpdates() {
 		if (pendingRequestUpdates.length === 0) return
 		const updates = pendingRequestUpdates.splice(0)
-		let next = jobs.value
+		pendingProgressUpdateIndexes.clear()
+		const next = [...jobs.value]
+		const mutableJobs = new Map<number, InstallJobSnapshot>()
 		for (const update of updates) {
-			next = applyRequestUpdate(update, next)
+			const jobIndex = next.findIndex((job) => job.job_id === update.job_id)
+			if (jobIndex === -1) {
+				const pending = pendingRequestUpdatesByJob.get(update.job_id) ?? []
+				pending.push(update)
+				pendingRequestUpdatesByJob.set(update.job_id, pending)
+				continue
+			}
+			let job = mutableJobs.get(jobIndex)
+			if (!job) {
+				const current = next[jobIndex]
+				job = { ...current, items: [...current.items] }
+				next[jobIndex] = job
+				mutableJobs.set(jobIndex, job)
+			}
+			applyRequestUpdateToJob(update, job)
 		}
+		for (const job of mutableJobs.values()) syncLiveByteProgress(job)
+		for (const job of mutableJobs.values()) bumpJobRevision(job.job_id)
 		jobs.value = next
 	}
 
-	function applyRequestUpdate(
-		update: DownloadRequestUpdate,
-		jobs: InstallJobSnapshot[],
-	): InstallJobSnapshot[] {
-		const jobIndex = jobs.findIndex((job) => job.job_id === update.job_id)
-		if (jobIndex === -1) {
-			const pending = pendingRequestUpdatesByJob.get(update.job_id) ?? []
-			pending.push(update)
-			pendingRequestUpdatesByJob.set(update.job_id, pending)
-			return jobs
+	function syncLiveByteProgress(job: InstallJobSnapshot) {
+		const total = job.summary.bytes_total
+		const downloaded = job.items.reduce((sum, item) => sum + item.bytes_downloaded, 0)
+		const current = Math.max(
+			job.summary.bytes_downloaded,
+			total == null ? downloaded : Math.min(downloaded, total),
+		)
+		job.summary = { ...job.summary, bytes_downloaded: current }
+		if (job.phase === 'downloading_content' && job.progress?.secondary) {
+			job.progress = {
+				...job.progress,
+				secondary: {
+					...job.progress.secondary,
+					current: Math.min(
+						Math.max(job.progress.secondary.current, current),
+						job.progress.secondary.total,
+					),
+				},
+			}
 		}
+	}
 
-		const job = jobs[jobIndex]
+	function applyRequestUpdateToJob(update: DownloadRequestUpdate, job: InstallJobSnapshot) {
 		const itemIndex = job.items.findIndex((item) => item.id === update.id)
 		const current = itemIndex === -1 ? null : job.items[itemIndex]
 		let item: InstallJobSnapshot['items'][number]
@@ -181,11 +235,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		switch (update.type) {
 			case 'started':
 				item = {
-					...(current ?? {
-						id: update.id,
-						name: update.name,
-						bytes_downloaded: 0,
-					}),
+					...(current ?? { id: update.id, name: update.name, bytes_downloaded: 0 }),
 					status: 'downloading',
 					bytes_total: current?.bytes_total ?? update.bytes_total,
 					attempt: update.attempt,
@@ -196,61 +246,87 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				}
 				break
 			case 'progress':
-				if (!current) return jobs
+				if (!current) return
 				item = {
 					...current,
 					status: update.status,
-					bytes_downloaded: update.bytes,
+					bytes_downloaded: Math.max(current.bytes_downloaded, update.bytes),
+				}
+				job.summary = {
+					...job.summary,
+					speed_bytes_per_second: update.speed_bytes_per_second,
+					eta_seconds: update.eta_seconds,
 				}
 				break
 			case 'finished':
-				if (!current) return jobs
+				if (!current) return
 				item = {
 					...current,
-					// A request has reached disk, but an install item may still be
-					// hashing, registering metadata, or waiting for SQLite.
 					status: 'verifying',
-					bytes_downloaded: update.bytes,
-					bytes_total: current.bytes_total ?? update.bytes,
+					bytes_downloaded: Math.max(current.bytes_downloaded, update.bytes),
+					bytes_total: current.bytes_total ?? Math.max(current.bytes_downloaded, update.bytes),
 				}
 				break
 			case 'failed':
-				if (!current) return jobs
+				if (!current) return
 				item = { ...current, status: 'failed' }
 				break
 		}
 
-		const items = [...job.items]
-		if (itemIndex === -1) items.push(item)
-		else items[itemIndex] = item
-		const nextJobs = [...jobs]
-		nextJobs[jobIndex] = {
-			...job,
-			items,
-			summary:
-				update.type === 'progress'
-					? {
-							...job.summary,
-							speed_bytes_per_second: update.speed_bytes_per_second,
-							eta_seconds: update.eta_seconds,
-						}
-					: job.summary,
+		if (itemIndex === -1) job.items.push(item)
+		else job.items[itemIndex] = item
+	}
+
+	function preserveMonotonicProgress(
+		current: InstallJobSnapshot,
+		next: InstallJobSnapshot,
+	): InstallJobSnapshot {
+		if (current.phase !== next.phase) return next
+		const currentProgress = effectiveInstallProgress(current)
+		const nextProgress = effectiveInstallProgress(next)
+		if (
+			!hasDeterminateInstallProgress(currentProgress) ||
+			!hasDeterminateInstallProgress(nextProgress)
+		) {
+			return next
 		}
-		return nextJobs
+		if (currentProgress.total !== nextProgress.total) return next
+		if (nextProgress.current >= currentProgress.current) return next
+
+		if (next.phase === 'downloading_content' && next.progress?.secondary) {
+			return {
+				...next,
+				progress: {
+					...next.progress,
+					secondary: current.progress?.secondary ?? next.progress.secondary,
+				},
+			}
+		}
+		return { ...next, progress: current.progress }
 	}
 
 	async function refresh() {
+		// A list request can race with realtime install/download events. Record
+		// the local revision at dispatch so its older response cannot roll a job
+		// back to the state it had before those events arrived.
+		const revisionsAtDispatch = new Map(jobRevisions)
 		const page = await download_job_list({ limit: 250 }).catch((error) => {
 			handleError(error)
 			return null
 		})
 		if (page && !disposed) {
-			const activeSynthetics = jobs.value.filter(
-				(job) => syntheticIds.has(job.job_id) && activeStatuses.has(job.status),
+			const refreshedJobs = mergeRefreshedDownloadJobs(
+				page.jobs,
+				jobs.value,
+				revisionsAtDispatch,
+				jobRevisions,
+				syntheticIds,
+				activeStatuses,
 			)
-			jobs.value = [...page.jobs, ...activeSynthetics].sort((a, b) =>
-				b.created.localeCompare(a.created),
-			)
+			jobs.value = refreshedJobs.map((job) => {
+				const current = jobs.value.find((candidate) => candidate.job_id === job.job_id)
+				return current ? preserveMonotonicProgress(current, job) : job
+			})
 			const seenInstances = new Set<string>()
 			for (const job of page.jobs) {
 				if (job.status !== 'succeeded') continue
@@ -415,6 +491,8 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			initializing = false
 			pendingInitialUpdates.length = 0
 			pendingRequestUpdatesByJob.clear()
+			pendingProgressUpdateIndexes.clear()
+			jobRevisions.clear()
 			syntheticCancelHandlers.clear()
 			if (requestFlushTimer !== null) {
 				clearTimeout(requestFlushTimer)
