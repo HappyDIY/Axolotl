@@ -5303,9 +5303,13 @@ fn extract_modpack_overrides(
     if tasks.is_empty() {
         return Ok(0);
     }
+    let targets = tasks
+        .iter()
+        .map(|task| task.target.clone())
+        .collect::<Vec<_>>();
     let worker_count = OVERRIDE_EXTRACTION_CONCURRENCY.min(tasks.len());
     let queue = Arc::new(Mutex::new(VecDeque::from(tasks)));
-    std::thread::scope(|scope| {
+    let extraction_result = std::thread::scope(|scope| {
         let mut workers = Vec::with_capacity(worker_count);
         for _ in 0..worker_count {
             let queue = Arc::clone(&queue);
@@ -5326,20 +5330,10 @@ fn extract_modpack_overrides(
                     let mut entry = archive
                         .by_index(task.index)
                         .map_err(modpack_zip_error)?;
-                    if let Some(parent) = task.target.parent() {
-                        std::fs::create_dir_all(parent).map_err(|error| {
-                            crate::util::io::IOError::with_path(error, parent)
-                        })?;
-                    }
-                    let mut output = std::fs::File::create(&task.target)
-                        .map_err(|error| {
-                            crate::util::io::IOError::with_path(error, &task.target)
-                        })?;
-                    let written = crate::api::pack::archive_util::copy_with_cancellation(
+                    let written = crate::api::pack::archive_util::write_archive_entry_to_staging(
                         &mut entry,
-                        &mut output,
-                        cancellation,
                         &task.target,
+                        cancellation,
                     )?;
                     if written != entry.size() {
                         return Err(ErrorKind::InputError(
@@ -5375,7 +5369,29 @@ fn extract_modpack_overrides(
                 })?;
         }
         Ok(files_written)
-    })
+    });
+    match extraction_result {
+        Ok(files_written) => {
+            crate::api::pack::archive_util::commit_staged_archive_entries(
+                &targets,
+                cancellation,
+            )?;
+            Ok(files_written)
+        }
+        Err(error) => {
+            if let Err(cleanup_error) =
+                crate::api::pack::archive_util::discard_staged_archive_entries(
+                    &targets,
+                )
+            {
+                return Err(ErrorKind::OtherError(format!(
+                    "{error}; failed to clean staged CurseForge overrides: {cleanup_error}"
+                ))
+                .into());
+            }
+            Err(error)
+        }
+    }
 }
 
 fn read_modpack_manifest<R: Read + Seek>(
@@ -9556,6 +9572,27 @@ fn murmur2(data: &[u8], seed: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    fn write_override_test_archive(path: &Path, entries: &[(&str, &[u8])]) {
+        let file = std::fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        archive.start_file("manifest.json", options).unwrap();
+        archive
+            .write_all(
+                br#"{"minecraft":{"version":"1.21.1","modLoaders":[]},"files":[],"overrides":"overrides"}"#,
+            )
+            .unwrap();
+        for (name, contents) in entries {
+            archive
+                .start_file(format!("overrides/{name}"), options)
+                .unwrap();
+            archive.write_all(contents).unwrap();
+        }
+        archive.finish().unwrap();
+    }
 
     #[test]
     fn modpack_metadata_ids_are_deduplicated_before_batching() {
@@ -9581,6 +9618,78 @@ mod tests {
     #[test]
     fn modpack_archives_use_sixteen_h2_range_streams() {
         assert_eq!(curseforge_modpack_h2_range_concurrency(), Some(16));
+    }
+
+    #[test]
+    fn curseforge_overrides_publish_after_all_entries_validate() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("pack.zip");
+        let instance_path = root.path().join("instance");
+        let first = instance_path.join("config/first.txt");
+        let second = instance_path.join("config/second.txt");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"old-first").unwrap();
+        std::fs::write(&second, b"old-second").unwrap();
+        let corrupt_payload = b"unique-corrupt-override-payload";
+        write_override_test_archive(
+            &archive_path,
+            &[
+                ("config/first.txt", b"new-first"),
+                ("config/second.txt", corrupt_payload),
+            ],
+        );
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let offset = bytes
+            .windows(corrupt_payload.len())
+            .position(|window| window == corrupt_payload)
+            .unwrap();
+        bytes[offset] ^= 0xff;
+        std::fs::write(&archive_path, bytes).unwrap();
+
+        let error =
+            extract_modpack_overrides(&archive_path, &instance_path, None)
+                .unwrap_err();
+
+        assert!(
+            error.to_string().contains("CRC")
+                || error.to_string().contains("checksum")
+        );
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-second");
+        assert!(
+            !PathBuf::from(format!("{}.installing", first.display())).exists()
+        );
+        assert!(
+            !PathBuf::from(format!("{}.installing", second.display())).exists()
+        );
+    }
+
+    #[test]
+    fn curseforge_overrides_commit_successful_parallel_staging() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("pack.zip");
+        let instance_path = root.path().join("instance");
+        let target = instance_path.join("config/example.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"old").unwrap();
+        write_override_test_archive(
+            &archive_path,
+            &[("config/example.txt", b"replacement")],
+        );
+
+        let written =
+            extract_modpack_overrides(&archive_path, &instance_path, None)
+                .unwrap();
+
+        assert_eq!(written, 1);
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+        assert!(
+            !PathBuf::from(format!("{}.installing", target.display())).exists()
+        );
+        assert!(
+            !PathBuf::from(format!("{}.installing.previous", target.display()))
+                .exists()
+        );
     }
 
     #[tokio::test]

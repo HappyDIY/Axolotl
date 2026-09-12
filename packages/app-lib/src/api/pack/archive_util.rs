@@ -1,5 +1,6 @@
 //! Shared helpers for extracting content from local modpack archives.
 
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
 use super::detect::decode_zip_entry_name;
@@ -90,6 +91,43 @@ fn extract_archive_subdir_sync(
     target_dir: &Path,
     cancellation: Option<&CancellationToken>,
 ) -> crate::Result<u32> {
+    let mut replacements = HashMap::<PathBuf, Option<PathBuf>>::new();
+    let mut replacement_order = Vec::<PathBuf>::new();
+    let result = extract_archive_subdir_entries_sync(
+        archive_path,
+        prefix,
+        target_dir,
+        cancellation,
+        &mut replacements,
+        &mut replacement_order,
+    );
+    match result {
+        Ok(files_written) => {
+            finalize_archive_replacements(&replacements)?;
+            Ok(files_written)
+        }
+        Err(error) => {
+            if let Err(rollback_error) =
+                rollback_archive_replacements(&replacements, &replacement_order)
+            {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to restore archive extraction: {rollback_error}"
+                ))
+                .into());
+            }
+            Err(error)
+        }
+    }
+}
+
+fn extract_archive_subdir_entries_sync(
+    archive_path: &Path,
+    prefix: &str,
+    target_dir: &Path,
+    cancellation: Option<&CancellationToken>,
+    replacements: &mut HashMap<PathBuf, Option<PathBuf>>,
+    replacement_order: &mut Vec<PathBuf>,
+) -> crate::Result<u32> {
     let file = std::fs::File::open(archive_path)
         .map_err(|error| io::IOError::with_path(error, archive_path))?;
     let mut archive = zip::ZipArchive::new(file).map_err(archive_error)?;
@@ -119,12 +157,191 @@ fn extract_archive_subdir_sync(
             std::fs::create_dir_all(parent)
                 .map_err(|error| io::IOError::with_path(error, parent))?;
         }
-        let mut output = std::fs::File::create(&target)
-            .map_err(|error| io::IOError::with_path(error, &target))?;
-        copy_with_cancellation(&mut entry, &mut output, cancellation, &target)?;
+        write_archive_entry_atomically(
+            &mut entry,
+            &target,
+            cancellation,
+            replacements,
+            replacement_order,
+        )?;
         files_written = files_written.saturating_add(1);
     }
     Ok(files_written)
+}
+
+fn sibling_path(path: &Path, suffix: &str) -> PathBuf {
+    let mut sibling = path.as_os_str().to_os_string();
+    sibling.push(suffix);
+    PathBuf::from(sibling)
+}
+
+fn remove_file_if_exists(path: &Path) -> crate::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(io::IOError::with_path(error, path).into()),
+    }
+}
+
+fn write_archive_entry_atomically<R: std::io::Read>(
+    reader: &mut R,
+    target: &Path,
+    cancellation: Option<&CancellationToken>,
+    replacements: &mut HashMap<PathBuf, Option<PathBuf>>,
+    replacement_order: &mut Vec<PathBuf>,
+) -> crate::Result<u64> {
+    let written = write_archive_entry_to_staging(reader, target, cancellation)?;
+    materialize_staged_archive_entry(target, replacements, replacement_order)?;
+    Ok(written)
+}
+
+/// Writes one archive entry completely to a sibling staging file. This is
+/// safe to call from parallel extraction workers because it never mutates the
+/// live target.
+pub(crate) fn write_archive_entry_to_staging<R: std::io::Read>(
+    reader: &mut R,
+    target: &Path,
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<u64> {
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| io::IOError::with_path(error, parent))?;
+    }
+    let temporary = sibling_path(target, ".installing");
+    remove_file_if_exists(&temporary)?;
+    let write_result = (|| {
+        let mut output = std::fs::File::create(&temporary)
+            .map_err(|error| io::IOError::with_path(error, &temporary))?;
+        let written = copy_with_cancellation(
+            reader,
+            &mut output,
+            cancellation,
+            &temporary,
+        )?;
+        Ok::<_, crate::Error>(written)
+    })();
+    let written = match write_result {
+        Ok(written) => written,
+        Err(error) => {
+            let _ = remove_file_if_exists(&temporary);
+            return Err(error);
+        }
+    };
+    Ok(written)
+}
+
+fn materialize_staged_archive_entry(
+    target: &Path,
+    replacements: &mut HashMap<PathBuf, Option<PathBuf>>,
+    replacement_order: &mut Vec<PathBuf>,
+) -> crate::Result<()> {
+    let temporary = sibling_path(target, ".installing");
+    if replacements.contains_key(target) {
+        // Duplicate archive entries for the same normalized path replace the
+        // previous entry from this transaction, while the original pre-install
+        // backup remains untouched for rollback.
+        remove_file_if_exists(target)?;
+        if let Err(error) = std::fs::rename(&temporary, target) {
+            let _ = remove_file_if_exists(&temporary);
+            return Err(io::IOError::with_path(error, target).into());
+        }
+        return Ok(());
+    }
+
+    let backup = sibling_path(target, ".installing.previous");
+    remove_file_if_exists(&backup)?;
+    let previous = if target.exists() {
+        std::fs::rename(target, &backup)
+            .map_err(|error| io::IOError::with_path(error, target))?;
+        Some(backup)
+    } else {
+        None
+    };
+    if let Err(error) = std::fs::rename(&temporary, target) {
+        if let Some(previous) = previous.as_deref() {
+            let _ = std::fs::rename(previous, target);
+        }
+        let _ = remove_file_if_exists(&temporary);
+        return Err(io::IOError::with_path(error, target).into());
+    }
+    replacements.insert(target.to_path_buf(), previous);
+    replacement_order.push(target.to_path_buf());
+    Ok(())
+}
+
+/// Publishes a set of fully-written staging files as one rollback-capable
+/// batch. Targets must be unique. Cancellation before or during the short
+/// rename phase restores every target already replaced by this call.
+pub(crate) fn commit_staged_archive_entries(
+    targets: &[PathBuf],
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<()> {
+    let mut replacements = HashMap::<PathBuf, Option<PathBuf>>::new();
+    let mut replacement_order = Vec::<PathBuf>::new();
+    let result = (|| {
+        for target in targets {
+            check_cancellation(cancellation)?;
+            materialize_staged_archive_entry(
+                target,
+                &mut replacements,
+                &mut replacement_order,
+            )?;
+        }
+        check_cancellation(cancellation)
+    })();
+    if let Err(error) = result {
+        if let Err(rollback_error) =
+            rollback_archive_replacements(&replacements, &replacement_order)
+        {
+            return Err(crate::ErrorKind::OtherError(format!(
+                "{error}; failed to restore staged archive entries: {rollback_error}"
+            ))
+            .into());
+        }
+        let _ = discard_staged_archive_entries(targets);
+        return Err(error);
+    }
+    // Backup deletion happens after the transactional commit point. A cleanup
+    // failure must not invoke rollback because earlier backups may already be
+    // gone; the caller's install-level recovery can handle the reported error.
+    finalize_archive_replacements(&replacements)
+}
+
+pub(crate) fn discard_staged_archive_entries(
+    targets: &[PathBuf],
+) -> crate::Result<()> {
+    for target in targets {
+        remove_file_if_exists(&sibling_path(target, ".installing"))?;
+    }
+    Ok(())
+}
+
+fn finalize_archive_replacements(
+    replacements: &HashMap<PathBuf, Option<PathBuf>>,
+) -> crate::Result<()> {
+    for previous in replacements.values().flatten() {
+        remove_file_if_exists(previous)?;
+    }
+    Ok(())
+}
+
+fn rollback_archive_replacements(
+    replacements: &HashMap<PathBuf, Option<PathBuf>>,
+    replacement_order: &[PathBuf],
+) -> crate::Result<()> {
+    for target in replacement_order.iter().rev() {
+        remove_file_if_exists(target)?;
+        if let Some(previous) =
+            replacements.get(target).and_then(Option::as_ref)
+            && previous.exists()
+        {
+            std::fs::rename(previous, target)
+                .map_err(|error| io::IOError::with_path(error, target))?;
+        }
+        let temporary = sibling_path(target, ".installing");
+        remove_file_if_exists(&temporary)?;
+    }
+    Ok(())
 }
 
 pub(crate) fn check_cancellation(
@@ -252,6 +469,8 @@ pub(crate) async fn create_import_scratch_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+    use std::io::Write;
 
     struct CancelOnRead {
         cancellation: CancellationToken,
@@ -289,5 +508,178 @@ mod tests {
 
         assert!(error.to_string().contains("Install was canceled"));
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn canceled_atomic_entry_keeps_existing_target() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config/example.bin");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"previous").unwrap();
+        let cancellation = CancellationToken::new();
+        let mut reader = CancelOnRead {
+            cancellation: cancellation.clone(),
+            read: false,
+        };
+        let mut replacements = HashMap::new();
+        let mut order = Vec::new();
+
+        let error = write_archive_entry_atomically(
+            &mut reader,
+            &target,
+            Some(&cancellation),
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Install was canceled"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"previous");
+        assert!(!sibling_path(&target, ".installing").exists());
+        assert!(replacements.is_empty());
+    }
+
+    #[test]
+    fn archive_batch_rollback_restores_all_original_files() {
+        let root = tempfile::tempdir().unwrap();
+        let first = root.path().join("config/first.txt");
+        let second = root.path().join("config/second.txt");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"old-first").unwrap();
+        std::fs::write(&second, b"old-second").unwrap();
+        let mut replacements = HashMap::new();
+        let mut order = Vec::new();
+
+        write_archive_entry_atomically(
+            &mut Cursor::new(b"new-first"),
+            &first,
+            None,
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap();
+        write_archive_entry_atomically(
+            &mut Cursor::new(b"new-second"),
+            &second,
+            None,
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap();
+        rollback_archive_replacements(&replacements, &order).unwrap();
+
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-second");
+        assert!(!sibling_path(&first, ".installing.previous").exists());
+        assert!(!sibling_path(&second, ".installing.previous").exists());
+    }
+
+    #[test]
+    fn duplicate_archive_entries_preserve_preinstall_backup() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config/example.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"original").unwrap();
+        let mut replacements = HashMap::new();
+        let mut order = Vec::new();
+
+        write_archive_entry_atomically(
+            &mut Cursor::new(b"first-entry"),
+            &target,
+            None,
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap();
+        write_archive_entry_atomically(
+            &mut Cursor::new(b"second-entry"),
+            &target,
+            None,
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"second-entry");
+
+        rollback_archive_replacements(&replacements, &order).unwrap();
+        assert_eq!(std::fs::read(&target).unwrap(), b"original");
+    }
+
+    #[test]
+    fn successful_archive_batch_removes_previous_backups() {
+        let root = tempfile::tempdir().unwrap();
+        let target = root.path().join("config/example.txt");
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        std::fs::write(&target, b"original").unwrap();
+        let mut replacements = HashMap::new();
+        let mut order = Vec::new();
+
+        write_archive_entry_atomically(
+            &mut Cursor::new(b"replacement"),
+            &target,
+            None,
+            &mut replacements,
+            &mut order,
+        )
+        .unwrap();
+        finalize_archive_replacements(&replacements).unwrap();
+
+        assert_eq!(std::fs::read(&target).unwrap(), b"replacement");
+        assert!(!sibling_path(&target, ".installing.previous").exists());
+    }
+
+    #[test]
+    fn corrupt_later_zip_entry_rolls_back_earlier_replacements() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("pack.zip");
+        let target_dir = root.path().join("instance");
+        let first = target_dir.join("config/first.txt");
+        let second = target_dir.join("config/second.txt");
+        std::fs::create_dir_all(first.parent().unwrap()).unwrap();
+        std::fs::write(&first, b"old-first").unwrap();
+        std::fs::write(&second, b"old-second").unwrap();
+
+        let second_payload = b"unique-second-entry-payload";
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            archive
+                .start_file("overrides/config/first.txt", options)
+                .unwrap();
+            archive.write_all(b"new-first").unwrap();
+            archive
+                .start_file("overrides/config/second.txt", options)
+                .unwrap();
+            archive.write_all(second_payload).unwrap();
+            archive.finish().unwrap();
+        }
+        let mut bytes = std::fs::read(&archive_path).unwrap();
+        let payload_offset = bytes
+            .windows(second_payload.len())
+            .position(|window| window == second_payload)
+            .expect("stored ZIP payload should be directly addressable");
+        bytes[payload_offset] ^= 0xff;
+        std::fs::write(&archive_path, bytes).unwrap();
+
+        let error = extract_archive_subdir_sync(
+            &archive_path,
+            "overrides/",
+            &target_dir,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            error.to_string().contains("CRC")
+                || error.to_string().contains("checksum")
+        );
+        assert_eq!(std::fs::read(&first).unwrap(), b"old-first");
+        assert_eq!(std::fs::read(&second).unwrap(), b"old-second");
+        assert!(!sibling_path(&first, ".installing").exists());
+        assert!(!sibling_path(&first, ".installing.previous").exists());
+        assert!(!sibling_path(&second, ".installing").exists());
+        assert!(!sibling_path(&second, ".installing.previous").exists());
     }
 }
