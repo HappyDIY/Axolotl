@@ -38,7 +38,7 @@ let pressStart = { x: 0, y: 0 }
 let suppressNextMemberClick = false
 const replayOnboarding = inject<(mode: 'main' | 'instance') => Promise<void>>('replayOnboarding')
 
-const licenseUrl = `${AxolotlBrandConfig.repositoryUrl}/blob/main/LICENSE`
+const licenseUrl = `${AxolotlBrandConfig.repositoryUrl}/blob/main/apps/app/LICENSE`
 const thirdPartyLicensesUrl = `${AxolotlBrandConfig.repositoryUrl}/tree/main/third-party/licenses`
 
 async function copyQqGroupNumber() {
