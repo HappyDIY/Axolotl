@@ -8840,42 +8840,12 @@ fn spawn_curseforge_database_worker(
     tokio::spawn(async move {
         let cancellation = context.cancellation.clone();
         let result: crate::Result<()> = async {
-            let mut channel_closed = false;
-            while !channel_closed {
-                let first = tokio::select! {
-                    biased;
-                    _ = context.cancellation.cancelled() => {
-                        return Err(ErrorKind::OtherError(
-                            "CurseForge modpack database worker canceled".to_string(),
-                        ).into());
-                    }
-                    task = receiver.recv() => match task {
-                        Some(task) => task,
-                        None => break,
-                    },
-                };
-                let mut batch = Vec::with_capacity(MODPACK_DATABASE_BATCH_SIZE);
-                batch.push(first);
-                let deadline = tokio::time::Instant::now()
-                    + MODPACK_DATABASE_FLUSH_INTERVAL;
-                while batch.len() < MODPACK_DATABASE_BATCH_SIZE {
-                    tokio::select! {
-                        biased;
-                        _ = context.cancellation.cancelled() => {
-                            return Err(ErrorKind::OtherError(
-                                "CurseForge modpack database worker canceled".to_string(),
-                            ).into());
-                        }
-                        task = receiver.recv() => match task {
-                            Some(task) => batch.push(task),
-                            None => {
-                                channel_closed = true;
-                                break;
-                            }
-                        },
-                        _ = tokio::time::sleep_until(deadline) => break,
-                    }
-                }
+            while let Some(batch) = receive_curseforge_database_batch(
+                &mut receiver,
+                &context.cancellation,
+            )
+            .await?
+            {
                 persist_curseforge_database_batch(&batch, &context).await?;
             }
             Ok(())
@@ -8894,6 +8864,44 @@ fn spawn_curseforge_database_worker(
         }
         result
     })
+}
+
+async fn receive_curseforge_database_batch<T>(
+    receiver: &mut mpsc::Receiver<T>,
+    cancellation: &CancellationToken,
+) -> crate::Result<Option<Vec<T>>> {
+    let first = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(ErrorKind::OtherError(
+                "CurseForge modpack database worker canceled".to_string(),
+            ).into());
+        }
+        task = receiver.recv() => match task {
+            Some(task) => task,
+            None => return Ok(None),
+        },
+    };
+    let mut batch = Vec::with_capacity(MODPACK_DATABASE_BATCH_SIZE);
+    batch.push(first);
+    let deadline =
+        tokio::time::Instant::now() + MODPACK_DATABASE_FLUSH_INTERVAL;
+    while batch.len() < MODPACK_DATABASE_BATCH_SIZE {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {
+                // Return the partial batch so the persistence layer can
+                // restore every file that was already materialized.
+                break;
+            }
+            task = receiver.recv() => match task {
+                Some(task) => batch.push(task),
+                None => break,
+            },
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    Ok(Some(batch))
 }
 
 async fn download_installed_file(
@@ -9874,6 +9882,30 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("canceled"));
+    }
+
+    #[tokio::test]
+    async fn curseforge_database_batch_is_retained_when_canceled_mid_batch() {
+        let cancellation = CancellationToken::new();
+        let (sender, mut receiver) = mpsc::channel(2);
+        sender.send(7_u8).await.unwrap();
+        let trigger = cancellation.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel();
+        });
+
+        let batch = tokio::time::timeout(
+            Duration::from_millis(100),
+            receive_curseforge_database_batch(&mut receiver, &cancellation),
+        )
+        .await
+        .expect("partial database batch should be returned on cancellation")
+        .unwrap()
+        .unwrap();
+        cancel_task.await.unwrap();
+
+        assert_eq!(batch, vec![7]);
     }
 
     #[test]
