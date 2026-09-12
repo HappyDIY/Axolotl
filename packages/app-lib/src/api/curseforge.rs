@@ -8986,27 +8986,34 @@ async fn download_installed_file(
     }
     if defer_persistence {
         if let Some(sender) = verification_tx {
-            sender
-                .send(CurseForgeVerificationTask {
-                    instance_id: instance_id.to_string(),
-                    relative_path: relative_path.clone(),
-                    download_path: download_path.to_path_buf(),
-                    full_path: full_path.clone(),
-                    file: file.clone(),
-                    project_type,
-                    ownership_kind,
-                    expected_bytes: file.file_length,
-                    cancellation: download_metrics
-                        .and_then(|metrics| metrics.reporter.as_ref())
-                        .map(InstallProgressReporter::cancellation_token)
-                        .unwrap_or_default(),
-                })
-                .await
-                .map_err(|_| {
-                    ErrorKind::OtherError(
+            let cancellation = download_metrics
+                .and_then(|metrics| metrics.reporter.as_ref())
+                .map(InstallProgressReporter::cancellation_token)
+                .unwrap_or_default();
+            let verification_task = CurseForgeVerificationTask {
+                instance_id: instance_id.to_string(),
+                relative_path: relative_path.clone(),
+                download_path: download_path.to_path_buf(),
+                full_path: full_path.clone(),
+                file: file.clone(),
+                project_type,
+                ownership_kind,
+                expected_bytes: file.file_length,
+                cancellation: cancellation.clone(),
+            };
+            tokio::select! {
+                biased;
+                _ = cancellation.cancelled() => {
+                    return Err(ErrorKind::OtherError(
+                        "curseforge verification enqueue canceled".to_string(),
+                    ).into());
+                }
+                result = sender.send(verification_task) => {
+                    result.map_err(|_| ErrorKind::OtherError(
                         "curseforge verification worker stopped".to_string(),
-                    )
-                })?;
+                    ))?;
+                }
+            }
         }
         return Ok(DownloadedCurseForgeFile { relative_path });
     }
