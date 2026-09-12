@@ -65,6 +65,21 @@ fn set_env() {
         });
 
     if let Some(data_dir_suffix) = data_dir_suffix {
+        // brand::data_dir_identifier drops every character that is not ASCII
+        // alphanumeric or `-_.` and then trims dots and dashes off both ends, so
+        // a suffix holding none of what survives sanitizes to nothing and the
+        // build would fall back to the installed launcher's own data directory -
+        // exactly the state this variable exists to avoid. Stop the build
+        // instead of letting that happen silently.
+        if !data_dir_suffix.chars().any(|character| {
+            character.is_ascii_alphanumeric() || character == '_'
+        }) {
+            println!(
+                "cargo::error={DATA_DIR_SUFFIX_VAR} leaves no usable directory name, so this build would use the installed launcher's data directory"
+            );
+            exit(1);
+        }
+
         println!("cargo::rustc-env={DATA_DIR_SUFFIX_VAR}={data_dir_suffix}");
     }
 }

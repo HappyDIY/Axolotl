@@ -105,7 +105,7 @@ node scripts/axolotl/downgrade-app-db.mjs --suffix pr538 --to 20260903120000 --a
 
 - 只认识登记在案的迁移结构。遇到未登记的迁移会**拒绝执行**，因为删掉记录却留下它建的列/表，会让重新安装该构建时因对象重复而失败；确认无碍时用 `--allow-unmapped` 显式放行。
 - 若某个已登记迁移对应的列在库里不存在，说明登记的表结构与数据库不符（版本号被复用、列被改名等），脚本同样拒绝执行。
-- 新增**列**的迁移时，请在 `scripts/axolotl/downgrade-app-db.mjs` 的 `REVERTIBLE_COLUMNS` 里登记，否则无法自动回退。新增**表**的迁移目前没有登记机制，只能手工处理。
+- 新增**列**的迁移时，请在 `scripts/axolotl/downgrade-app-db.mjs` 的 `REVERTIBLE_COLUMNS` 里登记它建的每一列，否则越过它的降级会被拒绝。只做数据增删（DELETE/UPDATE）的迁移也要登记一个空数组——它没有列可删，但登记了才不会挡住降级。新增**表**的迁移目前没有登记机制，只能手工处理。
 
 该脚本依赖 Node 内置的 `node:sqlite`，并要求 Windows（解析默认数据目录需要 `APPDATA`；其他平台请用 `--db` 指定路径）。
 

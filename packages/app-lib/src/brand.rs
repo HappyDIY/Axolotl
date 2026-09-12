@@ -27,7 +27,9 @@ pub fn app_data_dir_identifier(app_identifier: &str) -> String {
 ///
 /// The result becomes a directory name, so anything that could escape the data
 /// directory (path separators, drive letters, traversal) is dropped rather than
-/// escaped. A suffix that leaves nothing usable behind is ignored entirely.
+/// escaped. A suffix that leaves nothing usable behind is ignored entirely -
+/// `build.rs` refuses such a value before it can reach a build, so this fallback
+/// is only reachable from a direct call.
 fn data_dir_identifier(base: &str, suffix: Option<&str>) -> String {
     let Some(suffix) = suffix else {
         return base.to_string();

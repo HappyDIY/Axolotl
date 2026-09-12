@@ -42,16 +42,34 @@ const SETTINGS_DIR_NAME = 'red.ghs.axolotl'
 const APP_DB = 'app.db'
 const CHANNELS = ['release', 'beta']
 
-// Schema added by known migrations, used to undo it. An entry is required for
-// every migration that adds a column: `ALTER TABLE ... ADD COLUMN` cannot be
-// reversed in place, and leaving the column behind breaks the next install of a
-// build that carries the migration. Migrations that only move data (DELETE,
-// UPDATE) need no entry, because replaying them changes nothing.
+// Schema added by known migrations, used to undo it. Every migration a
+// downgrade is allowed to pass needs an entry here: `ALTER TABLE ... ADD COLUMN`
+// cannot be reversed in place, and leaving the column behind breaks the next
+// install of a build that carries the migration. A migration that only moves
+// data (DELETE, UPDATE) gets an empty list - there is nothing to drop, but
+// naming it keeps the downgrade from stopping on a migration it could pass.
+//
+// Only recent migrations are listed. Dropping to a threshold before them is
+// refused rather than guessed at; --allow-unmapped accepts the risk explicitly.
 const REVERTIBLE_COLUMNS = {
 	// settings.close_behavior
 	20260903120000: [{ table: 'settings', column: 'close_behavior' }],
-	// settings.log_level; the migration ships with the log retention work
-	20260909010000: [{ table: 'settings', column: 'log_level' }],
+	// instances: the direct link columns
+	20260904120000: [
+		{ table: 'instances', column: 'linked_launcher' },
+		{ table: 'instances', column: 'linked_launcher_root' },
+		{ table: 'instances', column: 'linked_dot_minecraft' },
+		{ table: 'instances', column: 'linked_version_id' },
+		{ table: 'instances', column: 'linked_version_json_path' },
+	],
+	// telemetry samples; the tables stay, so nothing to drop
+	20260905000000: [],
+	// settings.mc_maximize_window
+	20260908000000: [{ table: 'settings', column: 'mc_maximize_window' }],
+	// instances.linked_game_dir_mode
+	20260908010000: [{ table: 'instances', column: 'linked_game_dir_mode' }],
+	// crash_analysis_ai_settings.ai_source
+	20260911120000: [{ table: 'crash_analysis_ai_settings', column: 'ai_source' }],
 }
 
 function fail(message) {
@@ -134,10 +152,13 @@ function printUsage() {
 }
 
 // Mirrors the sanitizing in packages/app-lib/src/brand.rs so a suffix typed here
-// names the same directory the build wrote to.
+// names the same directory the build wrote to. The order matters: that function
+// trims the dots and dashes off both ends *before* the length cap, so a run of
+// them cannot spend the allowance and hide the characters after it.
 function sanitizeSuffix(suffix) {
 	return suffix
 		.replace(/[^A-Za-z0-9._-]/g, '')
+		.replace(/^[.-]+|[.-]+$/g, '')
 		.slice(0, 32)
 		.replace(/^[.-]+|[.-]+$/g, '')
 }

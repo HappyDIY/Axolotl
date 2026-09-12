@@ -15,10 +15,10 @@ import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 
 const script = fileURLToPath(new URL('downgrade-app-db.mjs', import.meta.url))
+const migrationsDir = fileURLToPath(new URL('../../packages/app-lib/migrations', import.meta.url))
 const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'axolotl-downgrade-'))
 
 const CLOSE_BEHAVIOR = 20260903120000
-const LOG_LEVEL = 20260909010000
 const UNMAPPED = 20260101000000
 
 // THESEUS_CONFIG_DIR takes priority over the platform directories, so the tests
@@ -90,8 +90,8 @@ function backupsOf(file) {
 		.filter((name) => name.startsWith(`${path.basename(file)}.before-downgrade-`))
 }
 
-function check(name, condition) {
-	assert.ok(condition, name)
+function check(name, condition, detail) {
+	assert.ok(condition, detail ? `${name}: ${detail}` : name)
 	console.log(`  ok  ${name}`)
 }
 
@@ -267,6 +267,34 @@ console.log('resolving the settings directory')
 	const result = run(['--to', String(CLOSE_BEHAVIOR)], { configDir: empty })
 	check('an empty directory needs an explicit channel', result.status === 1)
 	check('and says which flag to pass', result.output.includes('--channel'))
+}
+
+// --- keeping the migration mapping honest -------------------------------------
+
+console.log('keeping the migration mapping honest')
+{
+	const source = fs.readFileSync(script, 'utf8')
+	const block = source.slice(source.indexOf('const REVERTIBLE_COLUMNS = {'))
+	const body = block.slice(0, block.indexOf('\n}'))
+	const registered = [...body.matchAll(/^\t(\d{14}):/gm)].map((match) => Number(match[1]))
+
+	const files = fs.readdirSync(migrationsDir).filter((name) => name.endsWith('.sql'))
+	const versions = files.map((name) => Number(name.slice(0, 14)))
+
+	// A mapping for a migration that does not exist is dead weight: it can never
+	// match anything, and it makes the table look considered when it is not.
+	const unknown = registered.filter((version) => !versions.includes(version))
+	check('every mapped migration exists', unknown.length === 0, unknown.join(', '))
+
+	// The script refuses any applied migration it has no mapping for, so a
+	// column added without one turns the documented recovery into a refusal.
+	const oldest = Math.min(...registered)
+	const addingColumns = files
+		.filter((name) => /ADD COLUMN/i.test(fs.readFileSync(path.join(migrationsDir, name), 'utf8')))
+		.map((name) => Number(name.slice(0, 14)))
+		.filter((version) => version >= oldest)
+	const unmapped = addingColumns.filter((version) => !registered.includes(version))
+	check('every migration that adds a column is mapped', unmapped.length === 0, unmapped.join(', '))
 }
 
 // --- refusing a database a running launcher holds open ------------------------
