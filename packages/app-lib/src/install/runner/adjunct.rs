@@ -262,6 +262,9 @@ pub(crate) async fn install_optifabric_file(
             excluded_dependency_project_ids: Vec::new(),
             force_dependency_project_ids: Vec::new(),
             dependency_plan_id: None,
+            defer_persistence: false,
+            verification_tx: None,
+            pre_resolved_relative_path: None,
         },
     )
     .await?;

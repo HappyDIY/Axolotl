@@ -1850,6 +1850,36 @@ impl CachedEntry {
             return;
         }
 
+        // SQLite only permits one writer. Fetched API cache data is
+        // reconstructible, so never let it enter the gaps between install
+        // database batches and delay the next content registration. Outside
+        // an active install, coordinate refreshes so SQLx does not start
+        // dozens of INSERT statements waiting on the same write lock.
+        // Standalone cache tests can run without global application state and
+        // simply use SQLite's normal locking.
+        let app_state = crate::State::get_if_initialized();
+        let _write_permit = match app_state.as_ref() {
+            Some(state) if !state.install_job_cancellations.is_empty() => {
+                tracing::debug!(
+                    cache_type = ?type_,
+                    entry_count = entries.len(),
+                    "Skipping cache persistence while an install is active"
+                );
+                return;
+            }
+            Some(state) => match state.install_db_semaphore.try_acquire() {
+                Ok(permit) => Some(permit),
+                Err(_) => {
+                    tracing::debug!(
+                        cache_type = ?type_,
+                        entry_count = entries.len(),
+                        "Skipping cache refresh while database writer is busy"
+                    );
+                    return;
+                }
+            },
+            None => None,
+        };
         if let Err(error) = Self::upsert_many(entries, pool).await {
             Self::log_cache_write_failure(
                 type_,
@@ -3327,22 +3357,47 @@ impl CachedEntry {
         project_ids: Vec<String>,
         pool: &SqlitePool,
     ) -> crate::Result<()> {
+        let entry =
+            Self::modpack_files_entry(version_id, file_hashes, project_ids);
+        Self::upsert_many(&[entry], pool).await
+    }
+
+    pub(crate) async fn cache_modpack_files_best_effort(
+        version_id: &str,
+        file_hashes: Vec<String>,
+        project_ids: Vec<String>,
+        pool: &SqlitePool,
+    ) {
+        let entry =
+            Self::modpack_files_entry(version_id, file_hashes, project_ids);
+        Self::persist_fetched_cache_best_effort(
+            CacheValueType::ModpackFiles,
+            &[entry],
+            pool,
+            CacheRefreshSource::Foreground,
+        )
+        .await;
+    }
+
+    fn modpack_files_entry(
+        version_id: &str,
+        file_hashes: Vec<String>,
+        project_ids: Vec<String>,
+    ) -> CachedEntry {
         let data = CachedModpackFiles {
             version_id: version_id.to_string(),
             file_hashes,
             project_ids,
         };
 
-        let entry = CachedEntry {
+        CachedEntry {
             id: version_id.to_string(),
             alias: None,
             expires: Utc::now().timestamp()
                 + CacheValueType::ModpackFiles.expiry(),
             type_: CacheValueType::ModpackFiles,
             data: Some(CacheValue::ModpackFiles(data)),
-        };
-
-        Self::upsert_many(&[entry], pool).await
+        }
     }
 
     /// Get modpack file hashes from cache

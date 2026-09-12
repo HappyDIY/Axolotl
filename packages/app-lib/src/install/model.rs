@@ -45,7 +45,9 @@ pub struct InstallJobState {
     pub context: Option<InstallErrorContext>,
     #[serde(default)]
     pub events: Vec<InstallJobEvent>,
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    /// Live request state used for progress snapshots. Download resumption is
+    /// based on persisted events and filesystem state, not partial byte counts.
+    #[serde(skip)]
     pub active_downloads: HashMap<String, ActiveDownloadState>,
     #[serde(default)]
     pub display: Option<InstallJobDisplay>,
@@ -806,6 +808,36 @@ mod tests {
             phase: InstallPhaseId::DownloadingMinecraft,
         });
         assert!(job.active_downloads.is_empty());
+    }
+
+    #[test]
+    fn active_downloads_are_not_persisted() {
+        let mut job = job_state();
+        job.active_downloads.insert(
+            "client.jar".to_string(),
+            ActiveDownloadState {
+                name: "client.jar".to_string(),
+                url: "https://piston-data.mojang.com/client.jar".to_string(),
+                source: "official".to_string(),
+                bytes_downloaded: 400,
+                bytes_total: Some(1_000),
+                attempt: 1,
+                max_attempts: 3,
+                status: DownloadItemStatus::Downloading,
+                last_reported_bytes: 400,
+                last_progress_at: Utc::now(),
+                speed_bytes_per_second: Some(200),
+                speed_sample_started_at: Utc::now(),
+                speed_sample_started_bytes: 400,
+            },
+        );
+
+        let serialized = serde_json::to_value(&job).unwrap();
+        assert!(serialized.get("active_downloads").is_none());
+
+        let restored: InstallJobState =
+            serde_json::from_value(serialized).unwrap();
+        assert!(restored.active_downloads.is_empty());
     }
 
     #[test]

@@ -54,6 +54,7 @@ pub(crate) use self::launch_context::*;
 
 mod apply_content_install;
 pub(crate) use self::apply_content_install::*;
+pub(crate) use apply_content_install::ProjectFileRecord;
 
 mod check_content_updates;
 
