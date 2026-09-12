@@ -58,24 +58,17 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-      - name: Set up Rust compiler cache
-        if: runner.os == 'Windows'
-        uses: mozilla-actions/sccache-action@2df7dbab909c49ab7d3382d05da469f3f975c2d6 # v0.0.7
-      - name: Check Rust compiler cache availability
-        id: sccache
-        if: runner.os == 'Windows'
-        continue-on-error: true
-        shell: bash
-        env:
-          SCCACHE_GHA_ENABLED: 'true'
-        run: ${SCCACHE_PATH} rustc -vV
-      - name: Enable Rust compiler cache
-        if: runner.os == 'Windows' && steps.sccache.outcome == 'success'
-        shell: bash
-        run: |
-          echo 'RUSTC_WRAPPER=sccache' >> "$GITHUB_ENV"
-          echo 'SCCACHE_GHA_ENABLED=true' >> "$GITHUB_ENV"
-          echo 'SCCACHE_CACHE_SIZE=4G' >> "$GITHUB_ENV"
+      # Replaces an sccache setup whose startup probe failed on every run:
+      # the shared cache service rejected it, the enable step was skipped, and
+      # Windows rebuilt the whole dependency tree uncached (~56 minutes).
+      # The shared key deliberately matches the release workflow's build job,
+      # so tagged releases can restore the cache this job keeps warm on main.
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: axolotl-rust-deps
+          # A failing build still warms the cache for the next attempt.
+          cache-on-failure: true
       - if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
       - run: pnpm install --frozen-lockfile
@@ -111,10 +104,6 @@ jobs:
             throw "Expected one native NSIS installer, found $($installers.Count)"
           }
           Write-Output "Built native NSIS installer: $($installers[0].Name)"
-      - name: Show Rust compiler cache statistics
-        if: runner.os == 'Windows' && steps.sccache.outcome == 'success' && always()
-        shell: bash
-        run: ${SCCACHE_PATH} --show-stats
 
   website:
     needs: guardrails

@@ -4538,6 +4538,141 @@
   "ui.confirm-leave-modal.title": {
     "defaultMessage": "Leave page?"
   },
+  "ui.keybinding-modal.alt": {
+    "defaultMessage": "Alt"
+  },
+  "ui.keybinding-modal.cancel": {
+    "defaultMessage": "Cancel"
+  },
+  "ui.keybinding-modal.capture-hint": {
+    "defaultMessage": "Then press the keys you want this shortcut to use."
+  },
+  "ui.keybinding-modal.capture-title": {
+    "defaultMessage": "Click here to record"
+  },
+  "ui.keybinding-modal.current": {
+    "defaultMessage": "Current shortcut"
+  },
+  "ui.keybinding-modal.device-keyboard": {
+    "defaultMessage": "Keyboard"
+  },
+  "ui.keybinding-modal.device-mouse": {
+    "defaultMessage": "Mouse"
+  },
+  "ui.keybinding-modal.group-digits": {
+    "defaultMessage": "Digits"
+  },
+  "ui.keybinding-modal.group-function": {
+    "defaultMessage": "Function keys"
+  },
+  "ui.keybinding-modal.group-letters": {
+    "defaultMessage": "Letters"
+  },
+  "ui.keybinding-modal.group-mouse-buttons": {
+    "defaultMessage": "Buttons"
+  },
+  "ui.keybinding-modal.group-navigation": {
+    "defaultMessage": "Navigation keys"
+  },
+  "ui.keybinding-modal.group-punctuation": {
+    "defaultMessage": "Punctuation"
+  },
+  "ui.keybinding-modal.group-wheel": {
+    "defaultMessage": "Wheel"
+  },
+  "ui.keybinding-modal.issue-conflict": {
+    "defaultMessage": "Already used by {label}."
+  },
+  "ui.keybinding-modal.issue-needs-modifier": {
+    "defaultMessage": "Hold Ctrl/Cmd, Alt or Shift as well, or pick a function or navigation key."
+  },
+  "ui.keybinding-modal.issue-reserved": {
+    "defaultMessage": "{label} is reserved by the launcher."
+  },
+  "ui.keybinding-modal.listening-hint": {
+    "defaultMessage": "Press the keys you want to use."
+  },
+  "ui.keybinding-modal.listening-title": {
+    "defaultMessage": "Listening…"
+  },
+  "ui.keybinding-modal.mismatch": {
+    "defaultMessage": "That was a different combination, so recording started again."
+  },
+  "ui.keybinding-modal.mod": {
+    "defaultMessage": "Ctrl/Cmd"
+  },
+  "ui.keybinding-modal.modifiers": {
+    "defaultMessage": "Modifiers"
+  },
+  "ui.keybinding-modal.mouse-back": {
+    "defaultMessage": "Back button"
+  },
+  "ui.keybinding-modal.mouse-forward": {
+    "defaultMessage": "Forward button"
+  },
+  "ui.keybinding-modal.mouse-left": {
+    "defaultMessage": "Left click"
+  },
+  "ui.keybinding-modal.mouse-middle": {
+    "defaultMessage": "Middle click"
+  },
+  "ui.keybinding-modal.mouse-right": {
+    "defaultMessage": "Right click"
+  },
+  "ui.keybinding-modal.nothing-captured": {
+    "defaultMessage": "No key was recorded."
+  },
+  "ui.keybinding-modal.restore-default": {
+    "defaultMessage": "Restore default"
+  },
+  "ui.keybinding-modal.save": {
+    "defaultMessage": "Save"
+  },
+  "ui.keybinding-modal.shift": {
+    "defaultMessage": "Shift"
+  },
+  "ui.keybinding-modal.special-hint": {
+    "defaultMessage": "Mouse buttons, the wheel and combinations with them can only be picked here."
+  },
+  "ui.keybinding-modal.title": {
+    "defaultMessage": "Set a shortcut"
+  },
+  "ui.keybinding-modal.title-for": {
+    "defaultMessage": "Shortcut for {action}"
+  },
+  "ui.keybinding-modal.tree-label": {
+    "defaultMessage": "Inputs a shortcut can use"
+  },
+  "ui.keybinding-modal.unset": {
+    "defaultMessage": "Not set"
+  },
+  "ui.keybinding-modal.use-capture": {
+    "defaultMessage": "Record a combination instead"
+  },
+  "ui.keybinding-modal.use-special": {
+    "defaultMessage": "Pick an input another way"
+  },
+  "ui.keybinding-modal.verified-hint": {
+    "defaultMessage": "Confirmed. Save to use this shortcut."
+  },
+  "ui.keybinding-modal.verified-title": {
+    "defaultMessage": "Confirmed"
+  },
+  "ui.keybinding-modal.verifying-hint": {
+    "defaultMessage": "This checks the combination was recorded correctly."
+  },
+  "ui.keybinding-modal.verifying-title": {
+    "defaultMessage": "Press it again to confirm"
+  },
+  "ui.keybinding-modal.wheel-down": {
+    "defaultMessage": "Wheel down"
+  },
+  "ui.keybinding-modal.wheel-up": {
+    "defaultMessage": "Wheel up"
+  },
+  "ui.scroll-to-top.tooltip": {
+    "defaultMessage": "Scroll to top"
+  },
   "ui.stacked-admonitions.alert-count": {
     "defaultMessage": "{count, plural, one {# alert} other {# alerts}}"
   },

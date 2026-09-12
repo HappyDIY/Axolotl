@@ -7,6 +7,7 @@ import {
 	GameIcon,
 	GaugeIcon,
 	InfoIcon,
+	KeyboardIcon,
 	LanguagesIcon,
 	LayoutTemplateIcon,
 	PaintbrushIcon,
@@ -54,6 +55,10 @@ const categoryContent: Record<SettingsCategoryId, Pick<SettingsCategory, 'icon' 
 		content: defineAsyncComponent(() => import('./LanguageTranslationSettings.vue')),
 	},
 	ai: { icon: BotIcon, content: defineAsyncComponent(() => import('./AISettings.vue')) },
+	'shortcut-settings': {
+		icon: KeyboardIcon,
+		content: defineAsyncComponent(() => import('./KeybindSettings.vue')),
+	},
 	'java-performance': {
 		icon: CoffeeIcon,
 		content: defineAsyncComponent(() => import('./JavaSettings.vue')),

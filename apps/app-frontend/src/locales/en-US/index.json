@@ -542,6 +542,12 @@
   "app.appearance-settings.show-play-time.title": {
     "message": "Show play time"
   },
+  "app.appearance-settings.show-scroll-top.description": {
+    "message": "Show a floating back-to-top button on scrollable pages."
+  },
+  "app.appearance-settings.show-scroll-top.title": {
+    "message": "Show \u201cback to top\u201d button"
+  },
   "app.appearance-settings.sidebar-instance-count.description": {
     "message": "Maximum number of instances to show in the sidebar. Set to 0 to show all."
   },
@@ -1031,9 +1037,6 @@
   "app.crash-analysis.ai.error": {
     "message": "AI explanation failed: {message}"
   },
-  "app.crash-analysis.ai.settings.description": {
-    "message": "Optionally send a sanitized and shortened crash context to a model configured in AI Providers."
-  },
   "app.crash-analysis.ai.settings.enabled": {
     "message": "Enable AI explanations"
   },
@@ -1048,9 +1051,6 @@
   },
   "app.crash-analysis.ai.settings.provider": {
     "message": "AI provider"
-  },
-  "app.crash-analysis.ai.settings.title": {
-    "message": "Crash AI explanation"
   },
   "app.crash-analysis.ai.title": {
     "message": "AI crash explanation"
@@ -4922,6 +4922,111 @@
   "app.library.view.standard": {
     "message": "Standard grid"
   },
+  "app.log-share.ai.action": {
+    "message": "Deep AI analysis"
+  },
+  "app.log-share.ai.failed": {
+    "message": "LogAgent analysis failed: {message}"
+  },
+  "app.log-share.ai.limit": {
+    "message": "Reached tool loop limit"
+  },
+  "app.log-share.ai.queued": {
+    "message": "Queued, about {position} ahead"
+  },
+  "app.log-share.ai.queued-front": {
+    "message": "Queued, waiting for a free slot"
+  },
+  "app.log-share.ai.thinking": {
+    "message": "Thinking…"
+  },
+  "app.log-share.ai.tool": {
+    "message": "Using tool: {name}"
+  },
+  "app.log-share.ai.tool-result": {
+    "message": "Tool result received"
+  },
+  "app.log-share.ai.working": {
+    "message": "Analyzing with LogAgent…"
+  },
+  "app.log-share.settings.ai-source": {
+    "message": "AI analysis source"
+  },
+  "app.log-share.settings.ai-source-custom": {
+    "message": "Custom AI provider"
+  },
+  "app.log-share.settings.ai-source-description": {
+    "message": "LogShare AI performs a cloud analysis; Custom uses the provider configured below."
+  },
+  "app.log-share.settings.ai-source-logshare": {
+    "message": "LogShare AI"
+  },
+  "app.log-share.settings.auto-upload": {
+    "message": "Upload to get a structured summary automatically"
+  },
+  "app.log-share.settings.auto-upload-description": {
+    "message": "Only effective in LogShare AI mode."
+  },
+  "app.log-share.settings.description": {
+    "message": "Share crash diagnostics with LogShare for a structured summary and optional AI analysis. LogShare is preferred; mclo.gs is used as a fallback."
+  },
+  "app.log-share.settings.multi-file": {
+    "message": "Multi-file upload"
+  },
+  "app.log-share.settings.multi-file-description": {
+    "message": "Upload latest.log, crash reports, hs_err and launcher logs together."
+  },
+  "app.log-share.settings.no-storage": {
+    "message": "Analyze without storing logs"
+  },
+  "app.log-share.settings.no-storage-description": {
+    "message": "Submit content directly for analysis and skip the stored upload. Disables the automatic summary."
+  },
+  "app.log-share.settings.share-provider": {
+    "message": "Log sharing service"
+  },
+  "app.log-share.settings.share-provider-description": {
+    "message": "Where the diagnostic link is uploaded when you share it."
+  },
+  "app.log-share.settings.show-progress": {
+    "message": "Show AI analysis progress"
+  },
+  "app.log-share.settings.show-progress-description": {
+    "message": "Display thinking, tool and limit status while LogAgent is working."
+  },
+  "app.log-share.settings.title": {
+    "message": "Log sharing & AI analysis"
+  },
+  "app.log-share.shared-logs.delete": {
+    "message": "Delete"
+  },
+  "app.log-share.shared-logs.delete-failed": {
+    "message": "Failed to delete the shared log."
+  },
+  "app.log-share.shared-logs.deleted": {
+    "message": "Shared log removed."
+  },
+  "app.log-share.shared-logs.deleting": {
+    "message": "Deleting…"
+  },
+  "app.log-share.shared-logs.description": {
+    "message": "Every diagnostic you have shared is listed here. Delete an entry to remove it from your history and request its removal from the sharing service."
+  },
+  "app.log-share.shared-logs.empty": {
+    "message": "No shared logs yet."
+  },
+  "app.log-share.shared-logs.title": {
+    "message": "Shared logs"
+  },
+  "app.log-share.shared-logs.truncated": {
+    "message": "Truncated"
+  },
+  "app.log-share.summary.loading": {
+    "message": "Loading structured summary…"
+  },
+  "app.log-share.summary.title": {
+    "message": "LogShare analysis"
+  },
   "app.memory-display.available": {
     "message": "{memory} available"
   },
@@ -5152,6 +5257,9 @@
   },
   "app.minecraft-crash.share-failed": {
     "message": "Failed to share the diagnostic"
+  },
+  "app.minecraft-crash.share-fallback": {
+    "message": "LogShare is unavailable, so the diagnostic was shared via mclo.gs."
   },
   "app.minecraft-crash.share-ready": {
     "message": "Diagnostic link is ready to share"
@@ -7507,6 +7615,111 @@
   },
   "app.settings.tabs.language-translation": {
     "message": "Language & translation"
+  },
+  "app.settings.tabs.shortcut-settings": {
+    "message": "Shortcut settings"
+  },
+  "app.shortcut-settings.change-shortcut": {
+    "message": "Change the shortcut for {action}"
+  },
+  "app.shortcut-settings.end-action": {
+    "message": "Scroll to the bottom"
+  },
+  "app.shortcut-settings.end-action-description": {
+    "message": "Moves the page you are reading to the bottom."
+  },
+  "app.shortcut-settings.enable": {
+    "message": "Enable quick scrolling"
+  },
+  "app.shortcut-settings.home-action": {
+    "message": "Scroll to the top"
+  },
+  "app.shortcut-settings.home-action-description": {
+    "message": "Moves the page you are reading to the top."
+  },
+  "app.shortcut-settings.nav-create": {
+    "message": "Create new instance"
+  },
+  "app.shortcut-settings.nav-create-description": {
+    "message": "Jump to creating a new instance."
+  },
+  "app.shortcut-settings.nav-description": {
+    "message": "Jump to a menu item with its shortcut. Each shortcut is off until enabled."
+  },
+  "app.shortcut-settings.nav-discover": {
+    "message": "Discover content"
+  },
+  "app.shortcut-settings.nav-discover-description": {
+    "message": "Jump to browsing content."
+  },
+  "app.shortcut-settings.nav-downloads": {
+    "message": "Downloads"
+  },
+  "app.shortcut-settings.nav-downloads-description": {
+    "message": "Jump to downloads."
+  },
+  "app.shortcut-settings.nav-home": {
+    "message": "Home"
+  },
+  "app.shortcut-settings.nav-home-description": {
+    "message": "Jump to the Home page."
+  },
+  "app.shortcut-settings.nav-lab": {
+    "message": "Lab"
+  },
+  "app.shortcut-settings.nav-lab-description": {
+    "message": "Jump to the Lab."
+  },
+  "app.shortcut-settings.nav-library": {
+    "message": "Library"
+  },
+  "app.shortcut-settings.nav-library-description": {
+    "message": "Jump to your library."
+  },
+  "app.shortcut-settings.nav-multiplayer": {
+    "message": "Multiplayer"
+  },
+  "app.shortcut-settings.nav-multiplayer-description": {
+    "message": "Jump to multiplayer."
+  },
+  "app.shortcut-settings.nav-settings": {
+    "message": "Settings"
+  },
+  "app.shortcut-settings.nav-settings-description": {
+    "message": "Jump to the settings."
+  },
+  "app.shortcut-settings.nav-skins": {
+    "message": "Skin selector"
+  },
+  "app.shortcut-settings.nav-skins-description": {
+    "message": "Jump to the skin selector."
+  },
+  "app.shortcut-settings.nav-title": {
+    "message": "Navigation shortcuts"
+  },
+  "app.shortcut-settings.nav-worlds": {
+    "message": "Worlds"
+  },
+  "app.shortcut-settings.nav-worlds-description": {
+    "message": "Jump to your worlds."
+  },
+  "app.shortcut-settings.page-down-action": {
+    "message": "Scroll down one screen"
+  },
+  "app.shortcut-settings.page-down-action-description": {
+    "message": "Moves the page you are reading down by one screen."
+  },
+  "app.shortcut-settings.page-up-action": {
+    "message": "Scroll up one screen"
+  },
+  "app.shortcut-settings.page-up-action-description": {
+    "message": "Moves the page you are reading up by one screen."
+  },
+  "app.shortcut-settings.scroll-description": {
+    "message": "Move through long pages with the keyboard."
+  },
+  "app.shortcut-settings.scroll-title": {
+    "message": "Quick scrolling"
   },
   "app.settings.tabs.launch-defaults": {
     "message": "Launch & instance defaults"
