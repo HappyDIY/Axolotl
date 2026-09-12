@@ -610,6 +610,21 @@ pub async fn cancel_job(job_id: Uuid) -> crate::Result<InstallJobSnapshot> {
         let mut job = store::get_required(job_id, &state).await?;
         match job.status {
             InstallJobStatus::Running => {
+                // Cancellation must not wait behind SQLite. Stop transfers,
+                // verification and database workers first; the durable status
+                // transition can then wait for the current writer to finish.
+                if let Some(token) =
+                    state.install_job_cancellations.get(&job_id)
+                {
+                    token.value().cancel();
+                }
+                // Preserve the newest runtime events in the canceling
+                // checkpoint instead of reverting to the last database copy.
+                let live_reporter =
+                    InstallProgressReporter::new(job_id, job.state.clone());
+                if let Ok(live_state) = live_reporter.current_state().await {
+                    job.state = live_state;
+                }
                 let Some(record) = store::update_status_if(
                     job_id,
                     InstallJobStatus::Running,
@@ -621,11 +636,6 @@ pub async fn cancel_job(job_id: Uuid) -> crate::Result<InstallJobSnapshot> {
                 else {
                     continue;
                 };
-                if let Some(token) =
-                    state.install_job_cancellations.get(&job_id)
-                {
-                    token.cancel();
-                }
                 emit_install_job(&record.snapshot()).await?;
                 return Ok(record.snapshot());
             }
@@ -5763,6 +5773,82 @@ mod tests {
                 State::init_for_test(root.to_string_lossy().to_string()).await;
         }
         State::get().await.unwrap()
+    }
+
+    #[cfg(not(feature = "tauri"))]
+    #[tokio::test]
+    async fn running_job_cancellation_preempts_database_wait_and_keeps_live_state()
+     {
+        crate::event::EventState::init().await.unwrap();
+        let state = global_state().await;
+        let job_id = Uuid::new_v4();
+        let mut job_state =
+            InstallJobState::new(InstallRequest::DownloadJava {
+                vendor: "test".to_string(),
+                version: 21,
+            });
+        job_state.set_progress(
+            InstallPhaseId::DownloadingContent,
+            Some(InstallProgress {
+                current: 0,
+                total: 2,
+                secondary: None,
+            }),
+            InstallPhaseDetails::Empty,
+        );
+        store::insert(job_id, &job_state, InstallJobStatus::Running, &state)
+            .await
+            .unwrap();
+
+        let reporter = InstallProgressReporter::new(job_id, job_state);
+        reporter
+            .update_with_events(
+                InstallPhaseId::DownloadingContent,
+                Some(InstallProgress {
+                    current: 1,
+                    total: 2,
+                    secondary: None,
+                }),
+                InstallPhaseDetails::Empty,
+                vec![InstallJobEventKind::ContentFileCompleted {
+                    path: "mods/live.jar".to_string(),
+                    bytes: 128,
+                }],
+            )
+            .await
+            .unwrap();
+
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        state
+            .install_job_cancellations
+            .insert(job_id, cancellation.clone());
+        let database_permit =
+            state.install_db_semaphore.acquire().await.unwrap();
+        let cancel = tokio::spawn(cancel_job(job_id));
+
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            cancellation.cancelled(),
+        )
+        .await
+        .expect("cancellation must not wait for the install database writer");
+        assert!(
+            !cancel.is_finished(),
+            "status persistence should still be waiting for the database"
+        );
+
+        drop(database_permit);
+        let snapshot = cancel.await.unwrap().unwrap();
+        assert_eq!(snapshot.status, InstallJobStatus::Canceling);
+        assert_eq!(snapshot.progress.unwrap().current, 1);
+        assert!(snapshot.items.iter().any(|item| {
+            item.id == "mods/live.jar"
+                && item.status
+                    == super::super::model::DownloadItemStatus::Completed
+        }));
+
+        state.install_job_cancellations.remove(&job_id);
+        InstallProgressReporter::reset_job(job_id);
     }
 
     #[tokio::test]
