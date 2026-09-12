@@ -30,7 +30,7 @@ use crate::util::io;
 use async_zip::base::read::seek::ZipFileReader as SeekZipFileReader;
 use async_zip::base::read::{WithEntry, ZipEntryReader};
 use async_zip::tokio::read::fs::ZipFileReader as FsZipFileReader;
-use futures::{StreamExt, TryStreamExt};
+use futures::StreamExt;
 use path_util::SafeRelativeUtf8UnixPathBuf;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -1328,12 +1328,12 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 verification_context.reporter.cancellation_token();
             let worker_context = verification_context.clone();
             let worker_completion_tx = verification_completion_tx.clone();
-            let result = futures::stream::poll_fn(move |cx| {
-                verification_rx.poll_recv(cx)
-            })
-            .map(Ok::<_, crate::Error>)
-            .try_for_each_concurrent(
+            let result = crate::install::try_for_each_concurrent_draining(
+                futures::stream::poll_fn(move |cx| {
+                    verification_rx.poll_recv(cx)
+                }),
                 Some(NATIVE_CONTENT_FINALIZE_CONCURRENCY),
+                cancellation.clone(),
                 move |task| {
                     let verification_context = worker_context.clone();
                     let verification_completion_tx =
@@ -1507,7 +1507,6 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     Ok(())
                 }.await;
                 if let Err(error) = result {
-                    verification_context.reporter.cancellation_token().cancel();
                     return Err(error);
                 }
                 Ok(())

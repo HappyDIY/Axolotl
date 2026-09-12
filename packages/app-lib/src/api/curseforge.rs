@@ -26,7 +26,7 @@ use crate::util::fetch::{
 };
 use crate::{ErrorKind, State};
 use dashmap::DashMap;
-use futures::{StreamExt, TryStreamExt, stream};
+use futures::{StreamExt, stream};
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -8553,18 +8553,18 @@ fn spawn_curseforge_verification_worker(
     tokio::spawn(async move {
         let cancellation = context.cancellation.clone();
         let worker_database_tx = database_tx.clone();
-        let result = stream::poll_fn(move |cx| receiver.poll_recv(cx))
-            .map(Ok::<_, crate::Error>)
-            .try_for_each_concurrent(
-                Some(MODPACK_VERIFICATION_CONCURRENCY),
-                move |task| {
-                    verify_and_record_curseforge_modpack_file(
-                        task,
-                        worker_database_tx.clone(),
-                    )
-                },
-            )
-            .await;
+        let result = crate::install::try_for_each_concurrent_draining(
+            stream::poll_fn(move |cx| receiver.poll_recv(cx)),
+            Some(MODPACK_VERIFICATION_CONCURRENCY),
+            cancellation.clone(),
+            move |task| {
+                verify_and_record_curseforge_modpack_file(
+                    task,
+                    worker_database_tx.clone(),
+                )
+            },
+        )
+        .await;
         if result.is_err() {
             // Stop network transfers and peers at the first verifier/SQLite
             // failure. This prevents a closed queue from turning every
