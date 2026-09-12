@@ -1,22 +1,148 @@
 {
-  "app.settings.developer.announcement-preview": { "message": "公告样式预览" },
+  "app.log-share.ai.action": {
+    "message": "AI 深度分析"
+  },
+  "app.log-share.ai.failed": {
+    "message": "LogAgent 分析失败：{message}"
+  },
+  "app.log-share.ai.limit": {
+    "message": "已达到工具调用上限"
+  },
+  "app.log-share.ai.queued": {
+    "message": "排队中，前方约 {position} 个任务"
+  },
+  "app.log-share.ai.queued-front": {
+    "message": "排队中，正在等待空闲槽位"
+  },
+  "app.log-share.ai.thinking": {
+    "message": "思考中…"
+  },
+  "app.log-share.ai.tool": {
+    "message": "正在使用工具：{name}"
+  },
+  "app.log-share.ai.tool-result": {
+    "message": "已收到工具结果"
+  },
+  "app.log-share.ai.working": {
+    "message": "正在使用 LogAgent 分析…"
+  },
+  "app.log-share.settings.ai-source": {
+    "message": "AI 分析来源"
+  },
+  "app.log-share.settings.ai-source-custom": {
+    "message": "自定义 AI 服务商"
+  },
+  "app.log-share.settings.ai-source-description": {
+    "message": "LogShare AI 在云端分析；自定义则使用下方配置的服务商。"
+  },
+  "app.log-share.settings.ai-source-logshare": {
+    "message": "LogShare AI"
+  },
+  "app.log-share.settings.auto-upload": {
+    "message": "自动上传以获取结构化摘要"
+  },
+  "app.log-share.settings.auto-upload-description": {
+    "message": "仅在 LogShare 模式下生效。"
+  },
+  "app.log-share.settings.description": {
+    "message": "将崩溃诊断分享到 LogShare，获取结构化摘要与可选的 AI 分析。优先使用 LogShare，不可用时回退到 mclo.gs。"
+  },
+  "app.log-share.settings.multi-file": {
+    "message": "多文件上传"
+  },
+  "app.log-share.settings.multi-file-description": {
+    "message": "同时上传 latest.log、崩溃报告、hs_err 以及启动器日志。"
+  },
+  "app.log-share.settings.no-storage": {
+    "message": "不落盘直接分析"
+  },
+  "app.log-share.settings.no-storage-description": {
+    "message": "直接提交内容进行分析并跳过存储上传。会关闭自动摘要。"
+  },
+  "app.log-share.settings.share-provider": {
+    "message": "日志分享服务"
+  },
+  "app.log-share.settings.share-provider-description": {
+    "message": "分享诊断链接时上传到的目标服务。"
+  },
+  "app.log-share.settings.show-progress": {
+    "message": "显示 AI 分析进度"
+  },
+  "app.log-share.settings.show-progress-description": {
+    "message": "展示 LogAgent 运行期间的思考、工具及上限状态。"
+  },
+  "app.log-share.settings.title": {
+    "message": "日志分享与 AI 分析"
+  },
+  "app.log-share.shared-logs.delete": {
+    "message": "删除"
+  },
+  "app.log-share.shared-logs.delete-failed": {
+    "message": "删除已分享日志失败。"
+  },
+  "app.log-share.shared-logs.deleted": {
+    "message": "已删除共享日志。"
+  },
+  "app.log-share.shared-logs.deleting": {
+    "message": "删除中…"
+  },
+  "app.log-share.shared-logs.description": {
+    "message": "你分享过的所有诊断都记录在这里。删除条目会将其从记录中移除，并向分享服务请求删除。"
+  },
+  "app.log-share.shared-logs.empty": {
+    "message": "暂无已分享的日志。"
+  },
+  "app.log-share.shared-logs.title": {
+    "message": "已分享日志"
+  },
+  "app.log-share.shared-logs.truncated": {
+    "message": "已截断"
+  },
+  "app.log-share.summary.loading": {
+    "message": "正在加载结构化摘要…"
+  },
+  "app.log-share.summary.title": {
+    "message": "LogShare 分析"
+  },
+  "app.minecraft-crash.share-fallback": {
+    "message": "LogShare 不可用，已改用 mclo.gs 分享诊断信息。"
+  },
+  "app.settings.developer.announcement-preview": {
+    "message": "公告样式预览"
+  },
   "app.settings.developer.announcement-preview-description": {
     "message": "使用本地示例预览真实公告组件，不请求远端公告，也不改变真实公告的已读状态。"
   },
-  "app.settings.developer.preview-with-action": { "message": "显示可选的外部链接按钮" },
-  "app.settings.developer.preview-announcement-modal": { "message": "预览启动弹窗" },
-  "app.settings.developer.preview-announcement-popup": { "message": "预览 Popup 通知" },
-  "app.remote-announcements.preview-title": { "message": "公告样式预览" },
+  "app.settings.developer.preview-with-action": {
+    "message": "显示可选的外部链接按钮"
+  },
+  "app.settings.developer.preview-announcement-modal": {
+    "message": "预览启动弹窗"
+  },
+  "app.settings.developer.preview-announcement-popup": {
+    "message": "预览 Popup 通知"
+  },
+  "app.remote-announcements.preview-title": {
+    "message": "公告样式预览"
+  },
   "app.remote-announcements.preview-summary": {
     "message": "这是一条本地预览通知，点击“查看公告”可查看完整 Markdown 正文。"
   },
-  "app.remote-announcements.preview-action": { "message": "访问官网" },
+  "app.remote-announcements.preview-action": {
+    "message": "访问官网"
+  },
   "app.remote-announcements.preview-content": {
     "message": "## 公告预览\n\n这是**示例正文**，不是已发布公告。\n\n- 支持标题、列表和链接\n- 默认自带关闭按钮\n\n> 预览不会影响真实公告的已读状态。\n\n| 类型 | 展示方式 |\n| --- | --- |\n| 启动弹窗 | 完整 Markdown 正文 |\n| Popup 通知 | 先显示摘要，再查看全文 |\n\n[访问官网](https://axlmc.org)"
   },
-  "app.remote-announcements.view": { "message": "查看公告" },
-  "app.remote-announcements.unread": { "message": "未读" },
-  "app.remote-announcements.read-all": { "message": "将所有公告标为已读" },
+  "app.remote-announcements.view": {
+    "message": "查看公告"
+  },
+  "app.remote-announcements.unread": {
+    "message": "未读"
+  },
+  "app.remote-announcements.read-all": {
+    "message": "将所有公告标为已读"
+  },
   "app.account.signed-in-as": {
     "message": "登录身份："
   },
@@ -1049,9 +1175,6 @@
   "app.crash-analysis.ai.error": {
     "message": "AI 解释失败：{message}"
   },
-  "app.crash-analysis.ai.settings.description": {
-    "message": "可选：将经过脱敏和裁剪的崩溃上下文发送给 AI Providers 中配置的模型。"
-  },
   "app.crash-analysis.ai.settings.enabled": {
     "message": "启用 AI 解释"
   },
@@ -1066,9 +1189,6 @@
   },
   "app.crash-analysis.ai.settings.provider": {
     "message": "AI Provider"
-  },
-  "app.crash-analysis.ai.settings.title": {
-    "message": "崩溃 AI 解释"
   },
   "app.crash-analysis.ai.title": {
     "message": "AI 崩溃解释"

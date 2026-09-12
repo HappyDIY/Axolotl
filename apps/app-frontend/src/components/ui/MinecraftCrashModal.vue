@@ -10,6 +10,7 @@ import {
 	shareLogs,
 	useVIntl,
 } from '@modrinth/ui'
+import { renderHighlightedString } from '@modrinth/utils/highlightjs'
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 
 import CrashAIExplanationModal from '@/components/ui/CrashAIExplanationModal.vue'
@@ -21,9 +22,17 @@ import {
 } from '@/composables/useCrashAnalysis'
 import type { MinecraftLaunchErrorPayload } from '@/composables/useMinecraftLaunchError'
 import { getAIState } from '@/helpers/ai'
-import { process_listener } from '@/helpers/events.js'
+import { logshare_ai_listener, process_listener } from '@/helpers/events.js'
 import { get as getInstance } from '@/helpers/instance'
-import { get_crash_analysis_ai_settings } from '@/helpers/logs.js'
+import {
+	get_crash_analysis_ai_settings,
+	get_log_share_settings,
+	logshare_ai_analyze_direct,
+	logshare_ai_analyze_stored,
+	logshare_get_insights,
+	logshare_upload_crash,
+	record_shared_log,
+} from '@/helpers/logs'
 import { shouldShowMinecraftCrash } from '@/helpers/process.js'
 
 interface CrashModalPayload extends MinecraftLaunchErrorPayload {
@@ -44,6 +53,22 @@ interface CrashWarningPayload extends MinecraftLaunchErrorPayload {
 	kind: 'minecraft_crash'
 }
 
+interface LogShareTicket {
+	id: string
+	url: string
+	raw: string
+	token: string
+}
+
+interface LogShareSettings {
+	share_provider: 'logshare' | 'mclogs'
+	ai_source: 'logshare' | 'custom'
+	auto_upload: boolean
+	multi_file: boolean
+	no_storage: boolean
+	show_progress: boolean
+}
+
 type Unlisten = () => void
 
 const { formatMessage } = useVIntl()
@@ -53,15 +78,33 @@ const modal = ref<InstanceType<typeof NewModal>>()
 const aiModal = ref<InstanceType<typeof CrashAIExplanationModal>>()
 const modChangesModal = ref<InstanceType<typeof CrashModChangesModal>>()
 const payload = ref<Partial<CrashModalPayload>>({})
-const sharing = ref(false)
 let lastAnalysis: CrashAnalysisResult | null = null
 const modChangesAvailable = ref(false)
 const activeRuns = new Map<string, string>()
 const lastShownAt = new Map<string, number>()
 let unlistenProcess: Unlisten | undefined
+let unlistenLogShareAi: Unlisten | undefined
 let mounted = false
 let analysisVersion = 0
 const aiAvailable = ref(false)
+
+const logShareSettings = ref<LogShareSettings>({
+	share_provider: 'logshare',
+	ai_source: 'logshare',
+	auto_upload: true,
+	multi_file: true,
+	no_storage: false,
+	show_progress: true,
+})
+const uploadTicket = ref<LogShareTicket | null>(null)
+const shareUrl = ref('')
+const sharing = ref(false)
+const logShareSummary = ref('')
+const logShareSummaryLoading = ref(false)
+const aiOutput = ref('')
+const aiLoading = ref(false)
+const aiStatus = ref('')
+const aiQueued = ref(false)
 
 const messages = defineMessages({
 	title: {
@@ -267,6 +310,10 @@ const messages = defineMessages({
 		id: 'app.minecraft-crash.share-ready',
 		defaultMessage: 'Diagnostic link is ready to share',
 	},
+	shareFallback: {
+		id: 'app.minecraft-crash.share-fallback',
+		defaultMessage: 'LogShare is unavailable, so the diagnostic was shared via mclo.gs.',
+	},
 	copyLink: {
 		id: 'app.minecraft-crash.copy-link',
 		defaultMessage: 'Copy link',
@@ -275,10 +322,54 @@ const messages = defineMessages({
 		id: 'app.crash-analysis.ai.action',
 		defaultMessage: 'Use AI to explain',
 	},
+	aiAnalyzeLogShare: {
+		id: 'app.log-share.ai.action',
+		defaultMessage: 'Deep AI analysis',
+	},
 	noLogContent: {
 		id: 'app.minecraft-crash.no-log-content',
 		defaultMessage:
 			'No log content was found to share or analyze. Make sure the instance has logs generated in the last few minutes.',
+	},
+	logShareSummaryTitle: {
+		id: 'app.log-share.summary.title',
+		defaultMessage: 'LogShare analysis',
+	},
+	logShareSummaryLoading: {
+		id: 'app.log-share.summary.loading',
+		defaultMessage: 'Loading structured summary...',
+	},
+	aiThinking: {
+		id: 'app.log-share.ai.thinking',
+		defaultMessage: 'Thinking…',
+	},
+	aiQueued: {
+		id: 'app.log-share.ai.queued',
+		defaultMessage: 'Queued, about {position} ahead',
+	},
+	aiQueuedFront: {
+		id: 'app.log-share.ai.queued-front',
+		defaultMessage: 'Queued, waiting for a free slot',
+	},
+	aiUsingTool: {
+		id: 'app.log-share.ai.tool',
+		defaultMessage: 'Using tool: {name}',
+	},
+	aiToolResult: {
+		id: 'app.log-share.ai.tool-result',
+		defaultMessage: 'Tool result received',
+	},
+	aiReachedLimit: {
+		id: 'app.log-share.ai.limit',
+		defaultMessage: 'Reached tool loop limit',
+	},
+	aiWorking: {
+		id: 'app.log-share.ai.working',
+		defaultMessage: 'Analyzing with LogAgent…',
+	},
+	aiFailed: {
+		id: 'app.log-share.ai.failed',
+		defaultMessage: 'LogAgent analysis failed: {message}',
 	},
 })
 
@@ -308,6 +399,9 @@ const body = computed(() => payload.value.body || formatMessage(messages.body))
 const hint = computed(() => payload.value.hint || formatMessage(messages.supportHint))
 const showSupportHint = computed(() => hint.value !== formatMessage(messages.supportHint))
 
+const renderedAiOutput = computed(() => renderHighlightedString(aiOutput.value))
+const renderedLogShareSummary = computed(() => renderHighlightedString(logShareSummary.value))
+
 function applyAnalysis(
 	modalPayload: CrashModalPayload,
 	analysis: CrashAnalysisResult | null,
@@ -335,21 +429,6 @@ function applyAnalysis(
 					evidence: `${evidence.filename}:${evidence.line} - ${evidence.text}`,
 				})
 			: modalPayload.hint,
-		/*
-		...(false
-			? {
-					hint: `${formatMessage(messages.modChanges, {
-						changes: modChanges.map((change) => `${change.kind}: ${change.filename}`).join('; '),
-					})}${
-						evidence
-							? ` ${formatMessage(messages.evidence, {
-									evidence: `${evidence.filename}:${evidence.line} - ${evidence.text}`,
-								})}`
-							: ''
-					}`,
-				}
-			: {}),
-		*/
 	}
 }
 
@@ -362,6 +441,16 @@ function show(modalPayload: CrashModalPayload, isPreview = false): boolean {
 	}
 	analysisVersion += 1
 	payload.value = modalPayload
+	uploadTicket.value = null
+	shareUrl.value = ''
+	sharing.value = false
+	logShareSummary.value = ''
+	logShareSummaryLoading.value = false
+	modChangesAvailable.value = false
+	aiOutput.value = ''
+	aiLoading.value = false
+	aiStatus.value = ''
+	aiQueued.value = false
 	modal.value?.show()
 	return true
 }
@@ -405,6 +494,72 @@ function isLaunchFailure(error: unknown): boolean {
 	return launchFailureBody(error) !== null
 }
 
+function useLogShareAi(): boolean {
+	return logShareSettings.value.ai_source === 'logshare'
+}
+
+function formatInsights(value: unknown): string {
+	const record = (value ?? {}) as Record<string, unknown>
+	const lines: string[] = []
+	const name = typeof record.name === 'string' ? record.name : ''
+	const version = typeof record.version === 'string' ? record.version : ''
+	if (name) lines.push(`### ${name}${version ? ` ${version}` : ''}`)
+	const type = typeof record.type === 'string' ? record.type : ''
+	if (type) lines.push(`**${type}**`)
+	const analysis = (record.analysis ?? {}) as Record<string, unknown>
+	const problems = Array.isArray(analysis.problems) ? analysis.problems : []
+	const information = Array.isArray(analysis.information) ? analysis.information : []
+	if (problems.length) {
+		lines.push('**Problems**')
+		for (const problem of problems as Record<string, unknown>[]) {
+			const message =
+				typeof problem.message === 'string' ? problem.message : JSON.stringify(problem.message)
+			lines.push(`- ${message}`)
+			const solutions = Array.isArray(problem.solutions) ? problem.solutions : []
+			for (const solution of solutions as string[]) {
+				lines.push(`  - ${solution}`)
+			}
+		}
+	}
+	if (information.length) {
+		lines.push('**Information**')
+		for (const item of information as Record<string, unknown>[]) {
+			if (typeof item.label === 'string' && typeof item.value === 'string') {
+				lines.push(`- ${item.label}: ${item.value}`)
+			}
+		}
+	}
+	return lines.join('\n').trim()
+}
+
+async function loadLogShareSummary(instanceId: string): Promise<void> {
+	if (
+		!useLogShareAi() ||
+		!logShareSettings.value.auto_upload ||
+		logShareSettings.value.no_storage ||
+		logShareSummaryLoading.value
+	) {
+		return
+	}
+	const version = analysisVersion
+	const stale = () => version !== analysisVersion || instanceId !== payload.value.instance_id
+	logShareSummaryLoading.value = true
+	logShareSummary.value = ''
+	try {
+		const ticket = await logshare_upload_crash(instanceId)
+		if (stale()) return
+		uploadTicket.value = ticket
+		const insights = await logshare_get_insights(ticket.id)
+		if (stale()) return
+		logShareSummary.value = formatInsights(insights)
+	} catch (error) {
+		console.error('Failed to gather LogShare summary', error)
+		if (!stale()) logShareSummary.value = ''
+	} finally {
+		if (!stale()) logShareSummaryLoading.value = false
+	}
+}
+
 async function analyzeAndUpdate(
 	modalPayload: CrashModalPayload,
 	fallbackHint?: string,
@@ -420,6 +575,7 @@ async function analyzeAndUpdate(
 		payload.value = applyAnalysis(modalPayload, analysis)
 		if (!analysis?.findings.length && fallbackHint) payload.value.hint = fallbackHint
 	}
+	void loadLogShareSummary(modalPayload.instance_id)
 	return analysis
 }
 
@@ -459,13 +615,68 @@ function showPreview(): void {
 	)
 }
 
-const shareUrl = ref('')
-
 function notifyNoLogContent(): void {
 	addNotification({
 		title: formatMessage(messages.noLogContent),
 		type: 'warning',
 	})
+}
+
+async function uploadTicketForInstance(instanceId: string): Promise<LogShareTicket | null> {
+	if (uploadTicket.value) return uploadTicket.value
+	try {
+		const ticket = await logshare_upload_crash(instanceId)
+		uploadTicket.value = ticket
+		return ticket
+	} catch (error) {
+		console.error('Failed to upload crash diagnostic to LogShare', error)
+		return null
+	}
+}
+
+async function recordShared(
+	entry: Pick<SharedLogInput, 'id' | 'url' | 'raw' | 'token' | 'provider' | 'truncated'>,
+): Promise<void> {
+	try {
+		await record_shared_log({
+			id: entry.id,
+			url: entry.url,
+			raw: entry.raw,
+			token: entry.token,
+			provider: entry.provider,
+			instance_id: payload.value.instance_id ?? null,
+			instance_name: payload.value.instance_name ?? null,
+			truncated: entry.truncated,
+			created_at: Math.floor(Date.now() / 1000),
+		})
+	} catch (error) {
+		console.error('Failed to record shared diagnostic', error)
+	}
+}
+
+interface SharedLogInput {
+	id: string
+	url: string
+	raw: string
+	token: string
+	provider: string
+	truncated: boolean
+}
+
+async function copyToClipboard(url: string): Promise<void> {
+	try {
+		await navigator.clipboard.writeText(url)
+		addNotification({
+			title: formatMessage(messages.shareCopied),
+			type: 'success',
+		})
+	} catch (error) {
+		console.error('Failed to copy shared diagnostic URL', error)
+		addNotification({
+			title: formatMessage(messages.shareReady),
+			type: 'success',
+		})
+	}
 }
 
 async function shareDiagnostic(): Promise<void> {
@@ -474,9 +685,33 @@ async function shareDiagnostic(): Promise<void> {
 		notifyNoLogContent()
 		return
 	}
+	const version = analysisVersion
+	const stale = () => version !== analysisVersion
 	sharing.value = true
 	shareUrl.value = ''
+	const instanceId = payload.value.instance_id!
 	try {
+		if (logShareSettings.value.share_provider === 'logshare') {
+			const ticket = await uploadTicketForInstance(instanceId)
+			if (ticket?.url) {
+				if (!stale()) shareUrl.value = ticket.url
+				await recordShared({
+					id: ticket.id,
+					url: ticket.url,
+					raw: ticket.raw,
+					token: ticket.token,
+					provider: 'logshare',
+					truncated: false,
+				})
+				await copyToClipboard(ticket.url)
+				return
+			}
+			addNotification({
+				title: formatMessage(messages.shareFallback),
+				type: 'warning',
+			})
+		}
+
 		const result = await shareLogs(client, lastAnalysis.combined_log)
 		if (result.truncated) {
 			addNotification({
@@ -484,7 +719,7 @@ async function shareDiagnostic(): Promise<void> {
 				type: 'warning',
 			})
 		}
-		shareUrl.value = result.url
+		if (!stale()) shareUrl.value = result.url
 		try {
 			await navigator.clipboard.writeText(result.url)
 			addNotification({
@@ -498,6 +733,14 @@ async function shareDiagnostic(): Promise<void> {
 				type: 'success',
 			})
 		}
+		await recordShared({
+			id: result.url,
+			url: result.url,
+			raw: '',
+			token: '',
+			provider: 'mclogs',
+			truncated: result.truncated,
+		})
 	} catch (error) {
 		console.error('Failed to share crash diagnostic', error)
 		addNotification({
@@ -505,7 +748,7 @@ async function shareDiagnostic(): Promise<void> {
 			type: 'error',
 		})
 	} finally {
-		sharing.value = false
+		if (!stale()) sharing.value = false
 	}
 }
 
@@ -522,23 +765,108 @@ async function copyShareUrl(): Promise<void> {
 	}
 }
 
-function _openAIAnalysis(): void {
+function handleLogShareAiEvent(event: {
+	instance_id: string
+	event_type: string
+	data: Record<string, unknown>
+}): void {
+	if (!aiLoading.value || event.instance_id !== payload.value.instance_id) return
+	if (aiQueued.value && event.event_type !== 'queued') {
+		aiQueued.value = false
+		aiStatus.value = ''
+	}
+	switch (event.event_type) {
+		case 'queued': {
+			const position = Number(event.data?.position ?? 0)
+			aiQueued.value = true
+			aiStatus.value =
+				position > 0
+					? formatMessage(messages.aiQueued, { position })
+					: formatMessage(messages.aiQueuedFront)
+			break
+		}
+		case 'delta': {
+			const content = event.data?.content
+			if (typeof content === 'string') aiOutput.value += content
+			break
+		}
+		case 'thinking':
+			aiStatus.value = formatMessage(messages.aiThinking)
+			break
+		case 'tool':
+			aiStatus.value = formatMessage(messages.aiUsingTool, {
+				name: typeof event.data?.name === 'string' ? event.data.name : 'tool',
+			})
+			break
+		case 'tool_result':
+			aiStatus.value = formatMessage(messages.aiToolResult)
+			break
+		case 'limit':
+			aiStatus.value = formatMessage(messages.aiReachedLimit)
+			break
+		default:
+			break
+	}
+}
+
+async function runLogShareAi(): Promise<string> {
+	const instanceId = payload.value.instance_id!
+	if (logShareSettings.value.no_storage) {
+		return logshare_ai_analyze_direct(instanceId)
+	}
+	const ticket = await uploadTicketForInstance(instanceId)
+	if (!ticket) {
+		throw new Error('Could not prepare the LogShare diagnostic for AI analysis')
+	}
+	return logshare_ai_analyze_stored(instanceId, ticket.id)
+}
+
+function openAIAnalysis(): void {
 	if (!lastAnalysis?.combined_log) {
 		notifyNoLogContent()
 		return
 	}
-	aiModal.value?.show(payload.value.instance_id!)
+	if (!useLogShareAi()) {
+		aiModal.value?.show(payload.value.instance_id!)
+		return
+	}
+
+	aiLoading.value = true
+	aiOutput.value = ''
+	aiQueued.value = false
+	aiStatus.value = formatMessage(messages.aiWorking)
+	runLogShareAi()
+		.then((content) => {
+			aiOutput.value = content
+			aiStatus.value = ''
+		})
+		.catch((error) => {
+			const message = error instanceof Error ? error.message : String(error)
+			aiStatus.value = formatMessage(messages.aiFailed, { message })
+		})
+		.finally(() => {
+			aiLoading.value = false
+		})
 }
 
 async function refreshAIAvailability(): Promise<void> {
 	try {
-		const [settings, state] = await Promise.all([get_crash_analysis_ai_settings(), getAIState()])
-		const provider = state.providers.find((item) => item.provider_id === settings.provider_id)
-		aiAvailable.value =
-			settings.enabled &&
-			state.settings.enabled &&
-			!!provider?.enabled &&
-			provider.models.some((model) => model.id === settings.model_id && model.enabled)
+		const [settings, aiSettings, state] = await Promise.all([
+			get_log_share_settings(),
+			get_crash_analysis_ai_settings(),
+			getAIState(),
+		])
+		logShareSettings.value = settings
+		if (aiSettings.ai_source === 'custom') {
+			const provider = state.providers.find((item) => item.provider_id === aiSettings.provider_id)
+			const providerReady =
+				!!provider &&
+				provider.enabled &&
+				provider.models.some((model) => model.id === aiSettings.model_id && model.enabled)
+			aiAvailable.value = aiSettings.enabled && state.settings.enabled && providerReady
+		} else {
+			aiAvailable.value = true
+		}
 	} catch {
 		aiAvailable.value = false
 	}
@@ -566,12 +894,11 @@ async function handleProcessEvent(event: ProcessEvent): Promise<void> {
 			return null
 		})
 		lastAnalysis = analysis
-		modChangesAvailable.value = !!analysis?.mod_changes.length
 		if (!mounted) return
 
 		const instance = await getInstance(event.instance_id).catch(() => null)
 		if (!mounted) return
-		show(
+		const shown = show(
 			applyAnalysis(
 				{
 					instance_id: event.instance_id,
@@ -580,6 +907,9 @@ async function handleProcessEvent(event: ProcessEvent): Promise<void> {
 				analysis,
 			),
 		)
+		if (!shown) return
+		modChangesAvailable.value = !!analysis?.mod_changes.length
+		void loadLogShareSummary(event.instance_id)
 	} finally {
 		if (activeRuns.get(event.instance_id) === event.uuid) activeRuns.delete(event.instance_id)
 	}
@@ -594,6 +924,7 @@ onMounted(async () => {
 		return
 	}
 	unlistenProcess = unlisten
+	unlistenLogShareAi = await logshare_ai_listener(handleLogShareAiEvent)
 })
 
 onUnmounted(() => {
@@ -601,9 +932,16 @@ onUnmounted(() => {
 	analysisVersion += 1
 	activeRuns.clear()
 	unlistenProcess?.()
+	unlistenLogShareAi?.()
 })
 
-defineExpose({ handleLaunchError, handleWarning, isLaunchFailure, showPreview, openAIAnalysis: _openAIAnalysis })
+defineExpose({
+	handleLaunchError,
+	handleWarning,
+	isLaunchFailure,
+	showPreview,
+	openAIAnalysis,
+})
 </script>
 
 <template>
@@ -618,6 +956,35 @@ defineExpose({ handleLaunchError, handleWarning, isLaunchFailure, showPreview, o
 			<p v-if="showSupportHint" class="m-0 text-secondary">
 				{{ formatMessage(messages.supportHint) }}
 			</p>
+
+			<div v-if="logShareSummaryLoading" class="rounded-lg bg-surface-2 p-3 text-sm text-secondary">
+				{{ formatMessage(messages.logShareSummaryLoading) }}
+			</div>
+			<div v-else-if="logShareSummary" class="flex flex-col gap-2 rounded-lg bg-surface-2 p-3">
+				<span class="text-sm font-semibold text-contrast">
+					{{ formatMessage(messages.logShareSummaryTitle) }}
+				</span>
+				<div
+					class="markdown-body max-h-64 overflow-y-auto text-sm"
+					v-html="renderedLogShareSummary"
+				/>
+			</div>
+
+			<div
+				v-if="aiLoading || aiStatus || aiOutput"
+				class="flex flex-col gap-2 rounded-lg bg-surface-2 p-3"
+			>
+				<span class="text-sm font-semibold text-contrast">
+					{{ formatMessage(messages.aiAnalyzeLogShare) }}
+				</span>
+				<div v-if="aiStatus" class="text-sm text-secondary">{{ aiStatus }}</div>
+				<div
+					v-if="aiOutput"
+					class="markdown-body max-h-64 overflow-y-auto text-sm"
+					v-html="renderedAiOutput"
+				/>
+			</div>
+
 			<div v-if="shareUrl" class="flex items-center gap-2 rounded-lg bg-surface-2 p-3">
 				<ExternalIcon class="h-4 w-4 shrink-0 text-secondary" />
 				<a
@@ -647,8 +1014,12 @@ defineExpose({ handleLaunchError, handleWarning, isLaunchFailure, showPreview, o
 					</button>
 				</ButtonStyled>
 				<ButtonStyled v-if="aiAvailable" color="brand">
-					<button @click="openAIAnalysis">
-						{{ formatMessage(messages.aiAnalyze) }}
+					<button :disabled="aiLoading" @click="openAIAnalysis">
+						{{
+							useLogShareAi()
+								? formatMessage(messages.aiAnalyzeLogShare)
+								: formatMessage(messages.aiAnalyze)
+						}}
 					</button>
 				</ButtonStyled>
 				<ButtonStyled v-if="modChangesAvailable" type="outlined">

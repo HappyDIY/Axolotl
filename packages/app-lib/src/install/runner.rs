@@ -35,6 +35,27 @@ use std::future::Future;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+mod adjunct;
+mod init;
+mod lifecycle;
+mod pack;
+mod request;
+mod upgrade;
+
+#[cfg(test)]
+use adjunct::*;
+#[cfg(test)]
+use lifecycle::*;
+#[cfg(test)]
+use pack::*;
+#[cfg(test)]
+use upgrade::*;
+
+pub(crate) use adjunct::{
+    install_liteloader_adjunct_resolved, install_optifabric_file,
+    resolve_optifabric_version, validate_loader_components,
+};
+
 enum InstallExecutionOutcome<T> {
     Completed(T),
     WaitingForUser(InstallPauseReason),
@@ -350,7 +371,7 @@ pub async fn retry_job(job_id: Uuid) -> crate::Result<InstallJobSnapshot> {
     job.state.progress.progress = None;
     job.state.progress.details = InstallPhaseDetails::Empty;
     job.state.progress.parallel = None;
-    prepare_initial_instance(&mut job.state, &state).await?;
+    init::prepare_initial_instance(&mut job.state, &state).await?;
     job.state.record_event(InstallJobEventKind::JobQueued {
         kind: job.state.request.kind(),
     });
@@ -363,7 +384,7 @@ pub async fn retry_job(job_id: Uuid) -> crate::Result<InstallJobSnapshot> {
     )
     .await?;
     emit_install_job(&record.snapshot()).await?;
-    spawn_job(job_id);
+    lifecycle::spawn_job(job_id);
 
     // The spawned job may already have progressed (or finished) by the time
     // the command returns; hand the caller the freshest stored state.
@@ -564,7 +585,7 @@ async fn queue_waiting_job(
     };
     InstallProgressReporter::reset_job(job_id);
     emit_install_job(&record.snapshot()).await?;
-    spawn_job(job_id);
+    lifecycle::spawn_job(job_id);
     Ok(store::get_required(job_id, &state).await?.snapshot())
 }
 
@@ -733,7 +754,7 @@ async fn start(request: InstallRequest) -> crate::Result<InstallJobSnapshot> {
     let state = State::get().await?;
     let id = Uuid::new_v4();
     let mut job_state = InstallJobState::new(request);
-    prepare_initial_instance(&mut job_state, &state).await?;
+    init::prepare_initial_instance(&mut job_state, &state).await?;
     let record =
         match store::insert(id, &job_state, InstallJobStatus::Queued, &state)
             .await
@@ -749,7 +770,7 @@ async fn start(request: InstallRequest) -> crate::Result<InstallJobSnapshot> {
             }
         };
     emit_install_job(&record.snapshot()).await?;
-    spawn_job(id);
+    lifecycle::spawn_job(id);
     Ok(record.snapshot())
 }
 
@@ -766,443 +787,159 @@ async fn cleanup_failed_initial_install(
         .into(),
     }
 }
+async fn apply_post_install_edit(
+    instance_id: &str,
+    edit: Option<InstallPostInstallEdit>,
+) -> crate::Result<()> {
+    let Some(edit) = edit else {
+        return Ok(());
+    };
 
-async fn prepare_initial_instance(
+    if edit.name.is_none() && edit.icon_path.is_none() && edit.link.is_none() {
+        return Ok(());
+    }
+
+    crate::api::instance::edit(
+        instance_id,
+        crate::state::instances::commands::EditInstance {
+            name: edit.name,
+            icon_path: edit.icon_path,
+            link: edit.link,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(())
+}
+
+async fn remove_existing_pack_content(
+    job_id: Uuid,
     job_state: &mut InstallJobState,
     state: &State,
+    instance_id: &str,
+) -> crate::Result<HashSet<String>> {
+    let metadata = crate::state::instances::commands::get_instance_metadata(
+        instance_id,
+        &state.pool,
+    )
+    .await?
+    .ok_or_else(|| {
+        crate::ErrorKind::InputError("Unknown instance".to_string())
+    })?;
+    let (project_id, version_id) = match &metadata.link {
+        InstanceLink::ModrinthModpack {
+            project_id,
+            version_id,
+        } => (project_id.clone(), version_id.clone()),
+        InstanceLink::ServerProjectModpack {
+            content_project_id,
+            content_version_id,
+            ..
+        } => (content_project_id.clone(), content_version_id.clone()),
+        InstanceLink::ImportedModpack { .. } => {
+            recovery::prepare_existing_content_rollback(
+                job_id,
+                job_state,
+                state,
+                Vec::new(),
+            )
+            .await?;
+            return Ok(HashSet::new());
+        }
+        _ => return Ok(HashSet::new()),
+    };
+
+    let disabled_project_ids =
+        crate::state::instances::commands::list_project_files(
+            instance_id,
+            state,
+        )
+        .await?
+        .into_iter()
+        .filter_map(|file| {
+            (!file.enabled).then(|| {
+                file.provider_refs
+                    .iter()
+                    .find_map(|provider| match provider {
+                        ContentProviderRef::Modrinth { project_id, .. } => {
+                            Some(project_id.to_string())
+                        }
+                        ContentProviderRef::CurseForge { .. } => None,
+                        ContentProviderRef::McArchive { .. } => None,
+                    })
+            })?
+        })
+        .collect::<HashSet<_>>();
+    let reporter = InstallProgressReporter::new(job_id, job_state.clone());
+    let old_pack = generate_pack_from_version_id_with_reporter(
+        project_id.clone(),
+        version_id.clone(),
+        metadata.instance.name.clone(),
+        None,
+        instance_id.to_string(),
+        DownloadReason::Update,
+        reporter,
+    )
+    .await?;
+
+    let related_paths = related_file_paths(&old_pack.file).await?;
+    recovery::prepare_existing_content_rollback(
+        job_id,
+        job_state,
+        state,
+        related_paths,
+    )
+    .await?;
+
+    Ok(disabled_project_ids)
+}
+
+async fn restore_disabled_projects(
+    instance_id: &str,
+    disabled_project_ids: HashSet<String>,
+    state: &State,
 ) -> crate::Result<()> {
-    match job_state.request.clone() {
-        InstallRequest::CreateInstance {
-            name,
-            mut game_version,
-            mut loader,
-            mut loader_version,
-            mut adjuncts,
-            icon_path,
-            link,
-            game_dir_override,
-        } => {
-            if let InstanceLink::CurseForgeModpack {
-                project_id,
-                version_id,
-            } = &link
-            {
-                let project_id = project_id.parse::<u32>().map_err(|_| {
-                    ErrorKind::InputError(
-                        "CurseForge project ID is invalid".to_string(),
-                    )
-                })?;
-                let file_id = version_id.parse::<u32>().map_err(|_| {
-                    ErrorKind::InputError(
-                        "CurseForge file ID is invalid".to_string(),
-                    )
-                })?;
-                let target = crate::api::curseforge::get_modpack_target(
-                    project_id, file_id,
+    if disabled_project_ids.is_empty() {
+        return Ok(());
+    }
+
+    for file in crate::state::instances::commands::list_project_files(
+        instance_id,
+        state,
+    )
+    .await?
+    {
+        let is_disabled_modrinth_project = file.provider_refs.iter().any(
+            |provider| {
+                matches!(
+                    provider,
+                    ContentProviderRef::Modrinth { project_id, .. }
+                        if disabled_project_ids.contains(&project_id.to_string())
                 )
-                .await?;
-                game_version = target.game_version;
-                loader = target.loader;
-                loader_version = target.loader_version;
-                adjuncts.clear();
-                job_state.request = InstallRequest::CreateInstance {
-                    name: name.clone(),
-                    game_version: game_version.clone(),
-                    loader,
-                    loader_version: loader_version.clone(),
-                    adjuncts: Vec::new(),
-                    icon_path: icon_path.clone(),
-                    link: link.clone(),
-                    game_dir_override: game_dir_override.clone(),
-                };
-            }
-            resolve_required_adjuncts(
-                &game_version,
-                loader,
-                &mut adjuncts,
+            },
+        );
+        if file.enabled && is_disabled_modrinth_project {
+            crate::state::instances::commands::toggle_disable_project(
+                instance_id,
+                &file.relative_path,
+                Some(false),
                 state,
             )
             .await?;
-            job_state.request = InstallRequest::CreateInstance {
-                name: name.clone(),
-                game_version: game_version.clone(),
-                loader,
-                loader_version: loader_version.clone(),
-                adjuncts: adjuncts.clone(),
-                icon_path: icon_path.clone(),
-                link: link.clone(),
-                game_dir_override: game_dir_override.clone(),
-            };
-            let metadata = crate::api::instance::create(
-                name,
-                game_version,
-                loader,
-                loader_version,
-                icon_path,
-                link,
-                None,
-                game_dir_override,
-            )
-            .await?;
-            if !adjuncts.is_empty() {
-                let mut components = metadata.loader_components.clone();
-                for adjunct in &mut adjuncts {
-                    adjunct.instance_id = metadata.instance.id.clone();
-                    adjunct.role = crate::state::LoaderComponentRole::Adjunct;
-                }
-                components.extend(adjuncts);
-                validate_loader_components(&components)?;
-                crate::state::instances::commands::replace_instance_loader_components(
-					&metadata.instance.id,
-					&components,
-					&state.pool,
-				)
-				.await?;
-            }
-            set_display(
-                job_state,
-                metadata.instance.name,
-                metadata.instance.icon_path,
-            );
-            set_instance_id(job_state, metadata.instance.id);
-        }
-        InstallRequest::CreateModpackInstance {
-            location,
-            post_install_edit,
-        } => {
-            let preview = get_instance_from_pack(location).await?;
-            let name = post_install_edit
-                .as_ref()
-                .and_then(|edit| edit.name.clone())
-                .unwrap_or_else(|| preview.name.clone());
-            let icon_path = match post_install_edit
-                .as_ref()
-                .and_then(|edit| edit.icon_path.as_ref())
-            {
-                Some(icon_path) => icon_path.clone(),
-                None => preview
-                    .icon
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().to_string())
-                    .or_else(|| preview.icon_url.clone()),
-            };
-            let link = post_install_edit
-                .as_ref()
-                .and_then(|edit| edit.link.clone())
-                .or_else(|| preview.link.clone())
-                .unwrap_or(InstanceLink::Unmanaged);
-            let metadata = crate::api::instance::create(
-                name,
-                preview.game_version,
-                preview.modloader,
-                preview.loader_version,
-                icon_path,
-                link,
-                None,
-                None,
-            )
-            .await?;
-            set_display(
-                job_state,
-                metadata.instance.name,
-                metadata.instance.icon_path,
-            );
-            set_instance_id(job_state, metadata.instance.id);
-        }
-        InstallRequest::ImportInstance {
-            instance_folder,
-            symlink: _,
-            base_path: _,
-            game_dir_override,
-            ..
-        } => {
-            let metadata = crate::api::instance::create(
-                instance_folder,
-                "unknown".to_string(),
-                ModLoader::Vanilla,
-                None,
-                None,
-                InstanceLink::Unmanaged,
-                None,
-                game_dir_override,
-            )
-            .await?;
-            set_display(
-                job_state,
-                metadata.instance.name,
-                metadata.instance.icon_path,
-            );
-            set_instance_id(job_state, metadata.instance.id);
-        }
-        InstallRequest::DuplicateInstance { source_instance_id } => {
-            let metadata =
-                crate::state::get_instance(&source_instance_id, &state.pool)
-                    .await?
-                    .ok_or_else(|| {
-                        crate::ErrorKind::InputError(
-                            "Unknown instance".to_string(),
-                        )
-                    })?;
-            let created = crate::api::instance::create(
-                metadata.instance.name,
-                metadata.applied_content_set.game_version,
-                metadata.applied_content_set.loader,
-                metadata.applied_content_set.loader_version,
-                metadata.instance.icon_path,
-                metadata.link,
-                None,
-                None,
-            )
-            .await?;
-            set_display(
-                job_state,
-                created.instance.name,
-                created.instance.icon_path,
-            );
-            set_instance_id(job_state, created.instance.id);
-        }
-        InstallRequest::UpgradeUnmanagedInstance {
-            instance_id,
-            shared_upgrade_mode,
-            display_names,
-            ..
-        } => {
-            let metadata =
-                crate::state::get_instance(&instance_id, &state.pool)
-                    .await?
-                    .ok_or_else(|| {
-                        crate::ErrorKind::InputError(
-                            "Unknown upgrade source instance".to_string(),
-                        )
-                    })?;
-            set_display(
-                job_state,
-                metadata.instance.name.clone(),
-                metadata.instance.icon_path.clone(),
-            );
-            match shared_upgrade_mode {
-                SharedUpgradeMode::Direct => {
-                    prepare_existing_rollback(job_state, state, &instance_id)
-                        .await?;
-                }
-                SharedUpgradeMode::CopyAndUpgrade => {
-                    let created = crate::api::instance::create(
-                        display_names.copy.unwrap_or_else(|| {
-                            format!(
-                                "{} (Upgraded Copy)",
-                                metadata.instance.name
-                            )
-                        }),
-                        metadata.applied_content_set.game_version.clone(),
-                        metadata.applied_content_set.loader,
-                        metadata.applied_content_set.loader_version.clone(),
-                        metadata.instance.icon_path.clone(),
-                        InstanceLink::Unmanaged,
-                        None,
-                        None,
-                    )
-                    .await?;
-                    set_instance_id(job_state, created.instance.id.clone());
-                    if let Err(error) = clone_instance_loader_components(
-                        &metadata.loader_components,
-                        &created.instance.id,
-                        state,
-                    )
-                    .await
-                    {
-                        return Err(cleanup_failed_initial_install(
-                            job_state, state, error,
-                        )
-                        .await);
-                    }
-                }
-            }
-        }
-        InstallRequest::InstallExistingInstance { instance_id, .. }
-        | InstallRequest::InstallPackToExistingInstance {
-            instance_id, ..
-        }
-        | InstallRequest::UpdateManagedCurseForgeModpack {
-            instance_id, ..
-        } => {
-            prepare_existing_rollback(job_state, state, &instance_id).await?;
-        }
-        InstallRequest::InstallContent {
-            instance_id,
-            display_title,
-            display_icon,
-            ..
-        } => {
-            crate::state::get_instance(&instance_id, &state.pool)
-                .await?
-                .ok_or_else(|| {
-                    crate::ErrorKind::InputError(format!(
-                        "Unknown instance {instance_id}"
-                    ))
-                })?;
-            set_display(job_state, display_title, display_icon);
-        }
-        InstallRequest::InstallCurseForgeContent {
-            request,
-            display_title,
-            display_icon,
-        } => {
-            crate::state::get_instance(&request.instance_id, &state.pool)
-                .await?
-                .ok_or_else(|| {
-                    crate::ErrorKind::InputError(format!(
-                        "Unknown instance {}",
-                        request.instance_id
-                    ))
-                })?;
-            set_display(job_state, display_title, display_icon);
-        }
-        InstallRequest::InstallCurseForgeWorld {
-            request,
-            display_title,
-            display_icon,
-        } => {
-            crate::state::get_instance(&request.instance_id, &state.pool)
-                .await?
-                .ok_or_else(|| {
-                    crate::ErrorKind::InputError(format!(
-                        "Unknown instance {}",
-                        request.instance_id
-                    ))
-                })?;
-            set_display(job_state, display_title, display_icon);
-        }
-        InstallRequest::DownloadJava { vendor, version } => {
-            set_display(job_state, format!("Java {version} ({vendor})"), None);
         }
     }
 
     Ok(())
 }
 
-fn spawn_job(job_id: Uuid) {
-    tokio::spawn(async move {
-        if let Err(error) = run_job(job_id).await {
-            tracing::error!("Install job {job_id} failed: {error}");
-        }
-    });
-}
-
-fn begin_failed_job_rollback(
+async fn prepare_existing_rollback(
     job_state: &mut InstallJobState,
-    error: &crate::Error,
-) {
-    let failed_phase = job_state.progress.phase;
-    let error_view =
-        install_error_view(failed_phase, error, job_state.context.clone());
-    job_state.record_event(InstallJobEventKind::Failed {
-        phase: failed_phase,
-        code: error_view.code.clone(),
-        message: error_view.message.clone(),
-    });
-    job_state.error = Some(error_view);
-    job_state.progress.phase = InstallPhaseId::RollingBack;
-    job_state.progress.progress = None;
-    job_state.progress.details = InstallPhaseDetails::Empty;
-    job_state.progress.parallel = None;
-    job_state.record_event(InstallJobEventKind::RollbackStarted {
-        cleanup: job_state.cleanup.clone(),
-    });
-}
-
-fn latest_failure_phase(
-    execution_state: &InstallJobState,
-    reporter_state: &InstallJobState,
-) -> InstallPhaseId {
-    let latest_phase = |state: &InstallJobState| {
-        state
-            .events
-            .iter()
-            .rev()
-            .find_map(|event| match &event.kind {
-                InstallJobEventKind::PhaseStarted { phase, .. } => {
-                    Some((event.at, *phase))
-                }
-                _ => None,
-            })
-    };
-    match (latest_phase(execution_state), latest_phase(reporter_state)) {
-        (Some(execution), Some(reporter)) if reporter.0 > execution.0 => {
-            reporter.1
-        }
-        (Some(execution), _) => execution.1,
-        (None, Some(reporter)) => reporter.1,
-        (None, None) => reporter_state.progress.phase,
-    }
-}
-
-fn begin_waiting_for_user(
-    job_state: &mut InstallJobState,
-    reason: InstallPauseReason,
-) {
-    job_state.pause_reason = Some(reason.clone());
-    job_state.error = None;
-    job_state.rollback_error = None;
-    job_state.context = None;
-    job_state.progress.parallel = None;
-    job_state.record_event(InstallJobEventKind::WaitingForUser { reason });
-}
-
-async fn run_job(job_id: Uuid) -> crate::Result<()> {
-    let state = State::get().await?;
-    let mut job = store::get_required(job_id, &state).await?;
-
-    if job.status != InstallJobStatus::Queued {
+    state: &State,
+    instance_id: &str,
+) -> crate::Result<()> {
+    if job_state.rollback.is_some() {
         return Ok(());
     }
-
-    let _install_permit = state.install_job_semaphore.acquire().await?;
-    job = store::get_required(job_id, &state).await?;
-
-    if job.status != InstallJobStatus::Queued {
-        return Ok(());
-    }
-
-    let mut job_state = job.state.clone();
-    job_state.record_event(InstallJobEventKind::JobStarted);
-    let Some(record) = store::update_status_if(
-        job_id,
-        InstallJobStatus::Queued,
-        InstallJobStatus::Running,
-        &job_state,
-        &state,
-    )
-    .await?
-    else {
-        return Ok(());
-    };
-    let cancellation = tokio_util::sync::CancellationToken::new();
-    state
-        .install_job_cancellations
-        .insert(job_id, cancellation.clone());
-    emit_install_job(&record.snapshot()).await?;
-    if store::get_required(job_id, &state).await?.status
-        == InstallJobStatus::Canceling
-    {
-        cancellation.cancel();
-    }
-    let live_reporter = InstallProgressReporter::new(job_id, job_state.clone());
-
-    enum RunResult {
-        Completed(crate::Result<InstallExecutionOutcome<Option<String>>>),
-        Canceled,
-    }
-
-    let result = tokio::select! {
-        biased;
-        _ = cancellation.cancelled() => RunResult::Canceled,
-        result = run_request(job_id, &mut job_state, &state) => RunResult::Completed(result),
-    };
-    state.install_job_cancellations.remove(&job_id);
-    let execution_state = job_state;
-    let reporter_state = live_reporter.current_state().await?;
-    let failure_phase = latest_failure_phase(&execution_state, &reporter_state);
-    job_state = reporter_state;
 
     match result {
         RunResult::Completed(Ok(InstallExecutionOutcome::Completed(
@@ -6709,172 +6446,214 @@ mod tests {
         }));
     }
 
-    #[test]
-    fn instance_upgrade_external_target_conflict_skips_mutation() {
-        let mutation =
-            test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
-        assert!(upgrade_mutation_conflicts(
-            &mutation,
-            &HashSet::from(["mods/new.jar".to_string()])
-        ));
-    }
+    crate::state::instances::commands::set_instance_install_stage(
+        instance_id,
+        InstanceInstallStage::MinecraftInstalling,
+        &state.pool,
+    )
+    .await?;
+    emit_instance(instance_id, InstancePayloadType::Edited).await?;
 
-    #[test]
-    fn instance_upgrade_external_delete_conflict_skips_mutation() {
-        let mutation =
-            test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
-        assert!(upgrade_mutation_conflicts(
-            &mutation,
-            &HashSet::from(["mods/old.jar".to_string()])
-        ));
-    }
+    Ok(())
+}
 
-    #[test]
-    fn instance_upgrade_unrelated_external_change_does_not_skip_mutation() {
-        let mutation =
-            test_upgrade_mutation(Some("mods/old.jar"), "mods/new.jar");
-        assert!(!upgrade_mutation_conflicts(
-            &mutation,
-            &HashSet::from(["mods/user.jar".to_string()])
-        ));
-    }
+async fn update_progress(
+    job_id: Uuid,
+    job_state: &mut InstallJobState,
+    state: &State,
+    phase: InstallPhaseId,
+    details: InstallPhaseDetails,
+) -> crate::Result<()> {
+    job_state.set_progress(phase, None, details);
+    let record = store::update_state(job_id, job_state, state).await?;
+    emit_install_job(&record.snapshot()).await?;
+    Ok(())
+}
 
-    fn test_upgrade_mutation(
-        existing_path: Option<&str>,
-        target_path: &str,
-    ) -> StagedUpgradeMutation {
-        StagedUpgradeMutation {
-            existing_path: existing_path.map(ToString::to_string),
-            target_path: target_path.to_string(),
-            ownership: crate::state::instances::ContentOwnershipKind::UserAdded,
-            auto_dependency: false,
-            enabled: true,
-            download: StagedUpgradeDownload::Modrinth(
-                crate::state::instances::commands::DownloadedProjectVersion {
-                    file_name: "new.jar".to_string(),
-                    path: PathBuf::from("new.jar"),
-                    sha1: "sha1".to_string(),
-                    size: 1,
-                    project_type: crate::state::ProjectType::Mod,
-                    project_id: "project".to_string(),
-                    version_id: "version".to_string(),
-                },
-            ),
+fn set_instance_id(job_state: &mut InstallJobState, instance_id: String) {
+    job_state.target = match &job_state.target {
+        InstallTarget::ExistingInstance { .. } => {
+            InstallTarget::ExistingInstance {
+                instance_id: instance_id.clone(),
+            }
         }
-    }
+        InstallTarget::NewInstance { .. } => InstallTarget::NewInstance {
+            instance_id: Some(instance_id.clone()),
+        },
+    };
+    job_state.cleanup = match &job_state.cleanup {
+        InstallCleanup::RestoreExistingInstance { .. } => {
+            InstallCleanup::RestoreExistingInstance { instance_id }
+        }
+        InstallCleanup::DeleteNewInstance { .. } => {
+            InstallCleanup::DeleteNewInstance {
+                instance_id: Some(instance_id),
+            }
+        }
+        InstallCleanup::None => InstallCleanup::None,
+    };
+}
 
-    #[test]
-    fn instance_upgrade_staging_populates_persisted_download_summary() {
-        let staged = (0..27)
-            .map(|index| {
-                test_upgrade_mutation(
-                    Some(&format!("mods/old-{index}.jar")),
-                    &format!("mods/target-{index}.jar"),
-                )
-            })
-            .collect::<Vec<_>>();
-        let mut job = InstallJobState::new(InstallRequest::DownloadJava {
-            vendor: "test".to_string(),
-            version: 21,
-        });
-        job.record_event(InstallJobEventKind::ContentDownloadStarted {
-            files: staged.len() as u64,
-            bytes: Some(staged.len() as u64),
-        });
-        for mutation in staged {
-            job.record_event(InstallJobEventKind::ContentFileCompleted {
-                path: mutation.target_path,
-                bytes: 1,
+fn clear_deleted_new_instance_id(job_state: &mut InstallJobState) {
+    if matches!(job_state.cleanup, InstallCleanup::DeleteNewInstance { .. }) {
+        job_state.target = InstallTarget::NewInstance { instance_id: None };
+        job_state.cleanup =
+            InstallCleanup::DeleteNewInstance { instance_id: None };
+    }
+}
+
+fn set_display(
+    job_state: &mut InstallJobState,
+    title: String,
+    icon: Option<String>,
+) {
+    job_state.display = Some(InstallJobDisplay { title, icon });
+}
+
+fn install_error_view(
+    phase: InstallPhaseId,
+    error: &crate::Error,
+    context: Option<InstallErrorContext>,
+) -> InstallErrorView {
+    let context = match error.raw.as_ref() {
+        ErrorKind::CacheReadError {
+            cache_type,
+            sqlite_code,
+            ..
+        } => {
+            let mut context = context.unwrap_or_else(|| {
+                InstallErrorContext::new("read project metadata cache").build()
             });
+            context.cache_types = vec![cache_type.clone()];
+            context.sqlite_code = sqlite_code.clone();
+            Some(context)
         }
+        _ => context,
+    };
+    InstallErrorView::from_error(
+        install_error_code(phase, error),
+        phase,
+        error,
+        context,
+    )
+}
 
-        let persisted = serde_json::to_string(&job).unwrap();
-        let restored: InstallJobState =
-            serde_json::from_str(&persisted).unwrap();
-        let summary = restored.download_summary();
-        assert_eq!(summary.files_completed, 27);
-        assert_eq!(summary.files_total, Some(27));
-        assert_eq!(summary.bytes_downloaded, 27);
-        assert_eq!(summary.bytes_total, Some(27));
+fn install_error_code(
+    phase: InstallPhaseId,
+    error: &crate::Error,
+) -> &'static str {
+    use InstallPhaseId::*;
+
+    match error.raw.as_ref() {
+        ErrorKind::CacheReadError { .. } => "cache_repair_required",
+        ErrorKind::InputError(msg)
+            if msg.starts_with("Unrecognized modpack format")
+                && matches!(phase, ResolvingPack) =>
+        {
+            "unrecognized_format"
+        }
+        ErrorKind::InputError(_) => match phase {
+            PreparingInstance | CreatingBackup | Finalizing | Completed => {
+                "instance_error"
+            }
+            ResolvingPack | DownloadingPackFile | ReadingPackManifest => {
+                "pack_error"
+            }
+            DownloadingContent | StagingContent | ApplyingContent => {
+                "content_error"
+            }
+            ExtractingOverrides => "path_error",
+            PreparingJava => "java_error",
+            DownloadingMinecraft => "instance_error",
+            RollingBack => "rollback_error",
+            ResolvingMinecraft
+            | ResolvingLoader
+            | RunningLoaderProcessors
+            | UpdatingLoader
+            | Verifying => "launcher_error",
+        },
+        ErrorKind::LauncherError(_) => match phase {
+            RunningLoaderProcessors => "processor_error",
+            PreparingJava => "java_error",
+            ResolvingLoader => "loader_error",
+            _ => "launcher_error",
+        },
+        ErrorKind::JREError(_) => "java_error",
+        ErrorKind::NoValueFor(_) | ErrorKind::MetadataError(_) => match phase {
+            ResolvingLoader => "loader_error",
+            PreparingJava => "java_error",
+            _ => "metadata_error",
+        },
+        ErrorKind::FetchError(_)
+        | ErrorKind::NetworkError(_)
+        | ErrorKind::HttpError { .. }
+        | ErrorKind::ApiIsDownError(_) => "network_error",
+        ErrorKind::Any(_)
+            if matches!(
+                phase,
+                DownloadingPackFile
+                    | DownloadingContent
+                    | ResolvingMinecraft
+                    | ResolvingLoader
+                    | PreparingJava
+                    | DownloadingMinecraft
+            ) =>
+        {
+            "network_error"
+        }
+        ErrorKind::LabrinthError(_) => "api_error",
+        ErrorKind::HashError(_, _) => "hash_error",
+        ErrorKind::ZipError(_) => "archive_error",
+        ErrorKind::DeserializationError(_) | ErrorKind::StripPrefixError(_) => {
+            "path_error"
+        }
+        ErrorKind::FSError(_)
+        | ErrorKind::IOError(_)
+        | ErrorKind::StdIOError(_)
+        | ErrorKind::UTFError(_) => "filesystem_error",
+        ErrorKind::INIError(_) | ErrorKind::JSONError(_) => "parse_error",
+        ErrorKind::Sqlx(_) | ErrorKind::SqlxMigrate(_) => "database_error",
+        ErrorKind::JoinError(_)
+        | ErrorKind::RecvError(_)
+        | ErrorKind::AcquireError(_)
+        | ErrorKind::EventError(_) => "internal_error",
+        ErrorKind::OtherError(_) | ErrorKind::Any(_) => "internal_error",
+        _ => "unknown_error",
     }
+}
 
-    #[tokio::test]
-    async fn upgrade_staging_scheduler_enters_requests_concurrently() {
-        use std::sync::Arc;
-        use tokio::sync::Barrier;
-
-        let barrier = Arc::new(Barrier::new(2));
-        let mut downloads = (0..2)
-            .map(|index| {
-                let barrier = barrier.clone();
-                async move {
-                    barrier.wait().await;
-                    Ok::<_, crate::Error>((index, index))
-                }
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        assert_eq!(
-            collect_ordered_upgrade_staging(&mut downloads)
-                .await
-                .unwrap(),
-            vec![0, 1]
-        );
-    }
-
-    #[tokio::test]
-    async fn upgrade_staging_scheduler_restores_request_order() {
-        let mut downloads = [2_usize, 0, 1]
-            .into_iter()
-            .map(|index| async move {
-                Ok::<_, crate::Error>((index, format!("mutation-{index}")))
-            })
-            .collect::<FuturesUnordered<_>>();
-
-        assert_eq!(
-            collect_ordered_upgrade_staging(&mut downloads)
-                .await
-                .unwrap(),
-            vec!["mutation-0", "mutation-1", "mutation-2"]
-        );
-    }
-
-    #[tokio::test]
-    async fn upgrade_staging_scheduler_returns_first_error() {
-        let mut downloads = [
-            Ok((0, "first")),
-            Err(crate::ErrorKind::InputError("failed".into()).into()),
-        ]
-        .into_iter()
-        .map(std::future::ready)
-        .collect::<FuturesUnordered<_>>();
-
-        assert!(
-            collect_ordered_upgrade_staging(&mut downloads)
-                .await
-                .is_err()
-        );
-    }
-
-    #[cfg(debug_assertions)]
-    #[test]
-    fn instance_upgrade_debug_hook_ignores_invalid_and_zero_counts() {
-        assert_eq!(debug_mutation_count(""), None);
-        assert_eq!(debug_mutation_count("invalid"), None);
-        assert_eq!(debug_mutation_count("0"), None);
-        assert_eq!(debug_mutation_count(" 2 "), Some(2));
-    }
-
-    fn upgrade_source_file(
-        relative_path: &str,
-        sha1: &str,
-        enabled: bool,
-    ) -> crate::state::InstanceUpgradeSourceFile {
-        crate::state::InstanceUpgradeSourceFile {
-            relative_path: relative_path.to_string(),
-            sha1: sha1.to_string(),
-            size: 1,
-            enabled,
+fn current_instance_id(job_state: &InstallJobState) -> Option<String> {
+    match &job_state.target {
+        InstallTarget::NewInstance { instance_id } => instance_id.clone(),
+        InstallTarget::ExistingInstance { instance_id } => {
+            Some(instance_id.clone())
         }
     }
 }
+
+pub(crate) const OPTIFABRIC_CURSEFORGE_PROJECT_ID: u32 = 322_385;
+
+pub(super) fn modpack_details(
+    location: &CreatePackLocation,
+) -> InstallPhaseDetails {
+    match location {
+        CreatePackLocation::FromVersionId {
+            project_id,
+            version_id,
+            title,
+            ..
+        } => InstallPhaseDetails::Modpack {
+            project_id: Some(project_id.clone()),
+            version_id: Some(version_id.clone()),
+            title: Some(title.clone()),
+        },
+        CreatePackLocation::FromFile { .. } => InstallPhaseDetails::Modpack {
+            project_id: None,
+            version_id: None,
+            title: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests;
