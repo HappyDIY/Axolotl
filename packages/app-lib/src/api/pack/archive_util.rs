@@ -269,13 +269,36 @@ fn materialize_staged_archive_entry(
     Ok(())
 }
 
-/// Publishes a set of fully-written staging files as one rollback-capable
-/// batch. Targets must be unique. Cancellation before or during the short
-/// rename phase restores every target already replaced by this call.
-pub(crate) fn commit_staged_archive_entries(
+/// A published archive batch whose pre-install files are still retained.
+/// Callers use the database transaction as their commit point and then either
+/// finalize this batch or roll it back.
+#[must_use = "published archive replacements must be finalized or rolled back"]
+pub(crate) struct StagedArchiveReplacements {
+    replacements: HashMap<PathBuf, Option<PathBuf>>,
+    replacement_order: Vec<PathBuf>,
+}
+
+impl StagedArchiveReplacements {
+    pub(crate) fn finalize(self) -> crate::Result<()> {
+        finalize_archive_replacements(&self.replacements)
+    }
+
+    pub(crate) fn rollback(self) -> crate::Result<()> {
+        rollback_archive_replacements(
+            &self.replacements,
+            &self.replacement_order,
+        )
+    }
+}
+
+/// Publishes fully-written staging files while retaining the pre-install
+/// versions for a later database-backed commit decision. Targets must be
+/// unique. Cancellation before or during the short rename phase restores
+/// every target already replaced by this call.
+pub(crate) fn materialize_staged_archive_entries(
     targets: &[PathBuf],
     cancellation: Option<&CancellationToken>,
-) -> crate::Result<()> {
+) -> crate::Result<StagedArchiveReplacements> {
     let mut replacements = HashMap::<PathBuf, Option<PathBuf>>::new();
     let mut replacement_order = Vec::<PathBuf>::new();
     let result = (|| {
@@ -301,10 +324,26 @@ pub(crate) fn commit_staged_archive_entries(
         let _ = discard_staged_archive_entries(targets);
         return Err(error);
     }
+    Ok(StagedArchiveReplacements {
+        replacements,
+        replacement_order,
+    })
+}
+
+/// Publishes a set of fully-written staging files as one rollback-capable
+/// batch and immediately finalizes their pre-install backups. Use
+/// [`materialize_staged_archive_entries`] when a later database operation is
+/// the actual commit point.
+pub(crate) fn commit_staged_archive_entries(
+    targets: &[PathBuf],
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<()> {
+    let replacements =
+        materialize_staged_archive_entries(targets, cancellation)?;
     // Backup deletion happens after the transactional commit point. A cleanup
     // failure must not invoke rollback because earlier backups may already be
     // gone; the caller's install-level recovery can handle the reported error.
-    finalize_archive_replacements(&replacements)
+    replacements.finalize()
 }
 
 pub(crate) fn discard_staged_archive_entries(
@@ -572,6 +611,42 @@ mod tests {
         assert_eq!(std::fs::read(&second).unwrap(), b"old-second");
         assert!(!sibling_path(&first, ".installing.previous").exists());
         assert!(!sibling_path(&second, ".installing.previous").exists());
+    }
+
+    #[test]
+    fn staged_archive_replacements_can_rollback_after_publish() {
+        let root = tempfile::tempdir().unwrap();
+        let existing = root.path().join("config/existing.txt");
+        let created = root.path().join("config/created.txt");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"old-existing").unwrap();
+        write_archive_entry_to_staging(
+            &mut Cursor::new(b"new-existing"),
+            &existing,
+            None,
+        )
+        .unwrap();
+        write_archive_entry_to_staging(
+            &mut Cursor::new(b"new-created"),
+            &created,
+            None,
+        )
+        .unwrap();
+
+        let replacements = materialize_staged_archive_entries(
+            &[existing.clone(), created.clone()],
+            None,
+        )
+        .unwrap();
+        assert_eq!(std::fs::read(&existing).unwrap(), b"new-existing");
+        assert_eq!(std::fs::read(&created).unwrap(), b"new-created");
+        assert!(sibling_path(&existing, ".installing.previous").exists());
+
+        replacements.rollback().unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
+        assert!(!created.exists());
+        assert!(!sibling_path(&existing, ".installing.previous").exists());
     }
 
     #[test]

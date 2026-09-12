@@ -2039,13 +2039,14 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             return Err(error);
         }
     };
-    crate::api::pack::archive_util::run_blocking_instance_write(
+    let override_replacements =
+        crate::api::pack::archive_util::run_blocking_instance_write(
         instance_id.clone(),
         reporter.cancellation_token(),
         {
             let override_targets = override_targets.clone();
             move |cancellation| {
-                crate::api::pack::archive_util::commit_staged_archive_entries(
+                crate::api::pack::archive_util::materialize_staged_archive_entries(
                     &override_targets,
                     Some(cancellation),
                 )
@@ -2077,7 +2078,10 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
             });
         }
     }
-    if !override_records.is_empty() {
+    let override_registration_result: crate::Result<()> = async {
+        if override_records.is_empty() {
+            return Ok(());
+        }
         let cancellation = reporter.cancellation_token();
         let _permit = tokio::select! {
             biased;
@@ -2108,7 +2112,36 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 .await,
             )
             .await?;
+        Ok(())
     }
+    .await;
+    let replacement_result = match override_registration_result {
+        Ok(()) => {
+            crate::api::pack::archive_util::run_blocking_instance_write(
+                instance_id.clone(),
+                reporter.cancellation_token(),
+                move |_| override_replacements.finalize(),
+            )
+            .await
+        }
+        Err(error) => {
+            let rollback_result =
+                crate::api::pack::archive_util::run_blocking_instance_write(
+                    instance_id.clone(),
+                    reporter.cancellation_token(),
+                    move |_| override_replacements.rollback(),
+                )
+                .await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to restore MRPack overrides: {rollback_error}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    };
+    replacement_result?;
 
     if let Some(ref version_id) = version_id {
         let server_override_entries = zip_reader
