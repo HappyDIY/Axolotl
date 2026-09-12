@@ -2098,19 +2098,21 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 .maybe_version_id(version_id.clone())
                 .source_path(source_path.clone())
                 .build();
-        reporter
-            .preserve_failure_context(
-                record_context,
-                // Do not race an in-flight SQLite transaction against
-                // cancellation. The permit wait above is cancelable; after
-                // the write begins its outcome must be observed.
-                crate::state::instances::commands::record_project_files_atomic(
-                    &instance_id,
-                    &override_records,
-                    state,
-                )
-                .await,
+        // Do not race an in-flight SQLite transaction against cancellation.
+        // The permit wait above is cancelable; after the write begins its
+        // outcome must be observed. Release the permit before persisting a
+        // failure context because the install-job store uses the same
+        // semaphore and would otherwise deadlock on an error.
+        let record_result =
+            crate::state::instances::commands::record_project_files_atomic(
+                &instance_id,
+                &override_records,
+                state,
             )
+            .await;
+        drop(_permit);
+        reporter
+            .preserve_failure_context(record_context, record_result)
             .await?;
         Ok(())
     }
