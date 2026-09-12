@@ -37,6 +37,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
+use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -5946,14 +5947,12 @@ async fn verify_recognized_curseforge_file(
     if expected_fingerprint == 0 {
         return Ok(None);
     }
-    let bytes = tokio::fs::read(path).await?;
-    if compute_fingerprint(&bytes) as u64 != expected_fingerprint {
+    let (size, sha1, fingerprint) =
+        fingerprint_and_sha1_file(path, None).await?;
+    if fingerprint as u64 != expected_fingerprint {
         return Ok(None);
     }
-    Ok(Some((
-        bytes.len() as u64,
-        sha1_smol::Sha1::from(&bytes).hexdigest(),
-    )))
+    Ok(Some((size, sha1)))
 }
 
 pub async fn import_manual_downloads(
@@ -6368,13 +6367,13 @@ async fn verify_manual_download_candidate_with_integrity(
         return Ok(None);
     }
 
-    let (size, sha1) = sha1_file_async(path).await?;
     if let Some(expected_sha1) = download
         .hashes
         .iter()
         .find(|hash| hash.algo == 1 && !hash.value.trim().is_empty())
         .map(|hash| hash.value.as_str())
     {
+        let (size, sha1) = sha1_file_async(path).await?;
         if !sha1.eq_ignore_ascii_case(expected_sha1) {
             trace_manual_download_candidate_rejection(
                 path,
@@ -6397,8 +6396,9 @@ async fn verify_manual_download_candidate_with_integrity(
         )
         .into());
     }
-    let bytes = tokio::fs::read(path).await?;
-    if compute_fingerprint(&bytes) as u64 != download.file_fingerprint {
+    let (size, sha1, fingerprint) =
+        fingerprint_and_sha1_file(path, None).await?;
+    if fingerprint as u64 != download.file_fingerprint {
         trace_manual_download_candidate_rejection(
             path,
             download,
@@ -8440,6 +8440,7 @@ async fn persist_curseforge_database_batch(
     }
     let state = State::get().await?;
     let database_permit = tokio::select! {
+        biased;
         _ = context.cancellation.cancelled() => {
             return Err(ErrorKind::OtherError(
                 "CurseForge modpack database registration canceled".to_string(),
@@ -8457,14 +8458,28 @@ async fn persist_curseforge_database_batch(
         .iter()
         .filter_map(|task| task.verified_pending)
         .collect::<Vec<_>>();
-    crate::state::instances::commands::record_project_files_with_verified_curseforge_atomic(
-        instance_id,
-        &records,
-        &verified_pending,
-        &state,
-    )
-    .await?;
+    tokio::select! {
+        biased;
+        _ = context.cancellation.cancelled() => {
+            return Err(ErrorKind::OtherError(
+                "CurseForge modpack database registration canceled".to_string(),
+            ).into());
+        }
+        result = crate::state::instances::commands::record_project_files_with_verified_curseforge_atomic(
+            instance_id,
+            &records,
+            &verified_pending,
+            &state,
+        ) => result?,
+    }
     drop(database_permit);
+
+    if context.cancellation.is_cancelled() {
+        return Err(ErrorKind::OtherError(
+            "CurseForge modpack database registration canceled".to_string(),
+        )
+        .into());
+    }
 
     let batch_bytes = batch.iter().map(|task| task.expected_bytes).sum::<u64>();
     let batch_files = batch.len() as u64;
@@ -8526,8 +8541,17 @@ fn spawn_curseforge_database_worker(
         let result: crate::Result<()> = async {
             let mut channel_closed = false;
             while !channel_closed {
-                let Some(first) = receiver.recv().await else {
-                    break;
+                let first = tokio::select! {
+                    biased;
+                    _ = context.cancellation.cancelled() => {
+                        return Err(ErrorKind::OtherError(
+                            "CurseForge modpack database worker canceled".to_string(),
+                        ).into());
+                    }
+                    task = receiver.recv() => match task {
+                        Some(task) => task,
+                        None => break,
+                    },
                 };
                 let mut batch = Vec::with_capacity(MODPACK_DATABASE_BATCH_SIZE);
                 batch.push(first);
@@ -8535,6 +8559,7 @@ fn spawn_curseforge_database_worker(
                     + MODPACK_DATABASE_FLUSH_INTERVAL;
                 while batch.len() < MODPACK_DATABASE_BATCH_SIZE {
                     tokio::select! {
+                        biased;
                         _ = context.cancellation.cancelled() => {
                             return Err(ErrorKind::OtherError(
                                 "CurseForge modpack database worker canceled".to_string(),
@@ -8714,6 +8739,70 @@ struct VerifiedInstalledCurseForgeFile {
     pending_completion: CurseForgePendingCompletionProof,
 }
 
+async fn read_curseforge_verification_chunk(
+    file: &mut tokio::fs::File,
+    buffer: &mut [u8],
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<usize> {
+    match cancellation {
+        Some(cancellation) => tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => Err(ErrorKind::OtherError(
+                "CurseForge fingerprint verification canceled".to_string(),
+            ).into()),
+            result = file.read(buffer) => Ok(result?),
+        },
+        None => Ok(file.read(buffer).await?),
+    }
+}
+
+async fn fingerprint_and_sha1_file(
+    path: &Path,
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<(u64, String, u32)> {
+    const BUFFER_SIZE: usize = 256 * 1024;
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut buffer = vec![0_u8; BUFFER_SIZE];
+    let mut sha1 = sha1_smol::Sha1::new();
+    let mut size = 0_u64;
+    let mut normalized_size = 0_u64;
+    loop {
+        let read = read_curseforge_verification_chunk(
+            &mut file,
+            &mut buffer,
+            cancellation,
+        )
+        .await?;
+        if read == 0 {
+            break;
+        }
+        let bytes = &buffer[..read];
+        sha1.update(bytes);
+        size += read as u64;
+        normalized_size += bytes
+            .iter()
+            .filter(|byte| !is_curseforge_fingerprint_whitespace(**byte))
+            .count() as u64;
+    }
+
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut fingerprint =
+        CurseForgeFingerprintHasher::new(normalized_size as u32);
+    loop {
+        let read = read_curseforge_verification_chunk(
+            &mut file,
+            &mut buffer,
+            cancellation,
+        )
+        .await?;
+        if read == 0 {
+            break;
+        }
+        fingerprint.update(&buffer[..read]);
+    }
+    Ok((size, sha1.digest().to_string(), fingerprint.finish()))
+}
+
 async fn verify_installed_curseforge_file(
     path: &Path,
     file: &CurseForgeFile,
@@ -8745,8 +8834,9 @@ async fn verify_installed_curseforge_file(
     }
 
     if file.file_fingerprint != 0 {
-        let bytes = tokio::fs::read(path).await?;
-        if compute_fingerprint(&bytes) as u64 != file.file_fingerprint {
+        let (size, sha1, fingerprint) =
+            fingerprint_and_sha1_file(path, cancellation).await?;
+        if fingerprint as u64 != file.file_fingerprint {
             return Err(ErrorKind::InputError(
                 "The downloaded file does not match the required CurseForge fingerprint"
                     .to_string(),
@@ -8754,8 +8844,8 @@ async fn verify_installed_curseforge_file(
             .into());
         }
         return Ok(VerifiedInstalledCurseForgeFile {
-            size: bytes.len() as u64,
-            sha1: sha1_smol::Sha1::from(&bytes).hexdigest(),
+            size,
+            sha1,
             pending_completion:
                 CurseForgePendingCompletionProof::AuthoritativeFingerprint,
         });
@@ -8824,13 +8914,85 @@ async fn record_installed_curseforge_file(
     }
 }
 
+fn is_curseforge_fingerprint_whitespace(byte: u8) -> bool {
+    matches!(byte, 9 | 10 | 13 | 32)
+}
+
+struct CurseForgeFingerprintHasher {
+    hash: u32,
+    tail: [u8; 4],
+    tail_len: usize,
+}
+
+impl CurseForgeFingerprintHasher {
+    fn new(normalized_size: u32) -> Self {
+        Self {
+            hash: 1 ^ normalized_size,
+            tail: [0; 4],
+            tail_len: 0,
+        }
+    }
+
+    fn update(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if is_curseforge_fingerprint_whitespace(byte) {
+                continue;
+            }
+            self.tail[self.tail_len] = byte;
+            self.tail_len += 1;
+            if self.tail_len == self.tail.len() {
+                self.mix_word(u32::from_le_bytes(self.tail));
+                self.tail_len = 0;
+            }
+        }
+    }
+
+    fn mix_word(&mut self, mut value: u32) {
+        const M: u32 = 0x5bd1e995;
+        const R: u32 = 24;
+        value = value.wrapping_mul(M);
+        value ^= value >> R;
+        value = value.wrapping_mul(M);
+        self.hash = self.hash.wrapping_mul(M);
+        self.hash ^= value;
+    }
+
+    fn finish(mut self) -> u32 {
+        const M: u32 = 0x5bd1e995;
+        match self.tail[..self.tail_len] {
+            [a, b, c] => {
+                self.hash ^= (c as u32) << 16;
+                self.hash ^= (b as u32) << 8;
+                self.hash ^= a as u32;
+                self.hash = self.hash.wrapping_mul(M);
+            }
+            [a, b] => {
+                self.hash ^= (b as u32) << 8;
+                self.hash ^= a as u32;
+                self.hash = self.hash.wrapping_mul(M);
+            }
+            [a] => {
+                self.hash ^= a as u32;
+                self.hash = self.hash.wrapping_mul(M);
+            }
+            [] => {}
+            _ => unreachable!(),
+        }
+        self.hash ^= self.hash >> 13;
+        self.hash = self.hash.wrapping_mul(M);
+        self.hash ^= self.hash >> 15;
+        self.hash
+    }
+}
+
 pub fn compute_fingerprint(data: &[u8]) -> u32 {
-    let normalized = data
+    let normalized_size = data
         .iter()
-        .copied()
-        .filter(|byte| !matches!(byte, 9 | 10 | 13 | 32))
-        .collect::<Vec<_>>();
-    murmur2(&normalized, 1)
+        .filter(|byte| !is_curseforge_fingerprint_whitespace(**byte))
+        .count() as u32;
+    let mut hasher = CurseForgeFingerprintHasher::new(normalized_size);
+    hasher.update(data);
+    hasher.finish()
 }
 
 impl From<CurseForgeProject> for UnifiedSearchHit {
@@ -9175,6 +9337,7 @@ fn response_error_message(status: StatusCode, bytes: &[u8]) -> String {
         })
 }
 
+#[cfg(test)]
 fn murmur2(data: &[u8], seed: u32) -> u32 {
     const M: u32 = 0x5bd1e995;
     const R: u32 = 24;
@@ -9245,6 +9408,33 @@ mod tests {
     #[test]
     fn modpack_archives_use_sixteen_h2_range_streams() {
         assert_eq!(curseforge_modpack_h2_range_concurrency(), Some(16));
+    }
+
+    #[tokio::test]
+    async fn curseforge_database_worker_cancels_while_queue_is_empty() {
+        let cancellation = CancellationToken::new();
+        let context = CurseForgeVerificationContext {
+            reporter: None,
+            loading_bar: None,
+            details: InstallPhaseDetails::Empty,
+            files_done: Arc::new(AtomicU64::new(0)),
+            bytes_done: Arc::new(AtomicU64::new(0)),
+            active_downloads: Arc::new(AtomicU64::new(0)),
+            total_files: 1,
+            total_bytes: 1,
+            cancellation: cancellation.clone(),
+        };
+        let (_sender, receiver) = mpsc::channel(1);
+        let worker = spawn_curseforge_database_worker(receiver, context);
+
+        cancellation.cancel();
+        let error = tokio::time::timeout(Duration::from_millis(100), worker)
+            .await
+            .expect("an idle database worker should stop immediately")
+            .unwrap()
+            .unwrap_err();
+
+        assert!(error.to_string().contains("canceled"));
     }
 
     #[test]
@@ -10354,6 +10544,58 @@ mod tests {
             compute_fingerprint(b"abc\r\n def\t"),
             compute_fingerprint(b"abcdef")
         );
+    }
+
+    #[test]
+    fn streaming_fingerprint_matches_reference_across_chunk_boundaries() {
+        let data = (0..4099)
+            .map(|index| match index % 31 {
+                0 => b' ',
+                1 => b'\n',
+                2 => b'\r',
+                3 => b'\t',
+                _ => (index % 251) as u8,
+            })
+            .collect::<Vec<_>>();
+        let normalized = data
+            .iter()
+            .copied()
+            .filter(|byte| !is_curseforge_fingerprint_whitespace(*byte))
+            .collect::<Vec<_>>();
+        let expected = murmur2(&normalized, 1);
+
+        for chunk_size in [1, 2, 3, 4, 5, 31, 256, 1024] {
+            let mut hasher =
+                CurseForgeFingerprintHasher::new(normalized.len() as u32);
+            for chunk in data.chunks(chunk_size) {
+                hasher.update(chunk);
+            }
+            assert_eq!(hasher.finish(), expected, "chunk size {chunk_size}");
+        }
+        assert_eq!(compute_fingerprint(&data), expected);
+    }
+
+    #[tokio::test]
+    async fn file_fingerprint_streams_sha1_and_supports_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large-fingerprint.jar");
+        let mut data = vec![b'a'; 256 * 1024 + 17];
+        data[3] = b' ';
+        data[256 * 1024 - 1] = b'\n';
+        crate::util::io::write(&path, &data).await.unwrap();
+
+        let (size, sha1, fingerprint) =
+            fingerprint_and_sha1_file(&path, None).await.unwrap();
+        assert_eq!(size, data.len() as u64);
+        assert_eq!(sha1, sha1_smol::Sha1::from(&data).hexdigest());
+        assert_eq!(fingerprint, compute_fingerprint(&data));
+
+        let cancellation = CancellationToken::new();
+        cancellation.cancel();
+        let error = fingerprint_and_sha1_file(&path, Some(&cancellation))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("canceled"));
     }
 
     #[test]
