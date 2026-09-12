@@ -265,6 +265,7 @@ pub(crate) async fn install_optifabric_file(
             defer_persistence: false,
             verification_tx: None,
             pre_resolved_relative_path: None,
+                    expected_file_name: None,
         },
     )
     .await?;
