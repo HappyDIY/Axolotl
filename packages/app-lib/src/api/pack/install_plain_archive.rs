@@ -288,25 +288,40 @@ pub(crate) async fn install_plain_archive_with_reporter(
         .await?;
     let instance_path =
         crate::api::instance::get_full_path(&instance_id).await?;
-    archive_util::extract_archive_subdir_for_instance(
-        instance_id.clone(),
-        reporter.cancellation_token(),
-        archive_path,
-        base_folder,
-        instance_path.clone(),
-    )
-    .await?;
+    let archive_cancellation = reporter.cancellation_token();
+    let (_, archive_replacements) =
+        archive_util::materialize_archive_subdir_for_instance(
+            instance_id.clone(),
+            archive_cancellation.clone(),
+            archive_path,
+            base_folder,
+            instance_path.clone(),
+        )
+        .await?;
 
-    let local_source =
-        crate::launcher::download::LocalRuntimeSource::discover(&instance_path);
-    crate::launcher::install_minecraft_for_instance_id_with_local_source(
-        &instance_id,
-        local_source,
-        false,
-        Some(reporter.clone()),
-        crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
+    let post_archive_result: crate::Result<()> = async {
+        let local_source =
+            crate::launcher::download::LocalRuntimeSource::discover(
+                &instance_path,
+            );
+        crate::launcher::install_minecraft_for_instance_id_with_local_source(
+            &instance_id,
+            local_source,
+            false,
+            Some(reporter.clone()),
+            crate::launcher::InstanceCompletionPolicy::DeferToInstallJob,
+        )
+        .await?;
+        reporter.clear_context().await?;
+        Ok(())
+    }
+    .await;
+    archive_util::settle_staged_archive_install(
+        instance_id,
+        archive_cancellation,
+        archive_replacements,
+        post_archive_result,
+        "plain ZIP contents",
     )
-    .await?;
-    reporter.clear_context().await?;
-    Ok(())
+    .await
 }

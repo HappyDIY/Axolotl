@@ -44,18 +44,18 @@ pub(crate) async fn extract_archive_subdir(
     .await?
 }
 
-pub(crate) async fn extract_archive_subdir_for_instance(
+pub(crate) async fn materialize_archive_subdir_for_instance(
     instance_id: String,
     cancellation: CancellationToken,
     archive_path: PathBuf,
     prefix: String,
     target_dir: PathBuf,
-) -> crate::Result<u32> {
+) -> crate::Result<(u32, StagedArchiveReplacements)> {
     run_blocking_instance_write(
         instance_id,
         cancellation,
         move |cancellation| {
-            extract_archive_subdir_sync(
+            materialize_archive_subdir_sync(
                 &archive_path,
                 &prefix,
                 &target_dir,
@@ -91,6 +91,22 @@ fn extract_archive_subdir_sync(
     target_dir: &Path,
     cancellation: Option<&CancellationToken>,
 ) -> crate::Result<u32> {
+    let (files_written, replacements) = materialize_archive_subdir_sync(
+        archive_path,
+        prefix,
+        target_dir,
+        cancellation,
+    )?;
+    replacements.finalize()?;
+    Ok(files_written)
+}
+
+fn materialize_archive_subdir_sync(
+    archive_path: &Path,
+    prefix: &str,
+    target_dir: &Path,
+    cancellation: Option<&CancellationToken>,
+) -> crate::Result<(u32, StagedArchiveReplacements)> {
     let mut replacements = HashMap::<PathBuf, Option<PathBuf>>::new();
     let mut replacement_order = Vec::<PathBuf>::new();
     let result = extract_archive_subdir_entries_sync(
@@ -102,10 +118,13 @@ fn extract_archive_subdir_sync(
         &mut replacement_order,
     );
     match result {
-        Ok(files_written) => {
-            finalize_archive_replacements(&replacements)?;
-            Ok(files_written)
-        }
+        Ok(files_written) => Ok((
+            files_written,
+            StagedArchiveReplacements {
+                replacements,
+                replacement_order,
+            },
+        )),
         Err(error) => {
             if let Err(rollback_error) =
                 rollback_archive_replacements(&replacements, &replacement_order)
@@ -288,6 +307,38 @@ impl StagedArchiveReplacements {
             &self.replacements,
             &self.replacement_order,
         )
+    }
+}
+
+pub(crate) async fn settle_staged_archive_install(
+    instance_id: String,
+    cancellation: CancellationToken,
+    replacements: StagedArchiveReplacements,
+    result: crate::Result<()>,
+    description: &str,
+) -> crate::Result<()> {
+    match result {
+        Ok(()) => {
+            run_blocking_instance_write(instance_id, cancellation, move |_| {
+                replacements.finalize()
+            })
+            .await
+        }
+        Err(error) => {
+            let rollback_result = run_blocking_instance_write(
+                instance_id,
+                cancellation,
+                move |_| replacements.rollback(),
+            )
+            .await;
+            if let Err(rollback_error) = rollback_result {
+                return Err(crate::ErrorKind::OtherError(format!(
+                    "{error}; failed to restore {description}: {rollback_error}"
+                ))
+                .into());
+            }
+            Err(error)
+        }
     }
 }
 
@@ -648,6 +699,48 @@ mod tests {
         assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
         assert!(!created.exists());
         assert!(!sibling_path(&existing, ".installing.previous").exists());
+    }
+
+    #[test]
+    fn materialized_zip_subdir_can_rollback_after_later_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("pack.zip");
+        let target_dir = root.path().join("instance");
+        let existing = target_dir.join("config/existing.txt");
+        let created = target_dir.join("config/created.txt");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"old-existing").unwrap();
+        {
+            let file = std::fs::File::create(&archive_path).unwrap();
+            let mut archive = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default()
+                .compression_method(zip::CompressionMethod::Stored);
+            archive
+                .start_file("overrides/config/existing.txt", options)
+                .unwrap();
+            archive.write_all(b"new-existing").unwrap();
+            archive
+                .start_file("overrides/config/created.txt", options)
+                .unwrap();
+            archive.write_all(b"new-created").unwrap();
+            archive.finish().unwrap();
+        }
+
+        let (written, replacements) = materialize_archive_subdir_sync(
+            &archive_path,
+            "overrides/",
+            &target_dir,
+            None,
+        )
+        .unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"new-existing");
+        assert_eq!(std::fs::read(&created).unwrap(), b"new-created");
+
+        replacements.rollback().unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
+        assert!(!created.exists());
     }
 
     #[test]
