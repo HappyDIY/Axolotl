@@ -25,8 +25,8 @@ const UNMAPPED = 20260101000000
 // run the same way everywhere instead of only on Windows.
 let settingsDir
 
-function run(args, { configDir = settingsDir } = {}) {
-	const environment = { ...process.env }
+function run(args, { configDir = settingsDir, env = {} } = {}) {
+	const environment = { ...process.env, ...env }
 	delete environment.THESEUS_CONFIG_DIR
 	if (configDir) environment.THESEUS_CONFIG_DIR = configDir
 
@@ -85,7 +85,9 @@ function columns(file, table) {
 
 function backupsOf(file) {
 	const dir = path.dirname(file)
-	return fs.readdirSync(dir).filter((name) => name.startsWith(`${path.basename(file)}.before-downgrade-`))
+	return fs
+		.readdirSync(dir)
+		.filter((name) => name.startsWith(`${path.basename(file)}.before-downgrade-`))
 }
 
 function check(name, condition) {
@@ -118,14 +120,25 @@ console.log('apply')
 	check('removes the migration record', !migrations(database).includes(CLOSE_BEHAVIOR))
 	check('drops the column', !columns(database, 'settings').includes('close_behavior'))
 	check('keeps the remaining columns', columns(database, 'settings').includes('max_memory'))
-	check('keeps the row', new DatabaseSync(database, { readOnly: true }).prepare('SELECT COUNT(*) AS count FROM settings').get().count === 1)
+	check(
+		'keeps the row',
+		new DatabaseSync(database, { readOnly: true })
+			.prepare('SELECT COUNT(*) AS count FROM settings')
+			.get().count === 1,
+	)
 	check('writes one backup', backupsOf(database).length === 1)
 	check('explains how to restore it', result.output.includes('Restore the backup'))
 
 	const [backup] = backupsOf(database)
 	const backupPath = path.join(path.dirname(database), backup)
-	check('the backup is a database in its own right', migrations(backupPath).includes(CLOSE_BEHAVIOR))
-	check('the backup still has the column', columns(backupPath, 'settings').includes('close_behavior'))
+	check(
+		'the backup is a database in its own right',
+		migrations(backupPath).includes(CLOSE_BEHAVIOR),
+	)
+	check(
+		'the backup still has the column',
+		columns(backupPath, 'settings').includes('close_behavior'),
+	)
 	check(
 		'the backup needs no sidecar files',
 		!fs.existsSync(`${backupPath}-wal`) && !fs.existsSync(`${backupPath}-shm`),
@@ -178,7 +191,7 @@ console.log('refusals')
 	new DatabaseSync(stranger).exec('CREATE TABLE unrelated (a)')
 
 	const result = run(['--db', stranger, '--to', String(CLOSE_BEHAVIOR)])
-	check('refuses a database that is not the launcher\'s', result.status === 1)
+	check("refuses a database that is not the launcher's", result.status === 1)
 	check('says which table is missing', result.output.includes('_sqlx_migrations'))
 }
 
@@ -205,7 +218,10 @@ console.log('resolving the settings directory')
 	sampleDatabase(path.join(settingsDir, 'release', 'app.db'))
 
 	const result = run(['--suffix', 'pr538', '--to', String(CLOSE_BEHAVIOR), '--apply'])
-	check('a suffix targets the built directory', result.status === 0 && result.output.includes('settings-pr538'))
+	check(
+		'a suffix targets the built directory',
+		result.status === 0 && result.output.includes('settings-pr538'),
+	)
 	check(
 		'and leaves the unsuffixed directory untouched',
 		migrations(path.join(settingsDir, 'release', 'app.db')).includes(CLOSE_BEHAVIOR),
@@ -227,7 +243,10 @@ console.log('resolving the settings directory')
 
 	const result = run(['--to', String(CLOSE_BEHAVIOR)], { configDir: nearby })
 	check('a missing database names the suffixed one that exists', result.status === 1)
-	check('with its full path', result.output.includes(path.join(`${nearby}-pr538`, 'beta', 'app.db')))
+	check(
+		'with its full path',
+		result.output.includes(path.join(`${nearby}-pr538`, 'beta', 'app.db')),
+	)
 	check('and how to select it', result.output.includes('--suffix'))
 }
 
@@ -249,5 +268,50 @@ console.log('resolving the settings directory')
 	check('an empty directory needs an explicit channel', result.status === 1)
 	check('and says which flag to pass', result.output.includes('--channel'))
 }
+
+// --- refusing a database a running launcher holds open ------------------------
+
+if (process.platform !== 'win32') {
+	console.log('skipping the running launcher checks outside Windows')
+} else {
+	console.log('refusing a database a running launcher holds open')
+
+	const held = path.join(directory, 'held')
+	const heldDb = path.join(held, 'beta', 'app.db')
+	sampleDatabase(heldDb)
+
+	// tasklist matches on the name of the executable, so the probe has to be a
+	// process that is certainly running: the test itself. A filter covering only
+	// the first candidate would miss it and rewrite the database regardless.
+	const runningImage = path.basename(process.execPath)
+
+	const running = run(['--to', String(CLOSE_BEHAVIOR), '--apply'], {
+		configDir: held,
+		env: { AXOLOTL_LAUNCHER_IMAGES: `definitely-not-running.exe,${runningImage}` },
+	})
+	check('a launcher running under a later candidate is found', running.status === 1)
+	check('and named in the refusal', running.output.includes(`${runningImage} is running`))
+	check('the migration record stays', migrations(heldDb).includes(CLOSE_BEHAVIOR))
+
+	const absent = run(['--to', String(CLOSE_BEHAVIOR), '--apply'], {
+		configDir: held,
+		env: { AXOLOTL_LAUNCHER_IMAGES: 'definitely-not-running.exe' },
+	})
+	check('no launcher running lets the downgrade through', absent.status === 0)
+	check('and the record goes', !migrations(heldDb).includes(CLOSE_BEHAVIOR))
+
+	// A database with nothing left to remove returns before the launcher check,
+	// so this needs one of its own.
+	const namelessDir = path.join(directory, 'nameless')
+	sampleDatabase(path.join(namelessDir, 'beta', 'app.db'))
+
+	const nameless = run(['--to', String(CLOSE_BEHAVIOR), '--apply'], {
+		configDir: namelessDir,
+		env: { AXOLOTL_LAUNCHER_IMAGES: ' , ' },
+	})
+	check('a list naming no process is rejected', nameless.status === 1)
+	check('and says so', nameless.output.includes('names no process'))
+}
+
 fs.rmSync(directory, { recursive: true, force: true })
 console.log('\nAll downgrade script checks passed.')

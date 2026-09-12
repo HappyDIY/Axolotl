@@ -26,6 +26,9 @@
 //   --allow-unmapped  continue although a migration has no known schema here
 //   --list            print the applied migrations and exit
 //
+// AXOLOTL_LAUNCHER_IMAGES=<name,...>  process names that count as the launcher
+//                     running; defaults to Axolotl Launcher.exe, theseus_gui.exe
+//
 // Resolving the default location needs Windows; pass --db anywhere else. The
 // launcher must be closed: a running instance keeps the database open and would
 // keep using the schema it read at startup.
@@ -193,9 +196,7 @@ function resolveChannel(args, settingsDir) {
 		return channel
 	}
 
-	const present = CHANNELS.filter((channel) =>
-		existsSync(join(settingsDir, channel, APP_DB)),
-	)
+	const present = CHANNELS.filter((channel) => existsSync(join(settingsDir, channel, APP_DB)))
 	return present.length === 1 ? present[0] : null
 }
 
@@ -222,9 +223,7 @@ function otherDatabases(base) {
 				entry.name !== basename(base) &&
 				entry.name.startsWith(`${basename(base)}-`),
 		)
-		.flatMap((entry) =>
-			CHANNELS.map((channel) => join(parent, entry.name, channel, APP_DB)),
-		)
+		.flatMap((entry) => CHANNELS.map((channel) => join(parent, entry.name, channel, APP_DB)))
 		.filter((candidate) => existsSync(candidate))
 }
 
@@ -312,25 +311,50 @@ function columnsPresent(db, columns) {
 	return present
 }
 
-function launcherIsRunning() {
+// Names a running launcher can appear under. Installed builds use the configured
+// main binary name and a `tauri dev` binary keeps the crate name; a fork may
+// rename it again, so AXOLOTL_LAUNCHER_IMAGES replaces the list.
+const LAUNCHER_IMAGES = ['Axolotl Launcher.exe', 'theseus_gui.exe']
+
+function launcherImages() {
+	const configured = process.env.AXOLOTL_LAUNCHER_IMAGES
+	if (configured === undefined) return LAUNCHER_IMAGES
+
+	const images = configured
+		.split(',')
+		.map((image) => image.trim())
+		.filter((image) => image !== '')
+	if (images.length === 0) fail('AXOLOTL_LAUNCHER_IMAGES names no process')
+
+	return images
+}
+
+// The name a running launcher answers to, or null when none is running. Its
+// database must not be touched: the running process would carry on with the
+// schema it read at startup.
+function runningLauncher() {
 	if (process.platform !== 'win32') {
 		note('warning: cannot check whether the launcher is running on this platform')
-		return false
+		return null
 	}
 
-	// Both names occur in practice: installed builds use mainBinaryName, while a
-	// `tauri dev` binary keeps the crate name.
-	const images = ['Axolotl Launcher.exe', 'theseus_gui.exe']
-	const result = spawnSync('tasklist', ['/NH', '/FI', `IMAGENAME eq ${images[0]}`], {
-		encoding: 'utf8',
-	})
+	// tasklist takes a single image name per filter, so every candidate needs its
+	// own query. One filter hides all the other names, and a launcher running
+	// under one of them would be missed while its database is rewritten.
+	return (
+		launcherImages().find((image) => {
+			const result = spawnSync('tasklist', ['/NH', '/FI', `IMAGENAME eq ${image}`], {
+				encoding: 'utf8',
+			})
 
-	if (result.error) {
-		fail(`could not run tasklist to check for a running launcher: ${result.error.message}`)
-	}
+			if (result.error) {
+				fail(`could not run tasklist to check for a running launcher: ${result.error.message}`)
+			}
 
-	const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
-	return images.some((image) => output.includes(image))
+			const output = `${result.stdout ?? ''}${result.stderr ?? ''}`
+			return output.includes(image)
+		}) ?? null
+	)
 }
 
 // A file copy of a live database can capture the main file and its -wal at
@@ -369,9 +393,7 @@ function planDowngrade(db, target) {
 	assertLauncherDatabase(database, db)
 
 	const rows = database
-		.prepare(
-			'SELECT version, success FROM _sqlx_migrations WHERE version >= ? ORDER BY version',
-		)
+		.prepare('SELECT version, success FROM _sqlx_migrations WHERE version >= ? ORDER BY version')
 		.all(target)
 	database.close()
 
@@ -477,8 +499,9 @@ function main() {
 		return
 	}
 
-	if (launcherIsRunning()) {
-		fail('Axolotl Launcher is running; close it before downgrading the database')
+	const running = runningLauncher()
+	if (running) {
+		fail(`${running} is running; close the launcher before downgrading the database`)
 	}
 
 	const backup = backupPath(db)
@@ -509,8 +532,7 @@ function main() {
 			)
 		}
 
-		const remaining = writable.prepare('SELECT COUNT(*) AS count FROM _sqlx_migrations').get()
-			.count
+		const remaining = writable.prepare('SELECT COUNT(*) AS count FROM _sqlx_migrations').get().count
 		const integrity = writable.prepare('PRAGMA integrity_check').get().integrity_check
 		const brokenReferences = writable.prepare('PRAGMA foreign_key_check').all()
 
