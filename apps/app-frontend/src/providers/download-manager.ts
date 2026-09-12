@@ -19,6 +19,7 @@ import {
 } from '@/helpers/install'
 import type { LoadingBar } from '@/helpers/state'
 import { progress_bars_list } from '@/helpers/state'
+import { effectiveInstallProgress, hasDeterminateInstallProgress } from '@/helpers/install-progress'
 
 const activeStatuses = new Set(['queued', 'running', 'canceling', 'waiting_for_user'])
 export const downloadBarTypes = new Set([
@@ -126,6 +127,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		if (current && current.modified.localeCompare(job.modified) > 0) return
 		const currentIndex = jobs.value.findIndex((candidate) => candidate.job_id === job.job_id)
 		if (currentIndex !== -1) {
+			job = preserveMonotonicProgress(jobs.value[currentIndex], job)
 			// Progress snapshots are frequent. Keep an existing job in its current
 			// position instead of rebuilding and sorting the whole list on every
 			// update. Jobs created within the same second have identical timestamps;
@@ -206,14 +208,20 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 	function syncLiveByteProgress(job: InstallJobSnapshot) {
 		const total = job.summary.bytes_total
 		const downloaded = job.items.reduce((sum, item) => sum + item.bytes_downloaded, 0)
-		const current = total == null ? downloaded : Math.min(downloaded, total)
+		const current = Math.max(
+			job.summary.bytes_downloaded,
+			total == null ? downloaded : Math.min(downloaded, total),
+		)
 		job.summary = { ...job.summary, bytes_downloaded: current }
 		if (job.phase === 'downloading_content' && job.progress?.secondary) {
 			job.progress = {
 				...job.progress,
 				secondary: {
 					...job.progress.secondary,
-					current: Math.min(current, job.progress.secondary.total),
+					current: Math.min(
+						Math.max(job.progress.secondary.current, current),
+						job.progress.secondary.total,
+					),
 				},
 			}
 		}
@@ -239,7 +247,11 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				break
 			case 'progress':
 				if (!current) return
-				item = { ...current, status: update.status, bytes_downloaded: update.bytes }
+				item = {
+					...current,
+					status: update.status,
+					bytes_downloaded: Math.max(current.bytes_downloaded, update.bytes),
+				}
 				job.summary = {
 					...job.summary,
 					speed_bytes_per_second: update.speed_bytes_per_second,
@@ -251,8 +263,8 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				item = {
 					...current,
 					status: 'verifying',
-					bytes_downloaded: update.bytes,
-					bytes_total: current.bytes_total ?? update.bytes,
+					bytes_downloaded: Math.max(current.bytes_downloaded, update.bytes),
+					bytes_total: current.bytes_total ?? Math.max(current.bytes_downloaded, update.bytes),
 				}
 				break
 			case 'failed':
@@ -265,6 +277,34 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		else job.items[itemIndex] = item
 	}
 
+	function preserveMonotonicProgress(
+		current: InstallJobSnapshot,
+		next: InstallJobSnapshot,
+	): InstallJobSnapshot {
+		if (current.phase !== next.phase) return next
+		const currentProgress = effectiveInstallProgress(current)
+		const nextProgress = effectiveInstallProgress(next)
+		if (
+			!hasDeterminateInstallProgress(currentProgress) ||
+			!hasDeterminateInstallProgress(nextProgress)
+		) {
+			return next
+		}
+		if (currentProgress.total !== nextProgress.total) return next
+		if (nextProgress.current >= currentProgress.current) return next
+
+		if (next.phase === 'downloading_content' && next.progress?.secondary) {
+			return {
+				...next,
+				progress: {
+					...next.progress,
+					secondary: current.progress?.secondary ?? next.progress.secondary,
+				},
+			}
+		}
+		return { ...next, progress: current.progress }
+	}
+
 	async function refresh() {
 		// A list request can race with realtime install/download events. Record
 		// the local revision at dispatch so its older response cannot roll a job
@@ -275,7 +315,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			return null
 		})
 		if (page && !disposed) {
-			jobs.value = mergeRefreshedDownloadJobs(
+			const refreshedJobs = mergeRefreshedDownloadJobs(
 				page.jobs,
 				jobs.value,
 				revisionsAtDispatch,
@@ -283,6 +323,10 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				syntheticIds,
 				activeStatuses,
 			)
+			jobs.value = refreshedJobs.map((job) => {
+				const current = jobs.value.find((candidate) => candidate.job_id === job.job_id)
+				return current ? preserveMonotonicProgress(current, job) : job
+			})
 			const seenInstances = new Set<string>()
 			for (const job of page.jobs) {
 				if (job.status !== 'succeeded') continue
