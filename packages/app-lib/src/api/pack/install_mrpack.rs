@@ -30,7 +30,7 @@ use crate::util::io;
 use async_zip::base::read::seek::ZipFileReader as SeekZipFileReader;
 use async_zip::base::read::{WithEntry, ZipEntryReader};
 use async_zip::tokio::read::fs::ZipFileReader as FsZipFileReader;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use path_util::SafeRelativeUtf8UnixPathBuf;
 use std::collections::{HashMap, HashSet, VecDeque};
 #[cfg(test)]
@@ -75,7 +75,7 @@ struct MrpackVerificationTask {
     target_path: PathBuf,
     downloaded_bytes: u64,
     attempts: u32,
-    finalize_permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    finalize_semaphore: Option<Arc<Semaphore>>,
 }
 
 pub(crate) enum MrpackInstallOutcome {
@@ -1102,17 +1102,32 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         });
         let (verification_tx, mut verification_rx) =
             mpsc::channel::<MrpackVerificationTask>(128);
+        let pending_verification_sends = Arc::new(Mutex::new(Vec::new()));
         let verification_context = content_context.clone();
         let verification_completion_tx = completion_tx.clone();
         let verification_worker = tokio::spawn(async move {
-            while let Some(task) = verification_rx.recv().await {
+            let cancellation =
+                verification_context.reporter.cancellation_token();
+            let worker_context = verification_context.clone();
+            let worker_completion_tx = verification_completion_tx.clone();
+            let result = futures::stream::poll_fn(move |cx| {
+                verification_rx.poll_recv(cx)
+            })
+            .map(Ok::<_, crate::Error>)
+            .try_for_each_concurrent(
+                Some(NATIVE_CONTENT_FINALIZE_CONCURRENCY),
+                move |task| {
+                    let verification_context = worker_context.clone();
+                    let verification_completion_tx =
+                        worker_completion_tx.clone();
+                    async move {
                 let MrpackVerificationTask {
                     project,
                     project_path,
                     target_path,
                     downloaded_bytes,
                     attempts,
-                    finalize_permit,
+                    finalize_semaphore,
                 } = task;
                 let result: crate::Result<()> = async {
                     let cancellation = verification_context.reporter.cancellation_token();
@@ -1121,6 +1136,23 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                             "modpack verification canceled".to_string(),
                         ).into());
                     }
+                    let finalize_permit = if let Some(semaphore) = finalize_semaphore {
+                        Some(tokio::select! {
+                            _ = cancellation.cancelled() => {
+                                return Err(crate::ErrorKind::OtherError(
+                                    "modpack finalization canceled while waiting for worker".to_string(),
+                                ).into());
+                            }
+                            permit = tokio::time::timeout(
+                                FINALIZE_WAIT_TIMEOUT,
+                                semaphore.acquire_owned(),
+                            ) => permit.map_err(|_| crate::ErrorKind::NetworkError(
+                                "timed out waiting for modpack finalization worker".to_string(),
+                            ))??,
+                        })
+                    } else {
+                        None
+                    };
                     verification_context
                         .reporter
                         .record_download_stage(
@@ -1202,8 +1234,15 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                     verification_context.reporter.cancellation_token().cancel();
                     return Err(error);
                 }
+                Ok(())
+                    }
+                },
+            )
+            .await;
+            if result.is_err() {
+                cancellation.cancel();
             }
-            Ok(())
+            result
         });
         let pass_failures =
             collect_required_file_failures_concurrently(
@@ -1220,6 +1259,7 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 skipped_missing_content_paths.clone();
             let native_pipeline = native_pipeline.clone();
             let verification_tx = verification_tx.clone();
+            let pending_verification_sends = pending_verification_sends.clone();
              async move {
                 let project_size = project.file_size as u64;
                 let project_path =
@@ -1381,42 +1421,20 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
                 drop(download_permit);
                 let downloaded_bytes = download.size;
                 content_context.record_download_result(&download).await;
-                let finalize_permit = match native_pipeline.as_ref() {
-                    Some((_, finalize)) => {
-                        let cancellation =
-                            content_context.reporter.cancellation_token();
-                        let wait = tokio::time::timeout(
-                            FINALIZE_WAIT_TIMEOUT,
-                            Arc::clone(finalize).acquire_owned(),
-                        );
-                        Some(tokio::select! {
-                            _ = cancellation.cancelled() => {
-                                return Err(crate::ErrorKind::OtherError(
-                                    "modpack finalization canceled while waiting for worker".to_string(),
-                                ).into());
-                            }
-                            result = wait => result.map_err(|_| {
-                                crate::ErrorKind::NetworkError(
-                                    "timed out waiting for modpack finalization worker".to_string(),
-                                )
-                            })??,
-                        })
-                    }
-                    None => None,
-                };
-                verification_tx
-                    .send(MrpackVerificationTask {
+                let queued_project_path = project_path.clone();
+                let send_task = tokio::spawn(async move {
+                    verification_tx.send(MrpackVerificationTask {
                         project: project.clone(),
-                        project_path: project_path.to_string(),
+                        project_path: queued_project_path,
                         target_path,
                         downloaded_bytes,
                         attempts: download.attempts as u32,
-                        finalize_permit,
-                    })
-                    .await
-                    .map_err(|_| crate::ErrorKind::OtherError(
-                        "modpack verification worker stopped".to_string(),
-                    ))?;
+                        finalize_semaphore: native_pipeline
+                            .as_ref()
+                            .map(|(_, finalize)| Arc::clone(finalize)),
+                    }).await
+                });
+                pending_verification_sends.lock().await.push(send_task);
                 Ok(())
                 }
                 .await;
@@ -1481,6 +1499,21 @@ pub(crate) async fn install_zipped_mrpack_files_with_reporter(
         },
     )
     .await?;
+        let pending_sends =
+            std::mem::take(&mut *pending_verification_sends.lock().await);
+        for send in pending_sends {
+            send.await
+                .map_err(|error| {
+                    crate::ErrorKind::OtherError(format!(
+                        "modpack verification enqueue failed: {error}"
+                    ))
+                })?
+                .map_err(|_| {
+                    crate::ErrorKind::OtherError(
+                        "modpack verification worker stopped".to_string(),
+                    )
+                })?;
+        }
         drop(completion_tx);
         drop(verification_tx);
         verification_worker.await.map_err(|error| {

@@ -84,6 +84,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 	> = []
 	const pendingRequestUpdatesByJob = new Map<string, DownloadRequestUpdate[]>()
 	const pendingRequestUpdates: DownloadRequestUpdate[] = []
+	const pendingProgressUpdateIndexes = new Map<string, number>()
 	let requestFlushTimer: ReturnType<typeof setTimeout> | null = null
 	let legacyRefreshTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -111,6 +112,10 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			pendingInitialUpdates.push({ kind: 'job', job })
 			return
 		}
+		// Preserve event arrival order. A full snapshot is authoritative over
+		// download-request updates received before it; otherwise a delayed frame
+		// flush can regress a completed item back to downloading.
+		flushRequestUpdates()
 		const current = jobs.value.find((candidate) => candidate.job_id === job.job_id)
 		if (current && current.modified.localeCompare(job.modified) > 0) return
 		const currentIndex = jobs.value.findIndex((candidate) => candidate.job_id === job.job_id)
@@ -139,6 +144,18 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			pendingInitialUpdates.push({ kind: 'request', update })
 			return
 		}
+		const key = `${update.job_id}\0${update.id}`
+		if (update.type === 'progress') {
+			const pendingIndex = pendingProgressUpdateIndexes.get(key)
+			if (pendingIndex != null) {
+				pendingRequestUpdates[pendingIndex] = update
+				scheduleRequestFlush()
+				return
+			}
+			pendingProgressUpdateIndexes.set(key, pendingRequestUpdates.length)
+		} else {
+			pendingProgressUpdateIndexes.delete(key)
+		}
 		pendingRequestUpdates.push(update)
 		scheduleRequestFlush()
 	}
@@ -148,32 +165,53 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		requestFlushTimer = setTimeout(() => {
 			requestFlushTimer = null
 			flushRequestUpdates()
-		}, 120)
+		}, 16)
 	}
 
 	function flushRequestUpdates() {
 		if (pendingRequestUpdates.length === 0) return
 		const updates = pendingRequestUpdates.splice(0)
-		let next = jobs.value
+		pendingProgressUpdateIndexes.clear()
+		const next = [...jobs.value]
+		const mutableJobs = new Map<number, InstallJobSnapshot>()
 		for (const update of updates) {
-			next = applyRequestUpdate(update, next)
+			const jobIndex = next.findIndex((job) => job.job_id === update.job_id)
+			if (jobIndex === -1) {
+				const pending = pendingRequestUpdatesByJob.get(update.job_id) ?? []
+				pending.push(update)
+				pendingRequestUpdatesByJob.set(update.job_id, pending)
+				continue
+			}
+			let job = mutableJobs.get(jobIndex)
+			if (!job) {
+				const current = next[jobIndex]
+				job = { ...current, items: [...current.items] }
+				next[jobIndex] = job
+				mutableJobs.set(jobIndex, job)
+			}
+			applyRequestUpdateToJob(update, job)
 		}
+		for (const job of mutableJobs.values()) syncLiveByteProgress(job)
 		jobs.value = next
 	}
 
-	function applyRequestUpdate(
-		update: DownloadRequestUpdate,
-		jobs: InstallJobSnapshot[],
-	): InstallJobSnapshot[] {
-		const jobIndex = jobs.findIndex((job) => job.job_id === update.job_id)
-		if (jobIndex === -1) {
-			const pending = pendingRequestUpdatesByJob.get(update.job_id) ?? []
-			pending.push(update)
-			pendingRequestUpdatesByJob.set(update.job_id, pending)
-			return jobs
+	function syncLiveByteProgress(job: InstallJobSnapshot) {
+		const total = job.summary.bytes_total
+		const downloaded = job.items.reduce((sum, item) => sum + item.bytes_downloaded, 0)
+		const current = total == null ? downloaded : Math.min(downloaded, total)
+		job.summary = { ...job.summary, bytes_downloaded: current }
+		if (job.phase === 'downloading_content' && job.progress?.secondary) {
+			job.progress = {
+				...job.progress,
+				secondary: {
+					...job.progress.secondary,
+					current: Math.min(current, job.progress.secondary.total),
+				},
+			}
 		}
+	}
 
-		const job = jobs[jobIndex]
+	function applyRequestUpdateToJob(update: DownloadRequestUpdate, job: InstallJobSnapshot) {
 		const itemIndex = job.items.findIndex((item) => item.id === update.id)
 		const current = itemIndex === -1 ? null : job.items[itemIndex]
 		let item: InstallJobSnapshot['items'][number]
@@ -181,11 +219,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 		switch (update.type) {
 			case 'started':
 				item = {
-					...(current ?? {
-						id: update.id,
-						name: update.name,
-						bytes_downloaded: 0,
-					}),
+					...(current ?? { id: update.id, name: update.name, bytes_downloaded: 0 }),
 					status: 'downloading',
 					bytes_total: current?.bytes_total ?? update.bytes_total,
 					attempt: update.attempt,
@@ -196,47 +230,31 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 				}
 				break
 			case 'progress':
-				if (!current) return jobs
-				item = {
-					...current,
-					status: update.status,
-					bytes_downloaded: update.bytes,
+				if (!current) return
+				item = { ...current, status: update.status, bytes_downloaded: update.bytes }
+				job.summary = {
+					...job.summary,
+					speed_bytes_per_second: update.speed_bytes_per_second,
+					eta_seconds: update.eta_seconds,
 				}
 				break
 			case 'finished':
-				if (!current) return jobs
+				if (!current) return
 				item = {
 					...current,
-					// A request has reached disk, but an install item may still be
-					// hashing, registering metadata, or waiting for SQLite.
 					status: 'verifying',
 					bytes_downloaded: update.bytes,
 					bytes_total: current.bytes_total ?? update.bytes,
 				}
 				break
 			case 'failed':
-				if (!current) return jobs
+				if (!current) return
 				item = { ...current, status: 'failed' }
 				break
 		}
 
-		const items = [...job.items]
-		if (itemIndex === -1) items.push(item)
-		else items[itemIndex] = item
-		const nextJobs = [...jobs]
-		nextJobs[jobIndex] = {
-			...job,
-			items,
-			summary:
-				update.type === 'progress'
-					? {
-							...job.summary,
-							speed_bytes_per_second: update.speed_bytes_per_second,
-							eta_seconds: update.eta_seconds,
-						}
-					: job.summary,
-		}
-		return nextJobs
+		if (itemIndex === -1) job.items.push(item)
+		else job.items[itemIndex] = item
 	}
 
 	async function refresh() {
@@ -415,6 +433,7 @@ export function createDownloadManager(handleError: (error: unknown) => void): Do
 			initializing = false
 			pendingInitialUpdates.length = 0
 			pendingRequestUpdatesByJob.clear()
+			pendingProgressUpdateIndexes.clear()
 			syntheticCancelHandlers.clear()
 			if (requestFlushTimer !== null) {
 				clearTimeout(requestFlushTimer)

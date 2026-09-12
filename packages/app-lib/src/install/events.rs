@@ -7,15 +7,16 @@ use super::model::{
 };
 use super::store;
 use chrono::Utc;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, LazyLock, Weak};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-const LIVE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(250);
-const LIVE_PROGRESS_MIN_BYTES: u64 = 256 * 1024;
+// Keep per-file progress responsive without emitting every network chunk.
+const LIVE_PROGRESS_EMIT_INTERVAL: Duration = Duration::from_millis(100);
+const LIVE_PROGRESS_MIN_BYTES: u64 = 64 * 1024;
 
 static REPORTER_STATES: LazyLock<
     dashmap::DashMap<Uuid, Weak<Mutex<InstallProgressReporterState>>>,
@@ -40,7 +41,9 @@ struct InstallProgressReporterState {
     last_persisted_progress: Option<(InstallPhaseId, u64)>,
     initialized_from_store: bool,
     postponed_java_versions: HashSet<u32>,
-    last_live_emit_at: Instant,
+    /// Per-download event throttles. A global throttle makes one busy file
+    /// suppress progress events for every other active download.
+    last_live_emit_at: HashMap<String, Instant>,
     /// Paths with a pending stalled-download check task, so at most one
     /// delayed check is scheduled per active download at a time.
     pending_stall_checks: HashSet<String>,
@@ -136,7 +139,7 @@ impl InstallProgressReporter {
                             last_persisted_progress: None,
                             initialized_from_store: false,
                             postponed_java_versions: HashSet::new(),
-                            last_live_emit_at: Instant::now(),
+                            last_live_emit_at: HashMap::new(),
                             pending_stall_checks: HashSet::new(),
                         }));
                     entry.insert(Arc::downgrade(&state));
@@ -152,7 +155,7 @@ impl InstallProgressReporter {
                         last_persisted_progress: None,
                         initialized_from_store: false,
                         postponed_java_versions: HashSet::new(),
-                        last_live_emit_at: Instant::now(),
+                        last_live_emit_at: HashMap::new(),
                         pending_stall_checks: HashSet::new(),
                     }));
                 entry.insert(Arc::downgrade(&state));
@@ -543,12 +546,20 @@ impl InstallProgressReporter {
         bytes_total: u64,
     ) -> crate::Result<()> {
         let path = path.into();
-        let app_state = crate::State::get().await?;
-        let mut state = self.state.lock().await;
-        self.sync_latest(&mut state, &app_state).await?;
+        // Progress reporting runs in the socket read path. Never make network
+        // workers wait for another file's reporter update; a later sample
+        // carries the cumulative byte count and catches the UI up.
+        let Ok(mut state) = self.state.try_lock() else {
+            return Ok(());
+        };
+        if !state.initialized_from_store {
+            return Ok(());
+        }
         let now = Utc::now();
-        let emit_too_soon =
-            state.last_live_emit_at.elapsed() < LIVE_PROGRESS_EMIT_INTERVAL;
+        let emit_too_soon = state
+            .last_live_emit_at
+            .get(&path)
+            .is_some_and(|last| last.elapsed() < LIVE_PROGRESS_EMIT_INTERVAL);
         let Some(active) = state.job.active_downloads.get_mut(&path) else {
             return Ok(());
         };
@@ -595,7 +606,7 @@ impl InstallProgressReporter {
             return Ok(());
         }
         active.last_reported_bytes = bytes;
-        state.last_live_emit_at = Instant::now();
+        state.last_live_emit_at.insert(path.clone(), Instant::now());
         let (speed_bytes_per_second, eta_seconds) =
             live_download_metrics(&state.job);
         let schedule_stall_check =
@@ -645,7 +656,7 @@ impl InstallProgressReporter {
         let bytes = active.bytes_downloaded;
         let (speed_bytes_per_second, eta_seconds) =
             live_download_metrics(&state.job);
-        state.last_live_emit_at = Instant::now();
+        state.last_live_emit_at.insert(path.clone(), Instant::now());
         drop(state);
         emit_download_request_update(&DownloadRequestUpdate::Progress {
             job_id: self.job_id,
@@ -766,6 +777,7 @@ impl InstallProgressReporter {
             InstallJobEventKind::DownloadRequestFinished { path, .. }
             | InstallJobEventKind::DownloadRequestFailed { path } => {
                 state.job.active_downloads.remove(path);
+                state.last_live_emit_at.remove(path);
             }
             _ => {}
         }
@@ -1040,6 +1052,34 @@ mod tests {
 
         assert!(second.is_java_download_postponed(21).await);
         assert!(!second.is_java_download_postponed(17).await);
+    }
+
+    #[tokio::test]
+    async fn download_progress_never_waits_for_reporter_lock() {
+        let job_id = Uuid::new_v4();
+        let reporter = InstallProgressReporter::new(
+            job_id,
+            InstallJobState::new(InstallRequest::CreateInstance {
+                name: "Test".to_string(),
+                game_version: "1.21.1".to_string(),
+                loader: ModLoader::Vanilla,
+                loader_version: None,
+                adjuncts: Vec::new(),
+                icon_path: None,
+                link: InstanceLink::Unmanaged,
+                game_dir_override: None,
+            }),
+        );
+        let guard = reporter.state.lock().await;
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            reporter.record_download_progress("mods/test.jar", 64, 128),
+        )
+        .await
+        .expect("socket progress callback must not wait for the reporter lock")
+        .unwrap();
+        drop(guard);
+        InstallProgressReporter::reset_job(job_id);
     }
 
     #[tokio::test]

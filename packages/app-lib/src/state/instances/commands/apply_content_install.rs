@@ -2137,7 +2137,7 @@ pub(crate) async fn record_project_file_atomic(
     record_project_files_atomic_with_pending_completion(
         instance_id,
         std::slice::from_ref(&record),
-        PendingManualDownloadCompletion::None,
+        &[],
         state,
     )
     .await
@@ -2172,13 +2172,11 @@ pub(crate) async fn record_verified_curseforge_project_file_atomic(
         known_modrinth_project_id: None,
         known_modrinth_version_id: None,
     };
+    let verified_pending = [(project_id, file_id)];
     record_project_files_atomic_with_pending_completion(
         instance_id,
         std::slice::from_ref(&record),
-        PendingManualDownloadCompletion::VerifiedCurseForge {
-            project_id,
-            file_id,
-        },
+        &verified_pending,
         state,
     )
     .await
@@ -2192,26 +2190,32 @@ pub(crate) async fn record_project_files_atomic(
     record_project_files_atomic_with_pending_completion(
         instance_id,
         records,
-        PendingManualDownloadCompletion::None,
+        &[],
         state,
     )
     .await
 }
 
-#[derive(Clone, Copy)]
-enum PendingManualDownloadCompletion {
-    None,
-    VerifiedCurseForge {
-        project_id: CurseForgeProjectId,
-        file_id: CurseForgeFileId,
-    },
+pub(crate) async fn record_project_files_with_verified_curseforge_atomic(
+    instance_id: &str,
+    records: &[ProjectFileRecord],
+    verified_pending: &[(CurseForgeProjectId, CurseForgeFileId)],
+    state: &State,
+) -> crate::Result<()> {
+    record_project_files_atomic_with_pending_completion(
+        instance_id,
+        records,
+        verified_pending,
+        state,
+    )
+    .await
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn record_project_files_atomic_with_pending_completion(
     instance_id: &str,
     records: &[ProjectFileRecord],
-    pending_completion: PendingManualDownloadCompletion,
+    verified_pending: &[(CurseForgeProjectId, CurseForgeFileId)],
     state: &State,
 ) -> crate::Result<()> {
     if records.is_empty() {
@@ -2330,10 +2334,19 @@ async fn record_project_files_atomic_with_pending_completion(
             )
             .await?;
         }
-        if let PendingManualDownloadCompletion::VerifiedCurseForge {
-            project_id,
-            file_id,
-        } = pending_completion
+        if let Some((project_id, file_id)) =
+            record.provider_ref.as_ref().and_then(|provider_ref| {
+                let ContentProviderRef::CurseForge {
+                    project_id,
+                    file_id: Some(file_id),
+                } = provider_ref
+                else {
+                    return None;
+                };
+                verified_pending
+                    .contains(&(*project_id, *file_id))
+                    .then_some((*project_id, *file_id))
+            })
         {
             content_rows::complete_pending_manual_download(
                 instance_id,
