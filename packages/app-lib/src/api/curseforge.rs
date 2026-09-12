@@ -504,6 +504,8 @@ pub struct CurseForgeInstallRequest {
         Option<mpsc::Sender<CurseForgeVerificationTask>>,
     #[serde(skip)]
     pub(crate) pre_resolved_relative_path: Option<String>,
+    #[serde(skip)]
+    pub(crate) expected_file_name: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1712,6 +1714,7 @@ async fn install_file_with_metrics(
                 pre_resolved_relative_path: request
                     .pre_resolved_relative_path
                     .as_deref(),
+                expected_file_name: request.expected_file_name.as_deref(),
             })
             .await?;
         let relative_path = downloaded.relative_path.clone();
@@ -2367,6 +2370,7 @@ async fn install_fixed_curseforge_content(
         defer_persistence: request.defer_persistence,
         verification_tx: None,
         pre_resolved_relative_path: None,
+        expected_file_name: request.expected_file_name.as_deref(),
     })
     .await?;
     result.installed.push(CurseForgeInstalledFile {
@@ -4199,6 +4203,7 @@ async fn install_preloaded_modpack_file(
         pre_resolved_relative_path: request
             .pre_resolved_relative_path
             .as_deref(),
+        expected_file_name: request.expected_file_name.as_deref(),
     })
     .await?;
     Ok(CurseForgeInstallResult {
@@ -4256,6 +4261,7 @@ async fn retry_modpack_file_install(
             defer_persistence: verification_tx.is_some(),
             verification_tx: verification_tx.clone(),
             pre_resolved_relative_path: pre_resolved_relative_path.clone(),
+            expected_file_name: Some(expected_file_name.to_string()),
         };
         let result = match preloaded.as_ref() {
             Some((project, file)) => {
@@ -5908,6 +5914,7 @@ async fn install_selected_file(
         defer_persistence: false,
         verification_tx: None,
         pre_resolved_relative_path: None,
+        expected_file_name: None,
     })
     .await?;
     if ownership_kind
@@ -8432,6 +8439,7 @@ struct DownloadInstalledFileRequest<'a> {
     defer_persistence: bool,
     verification_tx: Option<&'a mpsc::Sender<CurseForgeVerificationTask>>,
     pre_resolved_relative_path: Option<&'a str>,
+    expected_file_name: Option<&'a str>,
 }
 
 struct DownloadedCurseForgeFile {
@@ -8930,6 +8938,7 @@ async fn download_installed_file(
         defer_persistence,
         verification_tx,
         pre_resolved_relative_path,
+        expected_file_name,
     } = request;
     if file.mod_id != project_id || file.id != file_id {
         return Err(ErrorKind::InputError(
@@ -8965,6 +8974,17 @@ async fn download_installed_file(
     let full_path = crate::api::instance::get_full_path(instance_id)
         .await?
         .join(&relative_path);
+    if project_type == ProjectType::Mod
+        && let Some(expected_file_name) = expected_file_name
+        && Path::new(&relative_path).file_name()
+            != Some(std::ffi::OsStr::new(expected_file_name))
+    {
+        return Err(ErrorKind::OtherError(format!(
+            "CurseForge install context mismatch before download: expected_file={} installed_path={}",
+            expected_file_name, relative_path,
+        ))
+        .into());
+    }
     let mut download_path = full_path.as_os_str().to_os_string();
     download_path.push(".installing.download");
     let download_path = Path::new(&download_path);
@@ -10720,6 +10740,7 @@ mod tests {
                     defer_persistence: false,
                     verification_tx: None,
                     pre_resolved_relative_path: None,
+        expected_file_name: None,
                 },
                 display_title: "CurseForge".to_string(),
                 display_icon: None,
