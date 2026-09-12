@@ -3951,27 +3951,34 @@ pub async fn install_modpack_with_reporter(
         && content.failed_downloads.is_empty();
     let should_commit = content.manual_downloads.is_empty()
         && (!request.allow_target_change || update_ready);
-    let overrides_written = if should_commit {
-        crate::api::pack::archive_util::run_blocking_instance_write(
-            request.instance_id.clone(),
-            reporter
-                .as_ref()
-                .map(InstallProgressReporter::cancellation_token)
-                .unwrap_or_default(),
-            move |cancellation| {
-                extract_modpack_overrides(
-                    &pack_path,
-                    &instance_path,
-                    Some(cancellation),
-                )
-            },
+    let override_cancellation = reporter
+        .as_ref()
+        .map(InstallProgressReporter::cancellation_token)
+        .unwrap_or_default();
+    let materialized_overrides = if should_commit {
+        Some(
+            crate::api::pack::archive_util::run_blocking_instance_write(
+                request.instance_id.clone(),
+                override_cancellation.clone(),
+                move |cancellation| {
+                    materialize_modpack_overrides(
+                        &pack_path,
+                        &instance_path,
+                        Some(cancellation),
+                    )
+                },
+            )
+            .await?,
         )
-        .await?
     } else {
-        0
+        None
     };
-    if should_commit && !request.allow_target_change {
-        crate::api::instance::edit(
+    let overrides_written = materialized_overrides
+        .as_ref()
+        .map_or(0, |(files_written, _)| *files_written);
+    let post_override_result: crate::Result<()> = async {
+        if should_commit && !request.allow_target_change {
+            crate::api::instance::edit(
             &request.instance_id,
             EditInstance {
                 name: (!request.allow_target_change)
@@ -3994,9 +4001,9 @@ pub async fn install_modpack_with_reporter(
                 }),
                 ..EditInstance::default()
             },
-        )
-        .await?;
-        let content_set = crate::state::instances::adapters::sqlite::content_rows::get_applied_content_set(
+            )
+            .await?;
+            let content_set = crate::state::instances::adapters::sqlite::content_rows::get_applied_content_set(
 			&request.instance_id,
 			&state.pool,
 		)
@@ -4005,24 +4012,63 @@ pub async fn install_modpack_with_reporter(
 			ErrorKind::InputError(
 				"Instance has no applied content set".to_string(),
 			)
-		})?;
-        crate::state::sync_content_files(&request.instance_id, &state).await?;
-        match get_modpack_expected_members(request.project_id, request.file_id)
+			})?;
+            crate::state::sync_content_files(&request.instance_id, &state)
+                .await?;
+            match get_modpack_expected_members(
+                request.project_id,
+                request.file_id,
+            )
             .await
-        {
-            Ok(expected) => {
-                crate::state::instances::commands::reconcile_curseforge_members(
+            {
+                Ok(expected) => {
+                    crate::state::instances::commands::reconcile_curseforge_members(
 					&request.instance_id,
 					&content_set.id,
 					&expected,
 					&state,
 				)
-				.await?;
+					.await?;
+                }
+                Err(error) => tracing::warn!(
+                    "Unable to persist the complete CurseForge pack manifest: {error}"
+                ),
             }
-            Err(error) => tracing::warn!(
-                "Unable to persist the complete CurseForge pack manifest: {error}"
-            ),
         }
+        Ok(())
+    }
+    .await;
+    if let Some((_, replacements)) = materialized_overrides {
+        match post_override_result {
+            Ok(()) => {
+                settle_materialized_modpack_overrides(
+                    request.instance_id.clone(),
+                    override_cancellation,
+                    replacements,
+                    true,
+                )
+                .await?;
+            }
+            Err(error) => {
+                if let Err(rollback_error) =
+                    settle_materialized_modpack_overrides(
+                        request.instance_id.clone(),
+                        override_cancellation,
+                        replacements,
+                        false,
+                    )
+                    .await
+                {
+                    return Err(ErrorKind::OtherError(format!(
+                        "{error}; failed to restore CurseForge overrides: {rollback_error}"
+                    ))
+                    .into());
+                }
+                return Err(error);
+            }
+        }
+    } else {
+        post_override_result?;
     }
     Ok(CurseForgeModpackInstallResult {
         content,
@@ -4420,12 +4466,13 @@ pub async fn install_modpack_from_local_archive_with_reporter(
     let instance_path =
         crate::api::instance::get_full_path(&instance_id).await?;
     let overrides_archive_path = archive_path.clone();
-    let overrides_written =
+    let override_cancellation = reporter.cancellation_token();
+    let (overrides_written, override_replacements) =
         crate::api::pack::archive_util::run_blocking_instance_write(
             instance_id.clone(),
-            reporter.cancellation_token(),
+            override_cancellation.clone(),
             move |cancellation| {
-                extract_modpack_overrides(
+                materialize_modpack_overrides(
                     &overrides_archive_path,
                     &instance_path,
                     Some(cancellation),
@@ -4434,18 +4481,49 @@ pub async fn install_modpack_from_local_archive_with_reporter(
         )
         .await?;
 
-    if let Some(minecraft_install) = minecraft_install {
-        minecraft_install.join().await?;
-    } else {
-        crate::launcher::install_minecraft_for_instance_id_with_reporter(
-            &instance_id,
-            false,
-            Some(reporter.clone()),
-            completion_policy,
-        )
-        .await?;
+    let post_override_result: crate::Result<()> = async {
+        if let Some(minecraft_install) = minecraft_install {
+            minecraft_install.join().await?;
+        } else {
+            crate::launcher::install_minecraft_for_instance_id_with_reporter(
+                &instance_id,
+                false,
+                Some(reporter.clone()),
+                completion_policy,
+            )
+            .await?;
+        }
+        reporter.clear_context().await?;
+        Ok(())
     }
-    reporter.clear_context().await?;
+    .await;
+    match post_override_result {
+        Ok(()) => {
+            settle_materialized_modpack_overrides(
+                instance_id.clone(),
+                override_cancellation,
+                override_replacements,
+                true,
+            )
+            .await?;
+        }
+        Err(error) => {
+            if let Err(rollback_error) = settle_materialized_modpack_overrides(
+                instance_id.clone(),
+                override_cancellation,
+                override_replacements,
+                false,
+            )
+            .await
+            {
+                return Err(ErrorKind::OtherError(format!(
+                    "{error}; failed to restore CurseForge ZIP overrides: {rollback_error}"
+                ))
+                .into());
+            }
+            return Err(error);
+        }
+    }
 
     Ok(CurseForgeModpackInstallResult {
         content,
@@ -5259,11 +5337,14 @@ async fn cache_instance_icon_from_url(
     .await
 }
 
-fn extract_modpack_overrides(
+fn materialize_modpack_overrides(
     archive_path: &Path,
     instance_path: &Path,
     cancellation: Option<&tokio_util::sync::CancellationToken>,
-) -> crate::Result<u32> {
+) -> crate::Result<(
+    u32,
+    crate::api::pack::archive_util::StagedArchiveReplacements,
+)> {
     let file = std::fs::File::open(archive_path)?;
     let mut archive = zip::ZipArchive::new(file).map_err(modpack_zip_error)?;
     let manifest = read_modpack_manifest(&mut archive)?;
@@ -5301,7 +5382,13 @@ fn extract_modpack_overrides(
     drop(archive);
     let tasks = tasks_by_target.into_values().collect::<Vec<_>>();
     if tasks.is_empty() {
-        return Ok(0);
+        return Ok((
+            0,
+            crate::api::pack::archive_util::materialize_staged_archive_entries(
+                &[],
+                cancellation,
+            )?,
+        ));
     }
     let targets = tasks
         .iter()
@@ -5372,11 +5459,11 @@ fn extract_modpack_overrides(
     });
     match extraction_result {
         Ok(files_written) => {
-            crate::api::pack::archive_util::commit_staged_archive_entries(
+            let replacements = crate::api::pack::archive_util::materialize_staged_archive_entries(
                 &targets,
                 cancellation,
             )?;
-            Ok(files_written)
+            Ok((files_written, replacements))
         }
         Err(error) => {
             if let Err(cleanup_error) =
@@ -5392,6 +5479,41 @@ fn extract_modpack_overrides(
             Err(error)
         }
     }
+}
+
+#[cfg(test)]
+fn extract_modpack_overrides(
+    archive_path: &Path,
+    instance_path: &Path,
+    cancellation: Option<&tokio_util::sync::CancellationToken>,
+) -> crate::Result<u32> {
+    let (files_written, replacements) = materialize_modpack_overrides(
+        archive_path,
+        instance_path,
+        cancellation,
+    )?;
+    replacements.finalize()?;
+    Ok(files_written)
+}
+
+async fn settle_materialized_modpack_overrides(
+    instance_id: String,
+    cancellation: CancellationToken,
+    replacements: crate::api::pack::archive_util::StagedArchiveReplacements,
+    commit: bool,
+) -> crate::Result<()> {
+    crate::api::pack::archive_util::run_blocking_instance_write(
+        instance_id,
+        cancellation,
+        move |_| {
+            if commit {
+                replacements.finalize()
+            } else {
+                replacements.rollback()
+            }
+        },
+    )
+    .await
 }
 
 fn read_modpack_manifest<R: Read + Seek>(
@@ -9687,6 +9809,43 @@ mod tests {
         assert!(
             !PathBuf::from(format!("{}.installing.previous", target.display()))
                 .exists()
+        );
+    }
+
+    #[test]
+    fn curseforge_overrides_restore_after_later_stage_failure() {
+        let root = tempfile::tempdir().unwrap();
+        let archive_path = root.path().join("pack.zip");
+        let instance_path = root.path().join("instance");
+        let existing = instance_path.join("config/existing.txt");
+        let created = instance_path.join("config/created.txt");
+        std::fs::create_dir_all(existing.parent().unwrap()).unwrap();
+        std::fs::write(&existing, b"old-existing").unwrap();
+        write_override_test_archive(
+            &archive_path,
+            &[
+                ("config/existing.txt", b"new-existing"),
+                ("config/created.txt", b"new-created"),
+            ],
+        );
+
+        let (written, replacements) =
+            materialize_modpack_overrides(&archive_path, &instance_path, None)
+                .unwrap();
+        assert_eq!(written, 2);
+        assert_eq!(std::fs::read(&existing).unwrap(), b"new-existing");
+        assert_eq!(std::fs::read(&created).unwrap(), b"new-created");
+
+        replacements.rollback().unwrap();
+
+        assert_eq!(std::fs::read(&existing).unwrap(), b"old-existing");
+        assert!(!created.exists());
+        assert!(
+            !PathBuf::from(format!(
+                "{}.installing.previous",
+                existing.display()
+            ))
+            .exists()
         );
     }
 

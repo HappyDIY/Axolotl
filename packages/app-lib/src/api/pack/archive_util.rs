@@ -334,6 +334,7 @@ pub(crate) fn materialize_staged_archive_entries(
 /// batch and immediately finalizes their pre-install backups. Use
 /// [`materialize_staged_archive_entries`] when a later database operation is
 /// the actual commit point.
+#[cfg(test)]
 pub(crate) fn commit_staged_archive_entries(
     targets: &[PathBuf],
     cancellation: Option<&CancellationToken>,
