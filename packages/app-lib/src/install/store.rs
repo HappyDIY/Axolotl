@@ -616,6 +616,7 @@ mod tests {
                 defer_persistence: false,
                 verification_tx: None,
                 pre_resolved_relative_path: None,
+                expected_file_name: None,
             },
             display_title: "CurseForge content".to_string(),
             display_icon: None,
