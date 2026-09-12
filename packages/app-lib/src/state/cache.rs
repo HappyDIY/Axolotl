@@ -1850,13 +1850,23 @@ impl CachedEntry {
             return;
         }
 
-        // SQLite only permits one writer. Coordinate fetched cache refreshes
-        // with modpack content publication so SQLx does not start dozens of
-        // INSERT statements that spend their measured execution time waiting
-        // on the same write lock. Standalone cache tests can run without the
-        // global application state and simply use SQLite's normal locking.
-        let app_state = crate::State::get().await.ok();
+        // SQLite only permits one writer. Fetched API cache data is
+        // reconstructible, so never let it enter the gaps between install
+        // database batches and delay the next content registration. Outside
+        // an active install, coordinate refreshes so SQLx does not start
+        // dozens of INSERT statements waiting on the same write lock.
+        // Standalone cache tests can run without global application state and
+        // simply use SQLite's normal locking.
+        let app_state = crate::State::get_if_initialized();
         let _write_permit = match app_state.as_ref() {
+            Some(state) if !state.install_job_cancellations.is_empty() => {
+                tracing::debug!(
+                    cache_type = ?type_,
+                    entry_count = entries.len(),
+                    "Skipping cache persistence while an install is active"
+                );
+                return;
+            }
             Some(state) => match state.install_db_semaphore.try_acquire() {
                 Ok(permit) => Some(permit),
                 Err(_) => {
