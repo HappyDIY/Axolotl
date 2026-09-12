@@ -722,6 +722,108 @@ pub enum InstanceCompletionPolicy {
     DeferToInstallJob,
 }
 
+/// Serializes the small SQLite mutations performed by Minecraft core setup
+/// with modpack content registration. Network transfers and loader
+/// processors stay outside this guard, and an install cancellation can stop
+/// both the semaphore wait and an in-flight SQL future.
+async fn run_install_database_write<T>(
+    semaphore: &tokio::sync::Semaphore,
+    cancellation: &CancellationToken,
+    operation: impl std::future::Future<Output = crate::Result<T>>,
+) -> crate::Result<T> {
+    let _permit = tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => {
+            return Err(crate::ErrorKind::OtherError(
+                "Minecraft install database write canceled".to_string(),
+            ).into());
+        }
+        permit = semaphore.acquire() => permit.map_err(|_| {
+            crate::ErrorKind::OtherError(
+                "install database semaphore closed".to_string(),
+            )
+        })?,
+    };
+    tokio::select! {
+        biased;
+        _ = cancellation.cancelled() => Err(crate::ErrorKind::OtherError(
+            "Minecraft install database write canceled".to_string(),
+        ).into()),
+        result = operation => result,
+    }
+}
+
+#[cfg(test)]
+mod install_database_write_tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn minecraft_database_operation_starts_only_after_permit() {
+        let semaphore = Semaphore::new(0);
+        let cancellation = CancellationToken::new();
+        let operation_polled = Arc::new(AtomicBool::new(false));
+        let operation_flag = Arc::clone(&operation_polled);
+
+        let result = tokio::time::timeout(
+            Duration::from_millis(50),
+            run_install_database_write(&semaphore, &cancellation, async move {
+                operation_flag.store(true, Ordering::SeqCst);
+                Ok::<(), crate::Error>(())
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(!operation_polled.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn minecraft_database_wait_is_cancelable() {
+        let semaphore = Semaphore::new(0);
+        let cancellation = CancellationToken::new();
+        let trigger = cancellation.clone();
+        let cancel_task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            trigger.cancel();
+        });
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(100),
+            run_install_database_write(&semaphore, &cancellation, async {
+                Ok::<(), crate::Error>(())
+            }),
+        )
+        .await
+        .expect("database semaphore wait should stop on cancellation")
+        .unwrap_err();
+        cancel_task.await.unwrap();
+
+        assert!(error.to_string().contains("canceled"));
+    }
+
+    #[tokio::test]
+    async fn minecraft_database_operation_runs_with_permit() {
+        let semaphore = Semaphore::new(1);
+        let cancellation = CancellationToken::new();
+        let operation_polled = Arc::new(AtomicBool::new(false));
+        let operation_flag = Arc::clone(&operation_polled);
+
+        run_install_database_write(&semaphore, &cancellation, async move {
+            operation_flag.store(true, Ordering::SeqCst);
+            Ok::<(), crate::Error>(())
+        })
+        .await
+        .unwrap();
+
+        assert!(operation_polled.load(Ordering::SeqCst));
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+}
+
 pub(crate) async fn run_instance_install_command(
     instance_id: String,
     cancellation: CancellationToken,
@@ -833,11 +935,19 @@ async fn install_minecraft_with_local_source(
     };
 
     let state = State::get().await?;
+    let database_cancellation = reporter
+        .as_ref()
+        .map(InstallProgressReporter::cancellation_token)
+        .unwrap_or_default();
 
-    crate::state::instances::commands::set_instance_install_stage(
-        &instance.id,
-        InstanceInstallStage::MinecraftInstalling,
-        &state.pool,
+    run_install_database_write(
+        &state.install_db_semaphore,
+        &database_cancellation,
+        crate::state::instances::commands::set_instance_install_stage(
+            &instance.id,
+            InstanceInstallStage::MinecraftInstalling,
+            &state.pool,
+        ),
     )
     .await?;
     emit_instance(&instance.id, InstancePayloadType::Edited).await?;
@@ -900,10 +1010,14 @@ async fn install_minecraft_with_local_source(
         )
         .await?;
 
-        crate::state::instances::commands::set_applied_content_set_loader_version(
-            &instance.id,
-            loader_version.as_ref().map(|x| x.id.as_str()),
-            &state.pool,
+        run_install_database_write(
+            &state.install_db_semaphore,
+            &database_cancellation,
+            crate::state::instances::commands::set_applied_content_set_loader_version(
+                &instance.id,
+                loader_version.as_ref().map(|x| x.id.as_str()),
+                &state.pool,
+            ),
         )
         .await?;
     }
@@ -990,7 +1104,12 @@ async fn install_minecraft_with_local_source(
         validate_loader_java_version(&version_info, &java_version)?;
 
         if set_java {
-            java_version.upsert(&state.pool).await?;
+            run_install_database_write(
+                &state.install_db_semaphore,
+                &database_cancellation,
+                java_version.upsert(&state.pool),
+            )
+            .await?;
         }
 
         Some(java_version)
@@ -1057,18 +1176,31 @@ async fn install_minecraft_with_local_source(
     let Some(java_version) = java_version else {
         let protocol_version =
             read_protocol_version_from_jar(client_path).await?;
-        crate::state::instances::commands::set_applied_content_set_protocol_version(
-            &instance.id,
-            protocol_version,
-            &state.pool,
+        run_install_database_write(
+            &state.install_db_semaphore,
+            &database_cancellation,
+            crate::state::instances::commands::set_applied_content_set_protocol_version(
+                &instance.id,
+                protocol_version,
+                &state.pool,
+            ),
         )
         .await?;
-        promote_external_instance_link(instance, &state).await?;
+        run_install_database_write(
+            &state.install_db_semaphore,
+            &database_cancellation,
+            promote_external_instance_link(instance, &state),
+        )
+        .await?;
         if completion_policy == InstanceCompletionPolicy::FinalizeHere {
-            crate::state::instances::commands::set_instance_install_stage(
-                &instance.id,
-                InstanceInstallStage::Installed,
-                &state.pool,
+            run_install_database_write(
+                &state.install_db_semaphore,
+                &database_cancellation,
+                crate::state::instances::commands::set_instance_install_stage(
+                    &instance.id,
+                    InstanceInstallStage::Installed,
+                    &state.pool,
+                ),
             )
             .await?;
             emit_instance(&instance.id, InstancePayloadType::Edited).await?;
@@ -1311,18 +1443,31 @@ async fn install_minecraft_with_local_source(
 
     let protocol_version = read_protocol_version_from_jar(client_path).await?;
 
-    crate::state::instances::commands::set_applied_content_set_protocol_version(
-        &instance.id,
-        protocol_version,
-        &state.pool,
+    run_install_database_write(
+        &state.install_db_semaphore,
+        &database_cancellation,
+        crate::state::instances::commands::set_applied_content_set_protocol_version(
+            &instance.id,
+            protocol_version,
+            &state.pool,
+        ),
     )
     .await?;
-    promote_external_instance_link(instance, &state).await?;
+    run_install_database_write(
+        &state.install_db_semaphore,
+        &database_cancellation,
+        promote_external_instance_link(instance, &state),
+    )
+    .await?;
     if completion_policy == InstanceCompletionPolicy::FinalizeHere {
-        crate::state::instances::commands::set_instance_install_stage(
-            &instance.id,
-            InstanceInstallStage::Installed,
-            &state.pool,
+        run_install_database_write(
+            &state.install_db_semaphore,
+            &database_cancellation,
+            crate::state::instances::commands::set_instance_install_stage(
+                &instance.id,
+                InstanceInstallStage::Installed,
+                &state.pool,
+            ),
         )
         .await?;
         emit_instance(&instance.id, InstancePayloadType::Edited).await?;
