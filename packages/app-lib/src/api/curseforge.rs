@@ -65,6 +65,8 @@ const MODPACK_METADATA_CONCURRENCY: usize = 4;
 const MODPACK_VERIFICATION_CONCURRENCY: usize = 4;
 const MODPACK_DATABASE_BATCH_SIZE: usize = 25;
 const MODPACK_DATABASE_FLUSH_INTERVAL: Duration = Duration::from_millis(500);
+const MODPACK_VERIFICATION_QUEUE_CAPACITY: usize = 128;
+const MODPACK_DATABASE_QUEUE_CAPACITY: usize = 128;
 const DEPENDENCY_RELATION_EMBEDDED: u32 = 1;
 const DEPENDENCY_RELATION_OPTIONAL: u32 = 2;
 pub(crate) const DEPENDENCY_RELATION_REQUIRED: u32 = 3;
@@ -3678,10 +3680,13 @@ pub async fn install_modpack_with_reporter(
         .as_ref()
         .map(InstallProgressReporter::cancellation_token)
         .unwrap_or_default();
-    // Keep the queue bounded, but large enough to accept every manifest item
-    // without making download futures wait behind slow verification/SQLite.
+    // Keep pipeline memory and staged-file growth bounded independently of
+    // the manifest size. The buffer absorbs normal verifier/SQLite jitter;
+    // sustained downstream pressure intentionally reaches the producers.
     let (verification_tx, verification_rx) =
-        mpsc::channel::<CurseForgeVerificationTask>(total_files.max(128));
+        mpsc::channel::<CurseForgeVerificationTask>(
+            MODPACK_VERIFICATION_QUEUE_CAPACITY,
+        );
     let verification_context = CurseForgeVerificationContext {
         reporter: reporter.clone(),
         loading_bar: loading_bar.clone(),
@@ -3693,8 +3698,9 @@ pub async fn install_modpack_with_reporter(
         total_bytes: content_total_bytes,
         cancellation: cancellation.clone(),
     };
-    let (database_tx, database_rx) =
-        mpsc::channel::<CurseForgeDatabaseTask>(total_files.max(128));
+    let (database_tx, database_rx) = mpsc::channel::<CurseForgeDatabaseTask>(
+        MODPACK_DATABASE_QUEUE_CAPACITY,
+    );
     let database_worker = spawn_curseforge_database_worker(
         database_rx,
         verification_context.clone(),
@@ -4648,7 +4654,9 @@ pub(crate) async fn install_local_manifest_files(
     let active_downloads = Arc::new(AtomicU64::new(0));
     let cancellation = reporter.cancellation_token();
     let (verification_tx, verification_rx) =
-        mpsc::channel::<CurseForgeVerificationTask>(total_files.max(128));
+        mpsc::channel::<CurseForgeVerificationTask>(
+            MODPACK_VERIFICATION_QUEUE_CAPACITY,
+        );
     let verification_context = CurseForgeVerificationContext {
         reporter: Some(reporter.clone()),
         loading_bar: None,
@@ -4660,8 +4668,9 @@ pub(crate) async fn install_local_manifest_files(
         total_bytes: content_total_bytes,
         cancellation: cancellation.clone(),
     };
-    let (database_tx, database_rx) =
-        mpsc::channel::<CurseForgeDatabaseTask>(total_files.max(128));
+    let (database_tx, database_rx) = mpsc::channel::<CurseForgeDatabaseTask>(
+        MODPACK_DATABASE_QUEUE_CAPACITY,
+    );
     let database_worker = spawn_curseforge_database_worker(
         database_rx,
         verification_context.clone(),
